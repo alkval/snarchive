@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "npm run typecheck && npm test",
-    "test:native-prototype": "node scripts/test-native-prototype.mjs"
+    "test:native-prototype": "node scripts/test-native-prototype.mjs",
+    "test:apple-prototype": "node scripts/test-apple-prototype.mjs",
+    "fixtures:inventory": "node scripts/generate-inventory-fixture.mjs"
   },
   "dependencies": {
     "expo": "~58.0.13",

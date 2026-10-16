@@ -1,0 +1,5 @@
+{
+  "platforms": ["android", "apple"],
+  "android": { "modules": ["com.alkval.snarchive.sources.SnarchiveSourcesModule"] },
+  "apple": { "modules": ["SnarchiveSourcesModule"] }
+}

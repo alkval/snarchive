@@ -64,6 +64,7 @@ export function buildInventory(files: readonly FileCandidate[], results: readonl
     summary: {
       mediaPresent: entries.filter(entry => entry.availability === 'media-present').length,
       missingMedia: entries.filter(entry => entry.media.length === 0).length,
+      metadataOnly: entries.filter(entry => entry.availability === 'metadata-only').length,
       orphanOverlays: entries.filter(entry => entry.availability === 'orphan-overlay').length,
       needsResolution: entries.filter(entry => entry.issues.length > 0).length,
       unmatchedMetadata: unmatchedMetadata.length,

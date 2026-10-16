@@ -101,3 +101,9 @@ test('type and location disagreements are reported', () => {
 test('distinct source IDs stay separate even when other metadata is identical', () => {
   assert.equal(buildInventory([file('snap-A'), file('snap-B')], [metadata([row('snap-A'), row('snap-B')])]).memories.length, 2);
 });
+
+test('UTF-8 BOM does not make an otherwise valid metadata document unsupported', () => {
+  const result = parseMetadata('\uFEFF' + JSON.stringify({ 'Saved Media': [row()] }), 'part');
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0]?.memorySourceId, 'snap-A');
+});

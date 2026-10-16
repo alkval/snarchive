@@ -54,7 +54,7 @@ export function parseMetadata(text: string, sourceId: string): MetadataResult {
   const issue = (code: DiagnosticCode, row?: number) => result.diagnostics.push({ code, sourceId, ...(row === undefined ? {} : { row }) });
   if (text.length > MAX_TEXT_CHARS) { issue('metadata-limit'); return result; }
   let input: unknown;
-  try { input = JSON.parse(text); } catch { issue('invalid-json'); return result; }
+  try { input = JSON.parse(text.startsWith('\uFEFF') ? text.slice(1) : text); } catch { issue('invalid-json'); return result; }
   if (!object(input) || !Array.isArray(input['Saved Media'])) { issue('unsupported-format'); return result; }
   const rows = input['Saved Media'];
   if (rows.length > MAX_ROWS) { issue('metadata-limit'); return result; }
