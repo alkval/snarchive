@@ -1,0 +1,33 @@
+# Dependencies and build products
+node_modules/
+.expo/
+dist/
+build/
+coverage/
+*.apk
+*.aab
+*.ipa
+
+# Local configuration and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+local.properties
+credentials.json
+
+# Private inputs and local work. Keep only synthetic fixtures in tracked tests.
+private/
+exports/
+backups/
+work/
+*.zip
+*.log
+.DS_Store
+
+# Generated native projects; regenerate with Expo prebuild
+/android/
+/ios/

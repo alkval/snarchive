@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Snarchive",
+    "slug": "snarchive",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "platforms": [
+      "android",
+      "ios"
+    ],
+    "updates": {
+      "enabled": false
+    },
+    "ios": {
+      "bundleIdentifier": "com.alkval.snarchive",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.alkval.snarchive",
+      "allowBackup": false
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}
