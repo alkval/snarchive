@@ -4,6 +4,7 @@ import { buildInventory } from './inventory.ts';
 import { parseMetadata, type MetadataResult } from './metadata.ts';
 
 export type DirectorySnapshot = {
+  archiveSha256?: string;
   entries: { path: string; metadataText?: string }[];
   metadataBytes: number;
   visitedEntries: number;

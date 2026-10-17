@@ -5,6 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
 import { scanDirectory, scanArchive, cancelDirectoryScan } from './src/platform/directoryScanner';
 import { InventoryReport } from './src/ui/InventoryReport';
+import { sourceIdentity } from './src/import/sourceIdentity';
 import { en } from './src/i18n/en';
 import { sourcePicker } from './src/platform/sourcePicker';
 
@@ -36,10 +37,11 @@ export default function App() {
         setMessage(en.scanning);
         const snapshot = selected.kind === 'zip' ? await scanArchive(selected.uri) : await scanDirectory(selected.uri);
         if (!mounted.current || stopped.current) { if (mounted.current) setMessage(en.cancelled); return; }
-        const id = nextIds.get(selected.uri) ?? `source-${nextIds.size + 1}`;
+        const key = sourceIdentity(selected, snapshot);
+        const id = nextIds.get(key) ?? `source-${nextIds.size + 1}`;
         const source = inventoryFromSnapshot(snapshot, id);
         next = mergeSourceInventories(next?.sources ?? [], source);
-        nextIds.set(selected.uri, id);
+        nextIds.set(key, id);
       }
       if (next) {
         sourceIds.current = nextIds;

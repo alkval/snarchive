@@ -19,7 +19,8 @@
     "test:native-prototype": "node scripts/test-native-prototype.mjs",
     "test:apple-prototype": "node scripts/test-apple-prototype.mjs",
     "fixtures:inventory": "node scripts/generate-inventory-fixture.mjs",
-    "test:zip-engine": "node scripts/test-zip-engine.mjs"
+    "test:zip-engine": "node scripts/test-zip-engine.mjs",
+    "prepare:preview": "node scripts/prepare-local-preview.mjs"
   },
   "dependencies": {
     "expo": "~58.0.13",

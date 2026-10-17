@@ -3,6 +3,7 @@ package com.alkval.snarchive.sources
 import android.net.Uri
 import android.os.StatFs
 import java.io.File
+import java.security.MessageDigest
 import java.io.FileOutputStream
 import com.alkval.snarchive.sources.zip.ZipInventory
 import android.provider.DocumentsContract
@@ -34,6 +35,7 @@ class SnarchiveSourcesModule : Module() {
         val uri = Uri.parse(uriString)
         require(uri.scheme == "content" || uri.scheme == "file")
         var copied = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
         requireNotNull(context.contentResolver.openInputStream(uri)).use { input ->
           FileOutputStream(staged).use { output ->
             val buffer = ByteArray(65536)
@@ -43,12 +45,14 @@ class SnarchiveSourcesModule : Module() {
               if (n == -1) break
               check(!cancelled.get() && n > 0 && n <= 32L * 1024 * 1024 * 1024 - copied)
               if (StatFs(root.path).availableBytes < 64L * 1024 * 1024 + n) throw IllegalStateException("insufficient-storage")
-              output.write(buffer, 0, n); copied += n
+              output.write(buffer, 0, n); digest.update(buffer, 0, n); copied += n
             }
             output.fd.sync()
           }
         }
-        ZipInventory.scan(staged) { cancelled.get() }
+        ZipInventory.scan(staged) { cancelled.get() }.toMutableMap().apply {
+          put("archiveSha256", digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) })
+        }
       } catch (error: Exception) {
         mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else if (error.message == "insufficient-storage") "insufficient-storage" else "unsafe-or-unsupported-zip")
       } finally { staged?.delete(); busy.set(false) }
