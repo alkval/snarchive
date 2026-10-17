@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'r
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
-import { scanDirectory, cancelDirectoryScan } from './src/platform/directoryScanner';
+import { scanDirectory, scanArchive, cancelDirectoryScan } from './src/platform/directoryScanner';
 import { InventoryReport } from './src/ui/InventoryReport';
 import { en } from './src/i18n/en';
 import { sourcePicker } from './src/platform/sourcePicker';
@@ -30,22 +30,25 @@ export default function App() {
       const sources = kind === 'zip' ? await sourcePicker.selectArchives() : [await sourcePicker.selectDirectory()];
       if (!mounted.current || stopped.current) { if (mounted.current) setMessage(en.cancelled); return; }
       if (sources.length === 0) { setMessage(en.pickerClosed); return; }
-      if (sources.length > 0) {
-        if (kind === 'zip') { setMessage(en.zipPending); return; }
-        const uri = sources[0]!.uri;
+      const nextIds = new Map(sourceIds.current);
+      let next = preview;
+      for (const selected of sources) {
         setMessage(en.scanning);
-        const snapshot = await scanDirectory(uri);
+        const snapshot = selected.kind === 'zip' ? await scanArchive(selected.uri) : await scanDirectory(selected.uri);
         if (!mounted.current || stopped.current) { if (mounted.current) setMessage(en.cancelled); return; }
-        const id = sourceIds.current.get(uri) ?? `source-${sourceIds.current.size + 1}`;
+        const id = nextIds.get(selected.uri) ?? `source-${nextIds.size + 1}`;
         const source = inventoryFromSnapshot(snapshot, id);
-        const next = mergeSourceInventories(preview?.sources ?? [], source);
-        sourceIds.current.set(uri, id);
+        next = mergeSourceInventories(next?.sources ?? [], source);
+        nextIds.set(selected.uri, id);
+      }
+      if (next) {
+        sourceIds.current = nextIds;
         setPreview(next);
         setMessage(en.selected(next.sources.length));
       }
     } catch (error) {
       // Native errors can contain personal paths. Do not log or display their payloads.
-      if (mounted.current) setMessage(stopped.current ? en.cancelled : error instanceof Error && error.message === 'native-build-required' ? en.nativeRequired : en.failed);
+      if (mounted.current) setMessage(stopped.current ? en.cancelled : error instanceof Error && error.message === 'native-build-required' ? en.nativeRequired : error instanceof Error && error.message === 'zip-unavailable-ios' ? en.zipIos : error instanceof Error && error.message === 'insufficient-storage' ? en.storage : error instanceof Error && error.message === 'unsafe-or-unsupported-zip' ? en.zipFailed : en.failed);
     } finally {
       picking.current = false;
       if (mounted.current) setBusy(false);
@@ -61,6 +64,7 @@ export default function App() {
           <View style={styles.section}>
             <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.heading}</Text>
             <Text style={[styles.body, { color: colors.muted }]}>{en.explanation}</Text>
+            <Text style={[styles.body, { color: colors.muted }]}>{en.zipNote}</Text>
             {(['zip', 'directory'] as const).map((kind) => (
               <Pressable key={kind} accessibilityRole="button" accessibilityState={{ disabled: busy }} disabled={busy}
                 onPress={() => void pick(kind)} style={({ pressed }) => [styles.button, { backgroundColor: colors.button, opacity: pressed || busy ? 0.6 : 1 }]}>

@@ -1,6 +1,10 @@
 package com.alkval.snarchive.sources
 
 import android.net.Uri
+import android.os.StatFs
+import java.io.File
+import java.io.FileOutputStream
+import com.alkval.snarchive.sources.zip.ZipInventory
 import android.provider.DocumentsContract
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -16,6 +20,39 @@ class SnarchiveSourcesModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("SnarchiveSources")
     Function("cancel") { cancelled.set(true) }
+    AsyncFunction("scanArchive") { uriString: String ->
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      var staged: File? = null
+      try {
+        val context = requireNotNull(appContext.reactContext)
+        val root = File(context.cacheDir, "snarchive-zip-preview")
+        check(root.isDirectory || root.mkdirs())
+        // One native operation at a time. Remove only this scanner's abandoned staging files.
+        root.listFiles()?.filter { it.name.startsWith("preview-") && it.name.endsWith(".part") }?.forEach { check(it.delete()) }
+        staged = File.createTempFile("preview-", ".part", root)
+        val uri = Uri.parse(uriString)
+        require(uri.scheme == "content" || uri.scheme == "file")
+        var copied = 0L
+        requireNotNull(context.contentResolver.openInputStream(uri)).use { input ->
+          FileOutputStream(staged).use { output ->
+            val buffer = ByteArray(65536)
+            while (true) {
+              check(!cancelled.get())
+              val n = input.read(buffer)
+              if (n == -1) break
+              check(!cancelled.get() && n > 0 && n <= 32L * 1024 * 1024 * 1024 - copied)
+              if (StatFs(root.path).availableBytes < 64L * 1024 * 1024 + n) throw IllegalStateException("insufficient-storage")
+              output.write(buffer, 0, n); copied += n
+            }
+            output.fd.sync()
+          }
+        }
+        ZipInventory.scan(staged) { cancelled.get() }
+      } catch (error: Exception) {
+        mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else if (error.message == "insufficient-storage") "insufficient-storage" else "unsafe-or-unsupported-zip")
+      } finally { staged?.delete(); busy.set(false) }
+    }
     AsyncFunction("scanDirectory") { uriString: String ->
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)

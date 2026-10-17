@@ -8,3 +8,5 @@ android {
   namespace 'com.alkval.snarchive.sources'
   defaultConfig { versionCode 1; versionName '0.1.0' }
 }
+
+dependencies { implementation 'net.lingala.zip4j:zip4j:2.11.6' }
