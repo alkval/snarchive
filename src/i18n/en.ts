@@ -1,5 +1,12 @@
 export const en = {
   title: 'Snarchive',
+  loading: 'Opening saved preview…',
+  saving: 'Saving preview on this device…',
+  restored: 'Your saved preview has been restored. No media have been imported.',
+  savedNote: 'This inventory is saved on this device. Source files may have changed; select them again to refresh it. This is not a media backup.',
+  loadFailed: 'The saved preview could not be opened. Scanning is paused to avoid replacing it. Retry to open it again.',
+  saveFailed: 'The new preview could not be saved. Your previous saved preview has been kept.',
+  retry: 'Retry opening preview',
   promise: 'Your memories, yours to keep.',
   heading: 'Start with your export',
   explanation: 'Choose Snapchat export ZIPs or an extracted folder from your phone.',
@@ -21,6 +28,6 @@ export const en = {
   report: { folders: 'Sources scanned', media: 'Memories with media filenames', metadataOnly: 'Metadata entries without media or overlay', orphan: 'Overlay-only memories', conflicts: 'Memories needing conflict review', unmatched: 'Metadata rows without a usable ID', repeated: 'Repeated metadata rows', warnings: 'Metadata warnings', other: 'Other files skipped' },
   previewNote: 'Filenames and metadata only. Original media have not been validated or saved to your library.',
   empty: 'No source selected.',
-  selected: (count: number) => `${count} ${count === 1 ? 'source selected' : 'sources selected'}. Nothing has been imported.`,
+  selected: (count: number) => `${count} ${count === 1 ? 'source selected' : 'sources selected'}. Preview saved. Nothing has been imported.`,
   pickerClosed: 'No source was added. The picker was closed or access was unavailable.',
 };
