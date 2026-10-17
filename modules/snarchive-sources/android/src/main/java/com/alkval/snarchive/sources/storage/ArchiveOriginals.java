@@ -23,5 +23,13 @@ public final class ArchiveOriginals implements AutoCloseable {
     if (header == null || !header.getFileName().equals(path) || header.isDirectory()) throw new IOException("missing-entry");
     return store.put(archive.getInputStream(header), header.getUncompressedSize(), header.getCrc(), budget, stop);
   }
+  public long totalOriginalBytes() throws IOException {
+    long total = 0;
+    for (FileHeader header : archive.getFileHeaders()) {
+      String name = header.getFileName(); String base = name.substring(name.lastIndexOf('/') + 1);
+      if (base.matches("(?i)\\d{4}-\\d{2}-\\d{2}_[A-Za-z0-9_-]+-(?:main\\.(?:jpg|jpeg|mp4)|overlay\\.png)")) total += header.getUncompressedSize();
+    }
+    return total;
+  }
   @Override public void close() throws IOException { archive.close(); }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
+import { Platform, Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
@@ -9,6 +9,9 @@ import { sourceIdentity } from './src/import/sourceIdentity';
 import { en } from './src/i18n/en';
 import { openPreviewStore } from './src/platform/previewDatabase';
 import type { PreviewStore } from './src/storage/previewStore';
+import { openImportStore, originalCopier } from './src/platform/originalImporter';
+import { runImport } from './src/import/runImport';
+import type { ImportStore, ImportSummary } from './src/storage/importStore';
 import { sourcePicker } from './src/platform/sourcePicker';
 
 export default function App() {
@@ -22,6 +25,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(en.loading);
   const [preview, setPreview] = useState<InventoryPreview | null>(null);
+  const library = useRef<ImportStore | null>(null);
+  const [librarySummary, setLibrarySummary] = useState<ImportSummary | null>(null);
   const sourceIds = useRef(new Map<string, string>());
   const stopped = useRef(false);
   const mounted = useRef(true);
@@ -34,8 +39,12 @@ export default function App() {
       try {
         const database = await openPreviewStore();
         const saved = await database.load();
+        const imports = await openImportStore();
+        const summary = await imports.summary();
         if (!active) return;
         store.current = database;
+        library.current = imports;
+        setLibrarySummary(summary);
         sourceIds.current = saved?.sourceIds ?? new Map();
         setPreview(saved?.preview ?? null);
         setMessage(saved ? en.restored : en.empty);
@@ -88,6 +97,31 @@ export default function App() {
       if (mounted.current) { setBusy(false); setSaving(false); }
     }
   }
+  async function preserve(hash: string, sourceId: string) {
+    if (picking.current || !ready || !library.current) return;
+    const source = preview?.sources.find(item => item.sourceId === sourceId);
+    if (!source) return;
+    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.importPick);
+    try {
+      const selected = await sourcePicker.selectArchives();
+      if (stopped.current || !mounted.current) return;
+      if (selected.length === 0) { setMessage(en.pickerClosed); return; }
+      if (selected.length !== 1) { setMessage(en.importOne); return; }
+      await library.current.plan(hash, source);
+      await runImport(library.current, originalCopier, hash, selected[0]!.uri, () => stopped.current,
+        count => { if (mounted.current) setMessage(en.importProgress(count)); });
+      if (mounted.current) setMessage(en.importComplete);
+    } catch (error) {
+      if (mounted.current) setMessage(error instanceof Error && error.message === 'source-changed' ? en.importChanged
+        : error instanceof Error && error.message === 'native-build-required' ? en.nativeRequired
+        : error instanceof Error && error.message === 'insufficient-storage' ? en.importStorage
+        : error instanceof Error && error.message === 'stored-object-corrupt' ? en.importCorrupt : en.importPaused);
+    } finally {
+      try { const summary = await library.current.summary(); if (mounted.current) setLibrarySummary(summary); }
+      catch { if (mounted.current) setMessage(en.importPaused); }
+      picking.current = false; if (mounted.current) setBusy(false);
+    }
+  }
   return (
     <SafeAreaProvider>
       <SafeAreaView style={[styles.root, { backgroundColor: colors.background }]}>
@@ -114,6 +148,18 @@ export default function App() {
             </Pressable>}
             {preview && <Text style={[styles.body, { color: colors.muted }]}>{en.savedNote}</Text>}
             {preview && <InventoryReport preview={preview} color={colors.text} />}
+            {librarySummary && <View style={styles.section}>
+              <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.originals}</Text>
+              {busy && <Text style={[styles.body, { color: colors.text }]}>{message}</Text>}
+              <Text style={[styles.body, { color: colors.text }]}>{en.libraryCounts(librarySummary.files, librarySummary.objects, librarySummary.memories, librarySummary.unfinished, librarySummary.conflicts)}</Text>
+              <Text style={[styles.body, { color: colors.muted }]}>{en.importNote}</Text>
+              {Platform.OS === 'android' ? [...sourceIds.current].filter(([key]) => key.startsWith('zip:')).map(([key, id]) => (
+                <Pressable key={key} accessibilityRole="button" disabled={busy || !ready} accessibilityState={{ disabled: busy || !ready }}
+                  onPress={() => void preserve(key.slice(4), id)} style={[styles.button, { backgroundColor: colors.button, opacity: busy || !ready ? 0.6 : 1 }]}>
+                  <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.importZip(id)}</Text>
+                </Pressable>
+              )) : <Text style={[styles.body, { color: colors.muted }]}>{en.importIos}</Text>}
+            </View>}
             <Text style={[styles.body, { color: colors.muted }]}>{en.prototype}</Text>
           </View>
         </ScrollView>

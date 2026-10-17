@@ -5,6 +5,8 @@ import android.os.StatFs
 import java.io.File
 import java.security.MessageDigest
 import java.io.FileOutputStream
+import com.alkval.snarchive.sources.storage.OriginalStore
+import com.alkval.snarchive.sources.storage.ArchiveOriginals
 import com.alkval.snarchive.sources.zip.ZipInventory
 import android.provider.DocumentsContract
 import expo.modules.kotlin.modules.Module
@@ -18,47 +20,70 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SnarchiveSourcesModule : Module() {
   private val busy = AtomicBoolean(false)
   private val cancelled = AtomicBoolean(false)
+  private var importArchive: ArchiveOriginals? = null
+  private var importFile: File? = null
+  private var importBudget: OriginalStore.Budget? = null
+  private fun originals(): OriginalStore = OriginalStore(File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals"))
   override fun definition() = ModuleDefinition {
     Name("SnarchiveSources")
     Function("cancel") { cancelled.set(true) }
     AsyncFunction("scanArchive") { uriString: String ->
-      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       var staged: File? = null
       try {
-        val context = requireNotNull(appContext.reactContext)
-        val root = File(context.cacheDir, "snarchive-zip-preview")
-        check(root.isDirectory || root.mkdirs())
-        // One native operation at a time. Remove only this scanner's abandoned staging files.
-        root.listFiles()?.filter { it.name.startsWith("preview-") && it.name.endsWith(".part") }?.forEach { check(it.delete()) }
-        staged = File.createTempFile("preview-", ".part", root)
-        val uri = Uri.parse(uriString)
-        require(uri.scheme == "content" || uri.scheme == "file")
-        var copied = 0L
-        val digest = MessageDigest.getInstance("SHA-256")
-        requireNotNull(context.contentResolver.openInputStream(uri)).use { input ->
-          FileOutputStream(staged).use { output ->
-            val buffer = ByteArray(65536)
-            while (true) {
-              check(!cancelled.get())
-              val n = input.read(buffer)
-              if (n == -1) break
-              check(!cancelled.get() && n > 0 && n <= 32L * 1024 * 1024 * 1024 - copied)
-              if (StatFs(root.path).availableBytes < 64L * 1024 * 1024 + n) throw IllegalStateException("insufficient-storage")
-              output.write(buffer, 0, n); digest.update(buffer, 0, n); copied += n
-            }
-            output.fd.sync()
-          }
-        }
-        ZipInventory.scan(staged) { cancelled.get() }.toMutableMap().apply {
-          put("archiveSha256", digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) })
-        }
+        val copy = stageArchive(uriString)
+        staged = copy.first
+        ZipInventory.scan(staged) { cancelled.get() }.toMutableMap().apply { put("archiveSha256", copy.second) }
       } catch (error: Exception) {
         mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else if (error.message == "insufficient-storage") "insufficient-storage" else "unsafe-or-unsupported-zip")
       } finally { staged?.delete(); busy.set(false) }
     }
-    AsyncFunction("scanDirectory") { uriString: String ->
+    AsyncFunction("openImportArchive") { uri: String, hash: String, remaining: Double ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      var staged: File? = null
+      var archive: ArchiveOriginals? = null
+      try {
+        require(hash.matches(Regex("[a-f0-9]{64}")))
+        require(remaining.isFinite() && remaining >= 0 && remaining <= 64L * 1024 * 1024 * 1024 && remaining % 1.0 == 0.0)
+        val copy = stageArchive(uri); staged = copy.first
+        check(copy.second == hash) { "source-changed" }
+        val store = originals(); store.recoverStaging()
+        archive = ArchiveOriginals(staged) { cancelled.get() }
+        val bytes = archive.totalOriginalBytes()
+        // Archive copy already exists. Completed items are verified on resume; reserve for pending bytes.
+        val pendingBytes = maxOf(0L, bytes - (64L * 1024 * 1024 * 1024 - remaining.toLong()))
+        if (StatFs(requireNotNull(appContext.reactContext).filesDir.path).availableBytes < pendingBytes + OriginalStore.RESERVE) throw IllegalStateException("insufficient-storage")
+        importArchive = archive; importFile = staged; importBudget = OriginalStore.Budget(remaining.toLong())
+        mapOf("ok" to true)
+      } catch (error: Exception) {
+        runCatching { archive?.close() }; staged?.delete(); importError(error)
+      } finally { busy.set(false) }
+    }
+    AsyncFunction("preserveImportEntry") { path: String ->
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try {
+        val result = requireNotNull(importArchive).preserve(path, originals(), requireNotNull(importBudget)) { cancelled.get() }
+        mapOf("ok" to true, "sha256" to result.sha256, "relativePath" to result.relativePath, "bytes" to result.bytes)
+      } catch (error: Exception) { importError(error) } finally { busy.set(false) }
+    }
+    AsyncFunction("verifyOriginal") { hash: String, bytes: Double ->
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try {
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        originals().verify(hash, bytes.toLong()) { cancelled.get() }
+        mapOf("ok" to true)
+      } catch (error: Exception) { importError(error) } finally { busy.set(false) }
+    }
+    AsyncFunction("closeImportArchive") {
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try { importArchive?.close(); mapOf("ok" to true) }
+      catch (error: Exception) { importError(error) }
+      finally { importArchive = null; importBudget = null; importFile?.delete(); importFile = null; busy.set(false) }
+    }
+    AsyncFunction("scanDirectory") { uriString: String ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       try {
         scan(Uri.parse(uriString))
@@ -67,6 +92,38 @@ class SnarchiveSourcesModule : Module() {
         mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else "unreadable-or-limit")
       } finally { busy.set(false) }
     }
+  }
+
+  private fun importError(error: Exception): Map<String, Any> {
+    val code = if (cancelled.get()) "cancelled" else when (error.message) {
+      "source-changed", "insufficient-storage", "stored-object-corrupt" -> error.message!!
+      else -> "import-failed"
+    }
+    return mapOf("ok" to false, "code" to code)
+  }
+  private fun stageArchive(uriString: String): Pair<File, String> {
+    val context = requireNotNull(appContext.reactContext)
+    val root = File(context.cacheDir, "snarchive-zip-preview")
+    check(root.isDirectory || root.mkdirs())
+    root.listFiles()?.filter { it.name.startsWith("preview-") && it.name.endsWith(".part") }?.forEach { check(it.delete()) }
+    val staged = File.createTempFile("preview-", ".part", root)
+    try {
+      val uri = Uri.parse(uriString); require(uri.scheme == "content" || uri.scheme == "file")
+      var copied = 0L; val digest = MessageDigest.getInstance("SHA-256")
+      requireNotNull(context.contentResolver.openInputStream(uri)).use { input ->
+        FileOutputStream(staged).use { output ->
+          val buffer = ByteArray(65536)
+          while (true) {
+            check(!cancelled.get()); val n = input.read(buffer); if (n == -1) break
+            check(!cancelled.get() && n > 0 && n <= 32L * 1024 * 1024 * 1024 - copied)
+            if (StatFs(root.path).availableBytes < 64L * 1024 * 1024 + n) throw IllegalStateException("insufficient-storage")
+            output.write(buffer, 0, n); digest.update(buffer, 0, n); copied += n
+          }
+          output.fd.sync()
+        }
+      }
+      return staged to digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
+    } catch (error: Exception) { staged.delete(); throw error }
   }
 
   private fun scan(root: Uri): Map<String, Any> {

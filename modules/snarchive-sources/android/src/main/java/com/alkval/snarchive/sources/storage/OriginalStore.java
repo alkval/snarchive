@@ -132,6 +132,11 @@ public final class OriginalStore {
     }
   }
 
+  public void verify(String hash, long size, BooleanSupplier stop) throws IOException {
+    require(hash != null && hash.matches("[a-f0-9]{64}") && size >= 0 && size <= MAX_OBJECT, "invalid-object");
+    verifyExisting(checked("objects/" + hash.substring(0, 2) + "/" + hash), hash, size, stop);
+  }
+
   /** Removes abandoned parts only; completed objects are retained for later job reconciliation. */
   public int recoverStaging() throws IOException {
     try (RandomAccessFile lockFile = new RandomAccessFile(checked("writer.lock"), "rw"); FileLock lock = acquire(lockFile)) {
