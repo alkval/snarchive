@@ -20,7 +20,8 @@
     "test:apple-prototype": "node scripts/test-apple-prototype.mjs",
     "fixtures:inventory": "node scripts/generate-inventory-fixture.mjs",
     "test:zip-engine": "node scripts/test-zip-engine.mjs",
-    "prepare:preview": "node scripts/prepare-local-preview.mjs"
+    "prepare:preview": "node scripts/prepare-local-preview.mjs",
+    "test:original-store": "node scripts/test-original-store.mjs"
   },
   "dependencies": {
     "expo": "~58.0.13",
