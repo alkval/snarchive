@@ -18,6 +18,7 @@ import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 class SnarchiveSourcesModule : Module() {
+  private var thumbnails: com.alkval.snarchive.sources.storage.ThumbnailCache? = null
   private val busy = AtomicBoolean(false)
   private val cancelled = AtomicBoolean(false)
   private var importArchive: ArchiveOriginals? = null
@@ -27,6 +28,14 @@ class SnarchiveSourcesModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("SnarchiveSources")
     Function("cancel") { cancelled.set(true) }
+    AsyncFunction("thumbnail") { hash: String, bytes: Double, video: Boolean ->
+      try {
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        val context = requireNotNull(appContext.reactContext)
+        val cache = synchronized(this) { thumbnails ?: com.alkval.snarchive.sources.storage.ThumbnailCache(context.filesDir, context.cacheDir).also { thumbnails = it } }
+        mapOf("ok" to true, "uri" to Uri.fromFile(cache.create(hash, bytes.toLong(), video)).toString())
+      } catch (_: Exception) { mapOf("ok" to false, "code" to "thumbnail-unavailable") }
+    }
     AsyncFunction("scanArchive") { uriString: String ->
       if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)

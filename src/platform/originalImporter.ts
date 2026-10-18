@@ -6,6 +6,7 @@ import type { OriginalCopier } from '../import/runImport';
 type Result = { ok: boolean; code?: string };
 export type LocalVideo = { uri: string; width?: number; height?: number; rotation?: number };
 interface NativeImporter {
+  thumbnail?(hash: string, bytes: number, video: boolean): Promise<Result & { uri: string }>;
   originalVideo?(hash: string, bytes: number): Promise<Result & LocalVideo>;
   openImportArchive(uri: string, hash: string, remaining: number): Promise<Result>;
   preserveImportEntry(path: string): Promise<Result & Receipt>;
@@ -45,4 +46,10 @@ export async function originalVideo(receipt: Receipt): Promise<LocalVideo> {
   const module = native();
   if (!module.originalVideo) throw new Error('native-build-required');
   return checked(await module.originalVideo(receipt.sha256, receipt.bytes));
+}
+
+export async function thumbnail(receipt: Receipt, video: boolean): Promise<string> {
+  const module = native();
+  if (!module.thumbnail) throw new Error('native-build-required');
+  return checked(await module.thumbnail(receipt.sha256, receipt.bytes, video)).uri;
 }

@@ -2,10 +2,11 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { ImportStore, LibraryRow } from '../storage/importStore';
+import type { ImportStore, LibraryRow, LibraryCursor, ChronologicalRow } from '../storage/importStore';
 import { VideoPlayerView } from './VideoPlayerView';
-import { originalUri, originalVideo, type LocalVideo } from '../platform/originalImporter';
+import { thumbnail, originalUri, originalVideo, type LocalVideo } from '../platform/originalImporter';
 import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
+import { pageThumbnails } from '../storage/pageThumbnails';
 import { en } from '../i18n/en';
 
 type Photo = { uri: string; size: ImageSize };
@@ -20,20 +21,27 @@ function Button({ label, onPress, disabled = false }: { label: string; onPress: 
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={[styles.button, disabled && { opacity: 0.5 }]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
 }
 export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose: () => void }) {
-  const [rows, setRows] = useState<LibraryRow[]>([]);
-  const [cursor, setCursor] = useState('');
-  const [history, setHistory] = useState<string[]>([]);
+  const [rows, setRows] = useState<ChronologicalRow[]>([]);
+  const [cursor, setCursor] = useState<LibraryCursor | null>(null);
+  const [history, setHistory] = useState<(LibraryCursor | null)[]>([]);
+  const [previews, setPreviews] = useState<Record<string, string | null>>({});
   const [next, setNext] = useState(false);
   const [selected, setSelected] = useState<LibraryRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
-    let active = true; setLoading(true); setFailed(false);
-    void store.page(cursor, 31).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
+    let active = true; setLoading(true); setFailed(false); setRows([]); setPreviews({});
+    void store.chronologicalPage(cursor, 31).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
       .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [store, cursor, retry]);
+  useEffect(() => {
+    let stopped = false;
+    if (!selected) void pageThumbnails(rows, store, thumbnail, () => stopped,
+      (id, uri) => setPreviews(previous => ({ ...previous, [id]: uri })));
+    return () => { stopped = true; };
+  }, [rows, selected, store]);
   return <SafeAreaView style={styles.root}>
     <StatusBar style="light" />
     <Button label={selected ? en.libraryBack : en.libraryClose} onPress={selected ? () => setSelected(null) : onClose} />
@@ -41,13 +49,17 @@ export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose
       <Text accessibilityRole="header" style={styles.title}>{en.libraryTitle}</Text>
       <Text style={styles.text}>{en.libraryOrder}</Text>
       {loading ? <Text style={styles.text}>{en.libraryLoading}</Text> : failed ? <><Text style={styles.text}>{en.libraryFailed}</Text><Button label={en.libraryRetry} onPress={() => setRetry(value => value + 1)} /></> : <>
-        <FlatList key={cursor} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.libraryEmpty}</Text>}
+        <FlatList key={JSON.stringify(cursor)} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.libraryEmpty}</Text>}
           renderItem={({ item }) => <Pressable accessibilityRole="button" onPress={() => setSelected(item)} style={styles.row}>
-            <Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.id}</Text>
-            <Text style={styles.text}>{en.libraryKinds(item.photos, item.videos, item.overlays)}</Text>
+            <View style={styles.thumbnail}>
+              {previews[item.id] ? <Image accessible={false} source={{ uri: previews[item.id]! }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => setPreviews(previous => ({ ...previous, [item.id]: null }))} />
+                : <Text style={styles.id}>{previews[item.id] === undefined ? en.thumbnailLoading : en.thumbnailMissing}</Text>}
+            </View>
+            <View style={styles.rowText}><Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.id}</Text>
+            <Text style={styles.text}>{en.libraryKinds(item.photos, item.videos, item.overlays)}</Text></View>
           </Pressable>} />
         <View style={styles.navigation}><Button label={en.libraryPrevious} disabled={!history.length} onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} />
-          <Button label={en.libraryNext} disabled={!next} onPress={() => { setHistory([...history, cursor]); setCursor(rows[rows.length - 1]!.id); }} /></View>
+          <Button label={en.libraryNext} disabled={!next} onPress={() => { setHistory([...history, cursor]); const last = rows[rows.length - 1]!; setCursor({ day: last.sortDay, time: last.sortTime, id: last.id }); }} /></View>
       </>}
     </>}
   </SafeAreaView>;
@@ -103,7 +115,8 @@ function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#151817', padding: 16, gap: 12 },
   title: { fontSize: 24, fontWeight: '600', color: '#f3f4ef' }, text: { fontSize: 16, lineHeight: 23, color: '#f3f4ef' },
-  id: { fontSize: 13, color: '#b9c2bc' }, row: { paddingVertical: 18, gap: 6, borderBottomWidth: 1, borderBottomColor: '#506056' },
+  id: { fontSize: 13, color: '#b9c2bc' }, thumbnail: { width: 96, height: 96, backgroundColor: '#000000', alignItems: 'center', justifyContent: 'center', padding: 6 }, rowText: { flex: 1, gap: 6 },
+  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 18, gap: 12, borderBottomWidth: 1, borderBottomColor: '#506056' },
   button: { padding: 14, minHeight: 48, backgroundColor: '#b9dec8', borderRadius: 8, alignItems: 'center' }, buttonText: { color: '#162d20', fontSize: 16, fontWeight: '600' },
   navigation: { flexDirection: 'row', justifyContent: 'space-between' }, viewer: { flex: 1, gap: 12 }, canvas: { flex: 1, backgroundColor: '#000000' },
 });

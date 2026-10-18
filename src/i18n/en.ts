@@ -1,8 +1,9 @@
 export const en = {
   title: 'Snarchive',
   libraryBrowse: 'Browse preserved memories',
+  thumbnailLoading: 'Preview…', thumbnailMissing: 'No preview',
   libraryTitle: 'Your preserved memories',
-  libraryOrder: '30 memories per page, ordered by ID. Dates retain their source; chronological browsing comes later.',
+  libraryOrder: 'Newest dates first, 30 per page. Within a day, timed memories precede those with unknown times. Unknown or conflicting dates are last. Previews show base files without overlays.',
   libraryMetadata: '(export metadata)',
   libraryInferred: '(inferred from filename; time unknown)',
   libraryUnknownDate: 'Capture date unknown',

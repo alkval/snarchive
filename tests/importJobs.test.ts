@@ -158,3 +158,38 @@ test('bounded object reads retain the base when many overlay variants exist', as
   assert.equal((await store.objects('one'))[0]?.role, 'photo');
   assert.equal((await store.objects('one')).length, 3);
 });
+
+test('chronological cursor pages order dates, timed evidence, ties, and uncertain dates without gaps', async t => {
+  const { store } = await setup(t);
+  const other = 'f'.repeat(64);
+  const names = ['2026-10-18_z-main.jpg', '2026-10-18_a-main.jpg', '2026-10-18_timed-main.jpg', '2026-10-17_older-main.jpg', '2026-02-30_unknown-main.jpg', '2026-10-18_conflict-main.jpg'];
+  const metadata = JSON.stringify({ 'Saved Media': [
+    { Date: '2026-10-18 12:00:00 UTC', 'Media Type': 'Image', 'Download Link': 'https://example.test/?mid=timed' },
+    { Date: '2026-10-19 12:00:00 UTC', 'Media Type': 'Image', 'Download Link': 'https://example.test/?mid=conflict' },
+  ] });
+  const input = inventoryFromSnapshot({ entries: [...names.map(path => ({ path })), { path: 'memories_history.json', metadataText: metadata }], metadataBytes: metadata.length, visitedEntries: 7 }, 'source-2');
+  await store.plan(other, input);
+  assert.deepEqual(await store.chronologicalPage(), []);
+  for (let i = 0; i < names.length; i++) await store.commit(other, i, receipt());
+  const all = await store.chronologicalPage();
+  assert.deepEqual(all.map(row => row.id), ['timed', 'a', 'z', 'older', 'conflict', 'unknown']);
+  assert.equal(all[4]?.sortDay, ''); assert.equal(all[4]?.dateConflict, 1);
+  assert.equal(all[5]?.day, null);
+  const visited: string[] = []; let cursor: { day: string; time: string; id: string } | null = null;
+  for (;;) {
+    const page = await store.chronologicalPage(cursor, 2); if (!page.length) break;
+    visited.push(...page.map(row => row.id)); const last = page[page.length - 1]!;
+    cursor = { day: last.sortDay, time: last.sortTime, id: last.id };
+  }
+  assert.deepEqual(visited, all.map(row => row.id));
+  await assert.rejects(store.chronologicalPage(null, 101));
+});
+test('new date evidence changes chronological order without changing stored identity', async t => {
+  const { store } = await setup(t); await store.commit(hash, 0, receipt());
+  const input = inventoryFromSnapshot({ entries: [{ path: '2026-10-18_new-main.jpg' }], metadataBytes: 0, visitedEntries: 1 }, 'source-2');
+  await store.plan('c'.repeat(64), input); await store.commit('c'.repeat(64), 0, receipt());
+  assert.deepEqual((await store.chronologicalPage()).map(row => row.id), ['new', 'one']);
+  await store.plan('d'.repeat(64), inventoryFromSnapshot({ entries: [{ path: '2026-10-19_new-main.jpg' }], metadataBytes: 0, visitedEntries: 1 }, 'source-3'));
+  assert.deepEqual((await store.chronologicalPage()).map(row => row.id), ['one', 'new']);
+  assert.equal((await store.summary()).objects, 1);
+});

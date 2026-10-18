@@ -11,6 +11,8 @@ export function validateReceipt(value: Receipt): void {
   check(Number.isSafeInteger(value.bytes) && value.bytes >= 0 && value.bytes <= 8 * 1024 ** 3);
 }
 export type LibraryRow = { id: string; day: string | null; instant: string | null; dateConflict: number; photos: number; videos: number; overlays: number };
+export type LibraryCursor = { day: string; time: string; id: string };
+export type ChronologicalRow = LibraryRow & { sortDay: string; sortTime: string };
 export type LibraryObject = Receipt & { role: 'photo' | 'video' | 'overlay' };
 async function indexDates(tx: SqlConnection, source: SourceInventory) {
   const evidence = [
@@ -108,6 +110,27 @@ export class ImportStore {
       FROM memories m WHERE m.id>? AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role!='overlay') ORDER BY m.id LIMIT ?
     )`, after, limit);
     return JSON.parse(row?.data ?? '[]') as LibraryRow[];
+  }
+  async chronologicalPage(after: LibraryCursor | null = null, limit = 30): Promise<ChronologicalRow[]> {
+    check(Number.isInteger(limit) && limit >= 1 && limit <= 100);
+    const row = await this.db.getFirstAsync<{ data: string }>(`WITH facts AS (
+      SELECT m.id,
+        (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
+        (SELECT min(value) FROM library_dates WHERE memory_id=m.id AND kind='instant') AS instant,
+        (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='photo') AS photos,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='video') AS videos,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='overlay') AS overlays
+      FROM memories m WHERE EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role!='overlay')
+    ), ordered AS (
+      SELECT *, CASE WHEN dateConflict=0 THEN coalesce(day,'') ELSE '' END AS sortDay,
+        CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts
+    ) SELECT json_group_array(json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
+      'photos',photos,'videos',videos,'overlays',overlays,'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
+      SELECT * FROM ordered WHERE ?=1 OR sortDay<? OR (sortDay=? AND sortTime<?) OR (sortDay=? AND sortTime=? AND id>?)
+      ORDER BY sortDay DESC,sortTime DESC,id ASC LIMIT ?
+    )`, after ? 0 : 1, after?.day ?? '', after?.day ?? '', after?.time ?? '', after?.day ?? '', after?.time ?? '', after?.id ?? '', limit);
+    return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
   }
   async objects(id: string): Promise<LibraryObject[]> {
     // Three are enough to detect ambiguity. Never load an unbounded collection of variants.
