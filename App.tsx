@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Platform, Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
+import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
@@ -12,12 +12,14 @@ import type { PreviewStore } from './src/storage/previewStore';
 import { openImportStore, originalCopier } from './src/platform/originalImporter';
 import { runImport } from './src/import/runImport';
 import type { ImportStore, ImportSummary } from './src/storage/importStore';
+import { LibraryBrowser } from './src/ui/LibraryBrowser';
 import { sourcePicker } from './src/platform/sourcePicker';
 
 export default function App() {
   const dark = useColorScheme() === 'dark';
   const colors = dark ? { background: '#151817', text: '#f3f4ef', muted: '#b9c2bc', button: '#b9dec8', buttonText: '#162d20' }
     : { background: '#f8f9f5', text: '#17261d', muted: '#506056', button: '#244f37', buttonText: '#ffffff' };
+  const [browsing, setBrowsing] = useState(false);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -126,9 +128,15 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={[styles.root, { backgroundColor: colors.background }]}>
         <StatusBar style={dark ? 'light' : 'dark'} />
+        <Modal visible={browsing} animationType="slide" onRequestClose={() => setBrowsing(false)}>
+          {browsing && library.current && <LibraryBrowser store={library.current} onClose={() => setBrowsing(false)} />}
+        </Modal>
         <ScrollView contentContainerStyle={styles.content}>
           <Text accessibilityRole="header" style={[styles.title, { color: colors.text }]}>{en.title}</Text>
           <Text style={[styles.body, { color: colors.muted }]}>{en.promise}</Text>
+          <Pressable accessibilityRole="button" disabled={!ready || busy} accessibilityState={{ disabled: !ready || busy }} onPress={() => setBrowsing(true)} style={[styles.button, { backgroundColor: colors.button, opacity: !ready || busy ? 0.5 : 1 }]}>
+            <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.libraryBrowse}</Text>
+          </Pressable>
           <View style={styles.section}>
             <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.heading}</Text>
             <Text style={[styles.body, { color: colors.muted }]}>{en.explanation}</Text>

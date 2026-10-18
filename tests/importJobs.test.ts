@@ -103,3 +103,58 @@ test('changed source cannot advance pending work', async t => {
   const { store } = await setup(t); const copier = new Copier(); copier.open = async () => { throw new Error('source-changed'); };
   await assert.rejects(runImport(store, copier, hash, 'wrong', () => false, () => {}), /source-changed/); assert.equal((await store.summary()).files, 0);
 });
+
+test('library pages exclude pending and overlay-only records and keep shared-byte identities', async t => {
+  const { store } = await setup(t);
+  assert.deepEqual(await store.page(), []);
+  await store.commit(hash, 0, receipt()); await store.commit(hash, 1, receipt());
+  const first = await store.page('', 1); assert.equal(first[0]?.id, 'one');
+  assert.equal(first[0]?.day, '2026-02-05'); assert.equal(first[0]?.instant, null);
+  assert.equal(first[0]?.photos, 1);
+  assert.equal((await store.page('one', 1))[0]?.id, 'two');
+  assert.deepEqual(await store.page('two'), []);
+  await assert.rejects(store.page('', 101));
+  const overlay = inventoryFromSnapshot({ entries: [{ path: '2026-02-05_orphan-overlay.png' }], metadataBytes: 0, visitedEntries: 1 }, 'source-2');
+  await store.plan('c'.repeat(64), overlay); await store.commit('c'.repeat(64), 0, receipt());
+  assert.equal((await store.page()).length, 2);
+  assert.deepEqual(await store.objects('one'), [{ role: 'photo', ...receipt() }]);
+});
+test('late metadata enriches existing memories and contradictory instants are explicit', async t => {
+  const { store } = await setup(t); await store.commit(hash, 0, receipt());
+  const metadata = (date: string) => inventoryFromSnapshot({ entries: [{ path: 'memories_history.json', metadataText: JSON.stringify({ 'Saved Media': [{ Date: date, 'Media Type': 'Image', 'Download Link': 'https://example.test/?mid=one' }] }) }], metadataBytes: 500, visitedEntries: 1 }, 'source-2');
+  await store.plan('c'.repeat(64), metadata('2026-02-05 12:00:00 UTC'));
+  assert.equal((await store.page())[0]?.instant, '2026-02-05T12:00:00.000Z');
+  assert.equal((await store.page())[0]?.dateConflict, 0);
+  await store.plan('d'.repeat(64), metadata('2026-02-05 13:00:00 UTC'));
+  assert.equal((await store.page())[0]?.dateConflict, 1);
+});
+test('version-one migration backfills dates without losing receipts, and can reopen', async t => {
+  const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
+  db.raw.exec('DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1;');
+  await store.initialize(); await store.initialize();
+  assert.equal((await store.summary()).files, 1);
+  assert.equal((await store.page())[0]?.day, '2026-02-05');
+});
+test('failed date migration rolls back and leaves the previous database intact', async t => {
+  const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
+  db.raw.exec("DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1; UPDATE import_jobs SET plan_json='invalid';");
+  await assert.rejects(store.initialize());
+  assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
+  assert.equal((await store.summary()).files, 1);
+});
+test('library reports competing photo and overlay versions instead of choosing one', async t => {
+  const { store } = await setup(t); await store.commit(hash, 0, receipt());
+  const other = 'c'.repeat(64); await store.plan(other, source(['one'])); await store.commit(other, 0, receipt('d'));
+  assert.equal((await store.page())[0]?.photos, 2);
+  assert.equal((await store.objects('one')).length, 2);
+});
+test('bounded object reads retain the base when many overlay variants exist', async t => {
+  const { store } = await setup(t); await store.commit(hash, 0, receipt());
+  for (const letter of ['c', 'd', 'e']) {
+    const overlay = inventoryFromSnapshot({ entries: [{ path: '2026-02-05_one-overlay.png' }], metadataBytes: 0, visitedEntries: 1 }, 'source-2');
+    await store.plan(letter.repeat(64), overlay); await store.commit(letter.repeat(64), 0, receipt(letter));
+  }
+  assert.equal((await store.page())[0]?.overlays, 3);
+  assert.equal((await store.objects('one'))[0]?.role, 'photo');
+  assert.equal((await store.objects('one')).length, 3);
+});

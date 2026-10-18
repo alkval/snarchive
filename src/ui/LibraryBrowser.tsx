@@ -1,0 +1,102 @@
+import { StatusBar } from 'expo-status-bar';
+import { useEffect, useState } from 'react';
+import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import type { ImportStore, LibraryRow } from '../storage/importStore';
+import { originalUri } from '../platform/originalImporter';
+import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
+import { en } from '../i18n/en';
+
+type Photo = { uri: string; size: ImageSize };
+function measure(uri: string): Promise<Photo> {
+  return new Promise((resolve, reject) => Image.getSize(uri, (width, height) => resolve({ uri, size: { width, height } }), reject));
+}
+function dateLabel(row: LibraryRow): string {
+  return row.dateConflict ? en.libraryDateConflict : row.instant ? `${row.instant.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')} ${en.libraryMetadata}`
+    : row.day ? `${row.day} ${en.libraryInferred}` : en.libraryUnknownDate;
+}
+function Button({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
+  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={[styles.button, disabled && { opacity: 0.5 }]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
+}
+export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose: () => void }) {
+  const [rows, setRows] = useState<LibraryRow[]>([]);
+  const [cursor, setCursor] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const [next, setNext] = useState(false);
+  const [selected, setSelected] = useState<LibraryRow | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true; setLoading(true); setFailed(false);
+    void store.page(cursor, 31).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
+      .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [store, cursor, retry]);
+  return <SafeAreaView style={styles.root}>
+    <StatusBar style="light" />
+    <Button label={selected ? en.libraryBack : en.libraryClose} onPress={selected ? () => setSelected(null) : onClose} />
+    {selected ? <PhotoViewer key={selected.id} row={selected} store={store} /> : <>
+      <Text accessibilityRole="header" style={styles.title}>{en.libraryTitle}</Text>
+      <Text style={styles.text}>{en.libraryOrder}</Text>
+      {loading ? <Text style={styles.text}>{en.libraryLoading}</Text> : failed ? <><Text style={styles.text}>{en.libraryFailed}</Text><Button label={en.libraryRetry} onPress={() => setRetry(value => value + 1)} /></> : <>
+        <FlatList key={cursor} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.libraryEmpty}</Text>}
+          renderItem={({ item }) => <Pressable accessibilityRole="button" onPress={() => setSelected(item)} style={styles.row}>
+            <Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.id}</Text>
+            <Text style={styles.text}>{en.libraryKinds(item.photos, item.videos, item.overlays)}</Text>
+          </Pressable>} />
+        <View style={styles.navigation}><Button label={en.libraryPrevious} disabled={!history.length} onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} />
+          <Button label={en.libraryNext} disabled={!next} onPress={() => { setHistory([...history, cursor]); setCursor(rows[rows.length - 1]!.id); }} /></View>
+      </>}
+    </>}
+  </SafeAreaView>;
+}
+function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
+  const [base, setBase] = useState<Photo | null>(null);
+  const [overlay, setOverlay] = useState<Photo | null>(null);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [status, setStatus] = useState(en.libraryLoading);
+  const [overlayStatus, setOverlayStatus] = useState('');
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      if (row.photos + row.videos !== 1) { setStatus(en.libraryVariants); return; }
+      if (row.videos) { setStatus(en.libraryVideo); return; }
+      try {
+        const objects = await store.objects(row.id);
+        const object = objects.find(item => item.role === 'photo');
+        if (!object) throw new Error('missing-object');
+        const photo = await measure(await originalUri(object));
+        if (!active) return;
+        setBase(photo); setStatus('');
+        if (row.overlays > 1) { setOverlayStatus(en.libraryOverlayVariants); return; }
+        const layer = objects.find(item => item.role === 'overlay');
+        if (!layer) return;
+        try {
+          const image = await measure(await originalUri(layer));
+          if (!active) return;
+          if (!matchingAspect(photo.size, image.size)) { setOverlayStatus(en.libraryOverlaySize); return; }
+          setOverlay(image);
+        } catch { if (active) setOverlayStatus(en.libraryOverlayFailed); }
+      } catch { if (active) setStatus(en.libraryPhotoFailed); }
+    })();
+    return () => { active = false; };
+  }, [row, store]);
+  return <View style={styles.viewer}>
+    <Text style={styles.text}>{dateLabel(row)}</Text><Text style={styles.id}>{row.id}</Text>
+    {!!status && <Text accessibilityLiveRegion="polite" style={styles.text}>{status}</Text>}
+    {base && <View style={styles.canvas}>
+      <Image accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
+      {overlay && showOverlay && <Image accessible={false} source={{ uri: overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}
+    </View>}
+    {!!overlayStatus && <Text style={styles.text}>{overlayStatus}</Text>}
+    {overlay && <Button label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />}
+  </View>;
+}
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#151817', padding: 16, gap: 12 },
+  title: { fontSize: 24, fontWeight: '600', color: '#f3f4ef' }, text: { fontSize: 16, lineHeight: 23, color: '#f3f4ef' },
+  id: { fontSize: 13, color: '#b9c2bc' }, row: { paddingVertical: 18, gap: 6, borderBottomWidth: 1, borderBottomColor: '#506056' },
+  button: { padding: 14, minHeight: 48, backgroundColor: '#b9dec8', borderRadius: 8, alignItems: 'center' }, buttonText: { color: '#162d20', fontSize: 16, fontWeight: '600' },
+  navigation: { flexDirection: 'row', justifyContent: 'space-between' }, viewer: { flex: 1, gap: 12 }, canvas: { flex: 1, backgroundColor: '#000000' },
+});

@@ -76,6 +76,16 @@ class SnarchiveSourcesModule : Module() {
         mapOf("ok" to true)
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
+    AsyncFunction("originalUri") { hash: String, bytes: Double ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      try {
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        originals().verify(hash, bytes.toLong()) { cancelled.get() }
+        val file = File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals/objects/${hash.take(2)}/$hash")
+        mapOf("ok" to true, "uri" to Uri.fromFile(file).toString())
+      } catch (error: Exception) { importError(error) } finally { busy.set(false) }
+    }
     AsyncFunction("closeImportArchive") {
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       try { importArchive?.close(); mapOf("ok" to true) }

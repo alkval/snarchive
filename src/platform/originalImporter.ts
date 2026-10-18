@@ -8,6 +8,7 @@ interface NativeImporter {
   openImportArchive(uri: string, hash: string, remaining: number): Promise<Result>;
   preserveImportEntry(path: string): Promise<Result & Receipt>;
   verifyOriginal(hash: string, bytes: number): Promise<Result>;
+  originalUri?(hash: string, bytes: number): Promise<Result & { uri: string }>;
   closeImportArchive(): Promise<Result>;
 }
 function native(): NativeImporter {
@@ -30,4 +31,10 @@ export function openImportStore(): Promise<ImportStore> {
     catch { await db.closeAsync(); throw new Error('library-unavailable'); }
   })().catch(error => { opening = undefined; throw error; });
   return opening;
+}
+
+export async function originalUri(receipt: Receipt): Promise<string> {
+  const module = native();
+  if (!module.originalUri) throw new Error('native-build-required');
+  return checked(await module.originalUri(receipt.sha256, receipt.bytes)).uri;
 }
