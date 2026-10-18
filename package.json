@@ -22,7 +22,8 @@
     "test:zip-engine": "node scripts/test-zip-engine.mjs",
     "prepare:preview": "node scripts/prepare-local-preview.mjs",
     "test:original-store": "node scripts/test-original-store.mjs",
-    "fixtures:resume": "python3 scripts/generate-resume-fixture.py"
+    "fixtures:resume": "python3 scripts/generate-resume-fixture.py",
+    "fixtures:video": "python3 scripts/generate-video-fixture.py"
   },
   "dependencies": {
     "expo": "~58.0.13",
@@ -32,6 +33,7 @@
     "expo-sqlite": "~58.0.13",
     "expo-status-bar": "~58.0.3",
     "expo-system-ui": "~58.0.6",
+    "expo-video": "~58.0.11",
     "react": "19.3.0",
     "react-native": "0.88.0",
     "react-native-safe-area-context": "~5.10.1"

@@ -3,7 +3,8 @@ import { useEffect, useState } from 'react';
 import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ImportStore, LibraryRow } from '../storage/importStore';
-import { originalUri } from '../platform/originalImporter';
+import { VideoPlayerView } from './VideoPlayerView';
+import { originalUri, originalVideo, type LocalVideo } from '../platform/originalImporter';
 import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
 import { en } from '../i18n/en';
 
@@ -52,6 +53,7 @@ export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose
   </SafeAreaView>;
 }
 function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
+  const [video, setVideo] = useState<LocalVideo | null>(null);
   const [base, setBase] = useState<Photo | null>(null);
   const [overlay, setOverlay] = useState<Photo | null>(null);
   const [showOverlay, setShowOverlay] = useState(false);
@@ -61,11 +63,15 @@ function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
     let active = true;
     void (async () => {
       if (row.photos + row.videos !== 1) { setStatus(en.libraryVariants); return; }
-      if (row.videos) { setStatus(en.libraryVideo); return; }
       try {
         const objects = await store.objects(row.id);
-        const object = objects.find(item => item.role === 'photo');
+        const object = objects.find(item => item.role === (row.videos ? 'video' : 'photo'));
         if (!object) throw new Error('missing-object');
+        if (row.videos) {
+          const local = await originalVideo(object);
+          if (active) { setVideo(local); setStatus(''); }
+          return;
+        }
         const photo = await measure(await originalUri(object));
         if (!active) return;
         setBase(photo); setStatus('');
@@ -78,13 +84,14 @@ function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
           if (!matchingAspect(photo.size, image.size)) { setOverlayStatus(en.libraryOverlaySize); return; }
           setOverlay(image);
         } catch { if (active) setOverlayStatus(en.libraryOverlayFailed); }
-      } catch { if (active) setStatus(en.libraryPhotoFailed); }
+      } catch { if (active) setStatus(row.videos ? en.libraryVideoFailed : en.libraryPhotoFailed); }
     })();
     return () => { active = false; };
   }, [row, store]);
   return <View style={styles.viewer}>
     <Text style={styles.text}>{dateLabel(row)}</Text><Text style={styles.id}>{row.id}</Text>
     {!!status && <Text accessibilityLiveRegion="polite" style={styles.text}>{status}</Text>}
+    {video && <VideoPlayerView video={video} row={row} store={store} />}
     {base && <View style={styles.canvas}>
       <Image accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
       {overlay && showOverlay && <Image accessible={false} source={{ uri: overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}

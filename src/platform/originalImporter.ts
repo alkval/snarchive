@@ -4,7 +4,9 @@ import { openDatabaseAsync } from 'expo-sqlite';
 import { ImportStore, type Receipt } from '../storage/importStore';
 import type { OriginalCopier } from '../import/runImport';
 type Result = { ok: boolean; code?: string };
+export type LocalVideo = { uri: string; width?: number; height?: number; rotation?: number };
 interface NativeImporter {
+  originalVideo?(hash: string, bytes: number): Promise<Result & LocalVideo>;
   openImportArchive(uri: string, hash: string, remaining: number): Promise<Result>;
   preserveImportEntry(path: string): Promise<Result & Receipt>;
   verifyOriginal(hash: string, bytes: number): Promise<Result>;
@@ -37,4 +39,10 @@ export async function originalUri(receipt: Receipt): Promise<string> {
   const module = native();
   if (!module.originalUri) throw new Error('native-build-required');
   return checked(await module.originalUri(receipt.sha256, receipt.bytes)).uri;
+}
+
+export async function originalVideo(receipt: Receipt): Promise<LocalVideo> {
+  const module = native();
+  if (!module.originalVideo) throw new Error('native-build-required');
+  return checked(await module.originalVideo(receipt.sha256, receipt.bytes));
 }

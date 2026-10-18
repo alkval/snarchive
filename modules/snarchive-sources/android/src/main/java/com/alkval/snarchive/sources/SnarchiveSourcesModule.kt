@@ -86,6 +86,26 @@ class SnarchiveSourcesModule : Module() {
         mapOf("ok" to true, "uri" to Uri.fromFile(file).toString())
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
+    AsyncFunction("originalVideo") { hash: String, bytes: Double ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      try {
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        originals().verify(hash, bytes.toLong()) { cancelled.get() }
+        val file = File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals/objects/${hash.take(2)}/$hash")
+        val result = mutableMapOf<String, Any>("ok" to true, "uri" to Uri.fromFile(file).toString())
+        val metadata = android.media.MediaMetadataRetriever()
+        try {
+          metadata.setDataSource(file.path)
+          result["width"] = metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+          result["height"] = metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+          result["rotation"] = metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: -1
+        } catch (_: Exception) {
+          // Playback may still work. Without geometry, overlays remain unavailable.
+        } finally { runCatching { metadata.release() } }
+        result
+      } catch (error: Exception) { importError(error) } finally { busy.set(false) }
+    }
     AsyncFunction("closeImportArchive") {
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       try { importArchive?.close(); mapOf("ok" to true) }

@@ -8,3 +8,7 @@ Pinned Maven coordinate: `net.lingala.zip4j:zip4j:2.11.6`.
 JAR SHA-256: `5f1eb1e9d67cfee200a695e4079751b49e73a226b154193e13f7c602efbe72fb`.
 
 The npm dependency graph and licenses still need a complete release audit. This notice does not claim that audit is finished.
+
+Video viewing uses expo-video 58.0.11 (MIT), copyright 2015-present 650 Industries, Inc. See `licenses/expo-video-LICENSE.txt`. Android playback uses its AndroidX Media3 1.9.1 dependencies (Apache-2.0). The full transitive license audit remains open.
+
+Expo Video API reference: https://docs.expo.dev/versions/v58.0.0/sdk/video/
