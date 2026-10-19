@@ -74,3 +74,23 @@ test('the preview footer never claims a deletion that did not happen', () => {
   assert.ok(deleted.includes('has been deleted') && deleted.endsWith(en.inspectFooter));
   assert.ok(!kept.includes('deleted') && kept.includes('temporary private copy') && kept.endsWith(en.inspectFooter));
 });
+
+test('a leftover copy that stopped the check reaches the caller as a cleanup failure, not an unreadable backup', async () => {
+  const { calls, native } = bridge({ async beginBackupInspection() { calls.push('begin'); return { ok: false, code: 'staging-cleanup-failed', cleanupFailed: true }; } });
+  const error = await failure(runInspectionSession(native, 'content://x', () => false, () => {}));
+  assert.equal(error.message, 'staging-cleanup-failed'); assert.equal(error.cleanupFailed, true); assert.deepEqual(calls, ['begin']);
+});
+
+test('failure and cancellation notices: one explanation per problem, never blaming the backup for a leftover copy', () => {
+  const leftover = en.inspectOutcomeNotices({ cancelled: false, code: 'staging-cleanup-failed' }, true);
+  assert.equal(leftover.length, 1); assert.equal(leftover[0]!.tone, 'warning');
+  assert.ok(/earlier check or import/.test(leftover[0]!.message) && /not opened/.test(leftover[0]!.message));
+  assert.ok(!/expired|choosing it again|has been deleted|damaged|malformed/i.test(leftover[0]!.message));
+  const damaged = en.inspectOutcomeNotices({ cancelled: false, code: 'backup-damaged' }, true);
+  assert.deepEqual(damaged.map(notice => notice.tone), ['error', 'warning']);
+  assert.equal(damaged[1]!.message, en.inspectCleanupFailed);
+  assert.deepEqual(en.inspectOutcomeNotices({ cancelled: false, code: 'backup-damaged' }, false).length, 1);
+  const cancelled = en.inspectOutcomeNotices({ cancelled: true }, true);
+  assert.deepEqual(cancelled.map(notice => notice.message), [en.inspectCancelled, en.inspectCleanupFailed]);
+  assert.equal(en.inspectOutcomeNotices({ cancelled: false, code: 'something-new' }, false)[0]!.message, en.inspectUnreadable);
+});

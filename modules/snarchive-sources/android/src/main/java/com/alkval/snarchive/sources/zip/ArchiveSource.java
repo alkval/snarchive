@@ -42,7 +42,7 @@ public final class ArchiveSource implements Closeable {
     File[] entries = copies.listFiles(); if (entries == null) return 0; int removed = 0;
     for (File entry : entries) {
       if (!entry.getName().matches("preview-[0-9]+\\.part")) continue;
-      require(entry.delete(), "staging-cleanup-failed"); removed++;
+      require(entry.delete() || !entry.exists(), "staging-cleanup-failed"); removed++; // Already gone counts as removed.
     }
     return removed;
   }

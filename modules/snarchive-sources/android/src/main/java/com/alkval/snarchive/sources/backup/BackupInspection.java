@@ -30,7 +30,9 @@ public final class BackupInspection implements Closeable {
   public static final int MAX_CHUNK = 256 * 1024;
   private static final Pattern OBJECT = Pattern.compile("objects/([a-f0-9]{2})/([a-f0-9]{64})");
   private static final Set<String> CODES = new HashSet<>(Arrays.asList("unsafe-or-unsupported-zip", "backup-not-snarchive",
-    "backup-invalid", "backup-damaged", "backup-limit", "source-changed", "insufficient-storage", "busy", "backup-cleanup-failed"));
+    "backup-invalid", "backup-damaged", "backup-limit", "source-changed", "insufficient-storage", "busy", "backup-cleanup-failed",
+    // A leftover private copy from an earlier operation could not be removed, so the chosen backup was never opened.
+    "staging-cleanup-failed"));
 
   public static final class Chunk {
     public final String text; public final boolean done;

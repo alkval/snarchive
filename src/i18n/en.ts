@@ -165,9 +165,20 @@ export const en = {
     'backup-unsupported': 'This backup was made by a newer version of Snarchive. Update the app to check it.',
     'backup-damaged': 'Part of this backup is missing or damaged: a file did not match its recorded size or checksum.',
     'backup-limit': 'This backup is larger than Snarchive’s current limits.',
+    'staging-cleanup-failed': 'A temporary copy left by an earlier check or import could not be removed, so this backup was not opened. Your backup and library are unchanged. Reopen Snarchive and try again.',
     'source-changed': 'The backup file changed while it was being checked. Make sure nothing else is writing to it, then try again.',
     'insufficient-storage': 'This location cannot be read in place, and there is not enough free space for a temporary copy. Free space equal to the backup’s size plus 64 MiB, or move the backup to this device.',
     'native-build-required': 'Install the latest Android development build to check backups.',
   } as Record<string, string>,
   inspectUnreadable: 'The backup could not be read. Access may have expired or the storage provider failed. Try choosing it again.',
+  /** Notices for a failed or cancelled check: the outcome first, then a copy that could not be deleted. A leftover
+   * copy that stopped the check from starting is explained once, without blaming the chosen backup. */
+  inspectOutcomeNotices: (outcome: { cancelled: true } | { cancelled: false; code: string }, cleanupFailed: boolean): { tone: 'info' | 'warning' | 'error'; message: string }[] => {
+    if (outcome.cancelled) return [{ tone: 'info', message: en.inspectCancelled }, ...(cleanupFailed ? [{ tone: 'warning' as const, message: en.inspectCleanupFailed }] : [])];
+    const code = outcome.code;
+    const tone = code === 'busy' || code === 'insufficient-storage' || code === 'staging-cleanup-failed' ? 'warning' : 'error';
+    const notices: { tone: 'info' | 'warning' | 'error'; message: string }[] = [{ tone, message: en.inspectErrors[code] ?? en.inspectUnreadable }];
+    if (cleanupFailed && code !== 'staging-cleanup-failed') notices.push({ tone: 'warning', message: en.inspectCleanupFailed });
+    return notices;
+  },
 };

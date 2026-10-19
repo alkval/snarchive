@@ -11,15 +11,18 @@ public final class InspectionGate<T extends Closeable> {
   public interface Work<T, R> { R run(T session) throws Exception; }
   public interface Codes { String code(Exception error); }
   public static final String CLEANUP_FAILED = "backup-cleanup-failed";
+  /** ArchiveSource.removeAbandonedCopies: a private copy left by an earlier operation could not be removed. */
+  public static final String STAGING_CLEANUP_FAILED = "staging-cleanup-failed";
   /** The opening outcome: the original failure code (or null), and whether a temporary copy could not be deleted. */
   public static final class Opened {
     public final String code; public final boolean cleanupFailed;
     Opened(String code, boolean cleanupFailed) { this.code = code; this.cleanupFailed = cleanupFailed; }
   }
+  private static boolean isCleanupFailure(String message) { return CLEANUP_FAILED.equals(message) || STAGING_CLEANUP_FAILED.equals(message); }
   /** True when cleanup failed on this error's path; the error's own code is reported separately. */
   public static boolean cleanupFailed(Throwable error) {
-    if (CLEANUP_FAILED.equals(error.getMessage())) return true;
-    for (Throwable suppressed : error.getSuppressed()) if (CLEANUP_FAILED.equals(suppressed.getMessage())) return true;
+    if (isCleanupFailure(error.getMessage())) return true;
+    for (Throwable suppressed : error.getSuppressed()) if (isCleanupFailure(suppressed.getMessage())) return true;
     return false;
   }
   public static final class Result<R> {

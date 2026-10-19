@@ -76,10 +76,9 @@ export function BackupInspectScreen({ onClose }: { onClose(): void }) {
           <View style={[styles.fill, { width: `${Math.round(fraction * 100)}%`, backgroundColor: t.accent }]} />
         </View>}
       </View>}
-      {state.kind === 'failed' && <Notice tone={state.code === 'busy' || state.code === 'insufficient-storage' ? 'warning' : 'error'}
-        message={en.inspectErrors[state.code] ?? en.inspectUnreadable} />}
-      {state.kind === 'cancelled' && <Notice tone="info" message={en.inspectCancelled} />}
-      {(state.kind === 'failed' || state.kind === 'cancelled') && state.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
+      {(state.kind === 'failed' || state.kind === 'cancelled') && en.inspectOutcomeNotices(
+        state.kind === 'cancelled' ? { cancelled: true } : { cancelled: false, code: state.code }, state.cleanupFailed,
+      ).map(notice => <Notice key={notice.message} tone={notice.tone} message={notice.message} />)}
       {state.kind === 'picker-closed' && <Notice tone="info" message={en.inspectPickerClosed} />}
       {state.kind === 'verified' && <>
         <Notice tone="success" title={en.inspectVerified} message={en.inspectVerifiedDetail} />

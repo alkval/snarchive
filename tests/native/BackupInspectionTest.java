@@ -352,6 +352,27 @@ public class BackupInspectionTest {
       try { proceed.countDown(); opener.join(5000); } finally { dir.setWritable(true); }
       check("cancelled".equals(result.get().code) && result.get().cleanupFailed && copy.exists() && released.get() == 1, "both reported, released once");
     });
+    test("an undeletable leftover copy stops inspection before the chosen backup is opened; a retry recovers", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File leftover = new File(dir, "preview-123.part"); Files.write(leftover.toPath(), new byte[] { 1, 2, 3 });
+      byte[] chosen = Files.readAllBytes(valid.toPath());
+      AtomicInteger openedChosen = new AtomicInteger(), released = new AtomicInteger();
+      InspectionGate<BackupInspection> gate = new InspectionGate<>(Runnable::run, error -> BackupInspection.code(error, false), released::incrementAndGet);
+      // The module's opening path: clear abandoned copies, then read the chosen document in place (or copy it).
+      InspectionGate.Opener<BackupInspection> opener = () -> BackupInspection.open(ArchiveSource.openSelected(dir,
+        () -> { openedChosen.incrementAndGet(); return ArchiveSource.open(valid); },
+        () -> { openedChosen.incrementAndGet(); return null; }), null, () -> false);
+      check(dir.setWritable(false), "directory locked");
+      try {
+        InspectionGate.Opened stuck = gate.beginWithStatus(opener);
+        check("staging-cleanup-failed".equals(stuck.code) && stuck.cleanupFailed, "cleanup failure, not an unreadable backup: " + stuck.code);
+        check(openedChosen.get() == 0 && leftover.exists() && released.get() == 1 && !gate.active(), "chosen backup never opened; guard released once");
+      } finally { dir.setWritable(true); }
+      InspectionGate.Opened retry = gate.beginWithStatus(opener);
+      check(retry.code == null && !retry.cleanupFailed && !leftover.exists() && openedChosen.get() == 1, "retry removes the leftover and opens");
+      check(gate.finish() == null && released.get() == 2, "closed and released");
+      check(Arrays.equals(chosen, Files.readAllBytes(valid.toPath())), "chosen backup unchanged");
+    });
     System.out.println(passed + " backup inspection host tests passed. No device or restore claim.");
   }
 
