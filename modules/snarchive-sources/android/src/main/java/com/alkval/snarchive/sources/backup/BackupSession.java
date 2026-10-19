@@ -83,7 +83,8 @@ public final class BackupSession implements Closeable {
     MessageDigest digest = digest(); byte[] buffer = new byte[65536]; int n; long read = 0;
     while (true) {
       require(!stop.getAsBoolean(), "cancelled");
-      try { n = input.read(buffer); } catch (IOException e) { throw new IOException("backup-unverified", e); }
+      try { n = input.read(buffer); }
+      catch (IOException e) { require(!stop.getAsBoolean(), "cancelled"); throw new IOException("backup-unverified", e); }
       if (n == -1) break;
       require(n > 0 && n <= bytes - read, "backup-save-failed"); digest.update(buffer, 0, n); read += n;
     }

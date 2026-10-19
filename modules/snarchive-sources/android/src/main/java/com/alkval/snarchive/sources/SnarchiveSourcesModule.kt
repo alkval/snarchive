@@ -3,6 +3,7 @@ package com.alkval.snarchive.sources
 import android.app.Activity
 import android.content.Intent
 import expo.modules.kotlin.Promise
+import com.alkval.snarchive.sources.backup.BackupCoordinator
 import com.alkval.snarchive.sources.backup.BackupSession
 import android.net.Uri
 import android.os.Build
@@ -29,18 +30,14 @@ import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 class SnarchiveSourcesModule : Module() {
-  private val backupLock = Any()
-  private var backup: BackupSession? = null
-  private var backupDestination: Uri? = null
-  private var backupSaved = false
-  private var backupKeep = false // Written completely but not readable back yet: keep, report unchecked.
-  private var backupWorking = false // Streaming or verifying outside backupLock.
-  private var backupFinishPending = false
+  private val backupLock = Any() // Guards the picker promise only; backup state lives in the coordinator.
   private var backupPicker: Promise? = null
+  private val cancelled = AtomicBoolean(false)
+  private val busy = AtomicBoolean(false)
+  // Provider cleanup after teardown runs on its own thread; busy stays held until it has finished.
+  private val backups = BackupCoordinator({ Thread(it, "snarchive-backup-cleanup").start() }, { cancelled.get() }, { busy.set(false) })
   private fun backupRoot() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "snarchive-backups")
   private var thumbnails: com.alkval.snarchive.sources.storage.ThumbnailCache? = null
-  private val busy = AtomicBoolean(false)
-  private val cancelled = AtomicBoolean(false)
   private var importArchive: ArchiveOriginals? = null
   private var importFile: File? = null
   private var importBudget: OriginalStore.Budget? = null
@@ -50,10 +47,8 @@ class SnarchiveSourcesModule : Module() {
     Function("cancel") { cancelled.set(true) }
     OnDestroy {
       cancelled.set(true)
-      synchronized(backupLock) {
-        backupPicker?.resolve(mapOf("ok" to true, "canceled" to true)); backupPicker = null
-        if (backup != null) { if (backupWorking) backupFinishPending = true else finishBackup() }
-      }
+      synchronized(backupLock) { backupPicker?.resolve(mapOf("ok" to true, "canceled" to true)); backupPicker = null }
+      backups.finishLater()
     }
     AsyncFunction("recoverBackups") {
       if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
@@ -63,23 +58,18 @@ class SnarchiveSourcesModule : Module() {
     }
     AsyncFunction("beginBackup") {
       if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
-      synchronized(backupLock) {
-        try {
-          cancelled.set(false); backupSaved = false; backupKeep = false; backupFinishPending = false; backupDestination = null
-          backup = BackupSession(backupRoot(), File::getUsableSpace)
-          mapOf("ok" to true)
-        } catch (error: Exception) { busy.set(false); backupError(error) }
-      }
+      cancelled.set(false)
+      backupResult(backups.begin { BackupSession(backupRoot(), File::getUsableSpace) }.also { if (it != null) busy.set(false) })
     }
-    AsyncFunction("appendBackupChunk") { chunk: String -> backupCall { it.append(chunk) } }
-    AsyncFunction("addBackupObject") { hash: String, bytes: Double -> backupCall {
+    AsyncFunction("appendBackupChunk") { chunk: String -> backupResult(backups.call { it.append(chunk) }) }
+    AsyncFunction("addBackupObject") { hash: String, bytes: Double -> backupResult(backups.call {
       require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
       it.`object`(hash, bytes.toLong())
-    } }
-    AsyncFunction("sealBackup") { backupCall { it.seal() } }
+    }) }
+    AsyncFunction("sealBackup") { backupResult(backups.call { it.seal() }) }
     AsyncFunction("chooseBackupDestination") { promise: Promise ->
       synchronized(backupLock) {
-        if (backup == null || backupPicker != null || cancelled.get()) {
+        if (!backups.active() || backupPicker != null || cancelled.get()) {
           promise.resolve(mapOf("ok" to false, "code" to "cancelled"))
         } else {
           backupPicker = promise
@@ -103,45 +93,15 @@ class SnarchiveSourcesModule : Module() {
     OnActivityResult { _, (requestCode, resultCode, intent) ->
       if (requestCode == 7143) synchronized(backupLock) {
         backupPicker?.let { promise ->
-          backupDestination = if (resultCode == Activity.RESULT_OK) intent?.data else null
-          promise.resolve(mapOf("ok" to true, "canceled" to (backupDestination == null)))
+          val uri = if (resultCode == Activity.RESULT_OK) intent?.data?.takeIf { it.scheme == "content" } else null
+          val chosen = uri != null && backups.destination(documentDestination(uri)) == null
+          promise.resolve(mapOf("ok" to true, "canceled" to !chosen))
           backupPicker = null
         }
       }
     }
-    AsyncFunction("saveBackup") {
-      val (session, uri) = synchronized(backupLock) {
-        val session = backup; val uri = backupDestination
-        if (session == null || uri == null || backupWorking || cancelled.get()) return@AsyncFunction mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else "backup-failed")
-        backupWorking = true; session to uri
-      }
-      // Long work runs without backupLock, so teardown and picker results never wait on a provider.
-      try {
-        val resolver = requireNotNull(appContext.reactContext).contentResolver
-        require(uri.scheme == "content")
-        // "w", not "wt": the document was just created empty, and some providers reject truncate mode.
-        // A provider that leaves old bytes behind still fails the exact-length read-back below.
-        val descriptor = requireNotNull(resolver.openFileDescriptor(uri, "w"))
-        val written = ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
-          session.write(output, originals()) { cancelled.get() }.also {
-            if (OsConstants.S_ISREG(Os.fstat(descriptor.fileDescriptor).st_mode)) output.fd.sync()
-          }
-        }
-        try {
-          val input = try { resolver.openInputStream(uri) } catch (error: Exception) { throw IOException("backup-unverified", error) }
-          (input ?: throw IOException("backup-unverified")).use { BackupSession.verify(it, written.sha256, written.bytes) { cancelled.get() } }
-        } catch (error: IOException) {
-          if (error.message == "backup-unverified") synchronized(backupLock) { backupKeep = true }
-          throw error
-        }
-        synchronized(backupLock) { backupSaved = true }
-        mapOf("ok" to true)
-      } catch (error: Exception) { backupError(error) }
-      finally { synchronized(backupLock) { backupWorking = false; if (backupFinishPending) finishBackup() } }
-    }
-    AsyncFunction("endBackup") {
-      synchronized(backupLock) { if (backupWorking) { backupFinishPending = true; mapOf("ok" to false, "code" to "busy") } else finishBackup() }
-    }
+    AsyncFunction("saveBackup") { backupResult(backups.save(originals())) }
+    AsyncFunction("endBackup") { backupResult(backups.finish()) }
 
     AsyncFunction("thumbnail") { hash: String, bytes: Double, video: Boolean ->
       try {
@@ -248,30 +208,25 @@ class SnarchiveSourcesModule : Module() {
     }
   }
 
-  private fun backupError(error: Exception): Map<String, Any> {
-    val code = if (cancelled.get()) "cancelled" else when (error.message) {
-      "busy", "insufficient-storage", "stored-object-corrupt", "backup-limit", "backup-cleanup-failed", "backup-save-failed", "backup-unverified" -> error.message!!
-      else -> "backup-failed"
+  private fun backupError(error: Exception): Map<String, Any> = backupResult(BackupCoordinator.code(error, cancelled.get()))
+  private fun backupResult(code: String?): Map<String, Any> = if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
+  /** Only the document returned by our Create Document request is ever written or deleted. */
+  private fun documentDestination(uri: Uri): BackupCoordinator.Destination {
+    val resolver = requireNotNull(appContext.reactContext).contentResolver
+    return object : BackupCoordinator.Destination {
+      override fun openOutput(): java.io.OutputStream {
+        // "w", not "wt": the document was just created empty, and some providers reject truncate mode.
+        // A provider that leaves old bytes behind still fails the exact-length read-back.
+        val descriptor = requireNotNull(resolver.openFileDescriptor(uri, "w"))
+        return object : ParcelFileDescriptor.AutoCloseOutputStream(descriptor) {
+          override fun close() {
+            try { if (OsConstants.S_ISREG(Os.fstat(descriptor.fileDescriptor).st_mode)) fd.sync() } finally { super.close() }
+          }
+        }
+      }
+      override fun openInput(): java.io.InputStream? = resolver.openInputStream(uri)
+      override fun delete(): Boolean = DocumentsContract.deleteDocument(resolver, uri)
     }
-    return mapOf("ok" to false, "code" to code)
-  }
-  private fun backupCall(action: (BackupSession) -> Unit): Map<String, Any> = synchronized(backupLock) {
-    try {
-      check(!cancelled.get()) { "cancelled" }; check(!backupWorking) { "busy" }; action(requireNotNull(backup)); mapOf("ok" to true)
-    } catch (error: Exception) { backupError(error) }
-  }
-  /** Only the document returned by our Create Document request may be removed, and never one that was
-   * written completely but could not be read back yet (backupKeep): that may be a good backup still uploading. */
-  private fun finishBackup(): Map<String, Any> {
-    if (backup == null) return mapOf("ok" to true)
-    var code: String? = null
-    if (!backupSaved && !backupKeep) backupDestination?.let { uri ->
-      val removed = runCatching { DocumentsContract.deleteDocument(requireNotNull(appContext.reactContext).contentResolver, uri) }.getOrDefault(false)
-      if (!removed) code = "backup-partial-remains"
-    }
-    try { backup?.close() } catch (_: Exception) { if (code == null) code = if (backupSaved) "backup-saved-cleanup-failed" else "backup-cleanup-failed" }
-    finally { backup = null; backupDestination = null; backupKeep = false; backupFinishPending = false; busy.set(false) }
-    return if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code!!)
   }
 
   private fun importError(error: Exception): Map<String, Any> {
