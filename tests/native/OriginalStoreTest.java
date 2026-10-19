@@ -173,6 +173,33 @@ public class OriginalStoreTest {
       }
       check(objects(r) == 0);
     });
+    test("confirm accepts finalized objects and rejects missing or truncated ones", () -> {
+      File r = root(); OriginalStore store = new OriginalStore(r); OriginalStore.Stored stored = put(store, bytes);
+      check(store.confirm(stored.sha256, stored.bytes).equals(new File(r, stored.relativePath).getCanonicalFile()));
+      fails("stored-object-corrupt", () -> store.confirm(stored.sha256, stored.bytes + 1));
+      fails("invalid-object", () -> store.confirm("../" + stored.sha256, stored.bytes));
+      Files.write(new File(r, stored.relativePath).toPath(), Arrays.copyOf(bytes, bytes.length - 1));
+      fails("stored-object-corrupt", () -> store.confirm(stored.sha256, stored.bytes));
+      new File(r, stored.relativePath).delete();
+      fails("stored-object-corrupt", () -> store.confirm(stored.sha256, stored.bytes));
+    });
+    test("LRU index evicts oldest files by count and bytes without rescanning", () -> {
+      File r = root(); java.util.regex.Pattern names = java.util.regex.Pattern.compile("[a-z]\\.jpg");
+      for (String name : new String[] { "a.jpg", "b.jpg", "ignored.txt" }) Files.write(new File(r, name).toPath(), new byte[10]);
+      new File(r, "a.jpg").setLastModified(1000); new File(r, "b.jpg").setLastModified(2000);
+      LruFileIndex index = new LruFileIndex(r, names, 3, 35);
+      check(index.count() == 2 && index.bytes() == 20);
+      check(index.hit("a.jpg") != null); // a is now most recent; b is oldest.
+      index.reserve(10); Files.write(new File(r, "c.jpg").toPath(), new byte[10]); index.added("c.jpg", 10);
+      check(index.count() == 3 && new File(r, "b.jpg").exists());
+      index.reserve(10); // Count limit: evicts b.
+      check(!new File(r, "b.jpg").exists() && new File(r, "a.jpg").exists() && index.count() == 2);
+      Files.write(new File(r, "d.jpg").toPath(), new byte[10]); index.added("d.jpg", 10);
+      index.reserve(15); // Byte limit 35: evicts a (oldest after the hit), keeps c and d.
+      check(!new File(r, "a.jpg").exists() && index.bytes() == 20 && new File(r, "ignored.txt").exists());
+      new File(r, "c.jpg").delete(); check(index.hit("c.jpg") == null && index.count() == 1 && index.bytes() == 10);
+      fails("cache-entry-too-large", () -> index.reserve(36));
+    });
     System.out.println(passed + " original-storage host tests passed. No mobile-runtime or completed-import claim.");
   }
 }

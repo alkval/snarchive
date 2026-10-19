@@ -132,9 +132,22 @@ public final class OriginalStore {
     }
   }
 
-  public void verify(String hash, long size, BooleanSupplier stop) throws IOException {
+  private File object(String hash, long size) throws IOException {
     require(hash != null && hash.matches("[a-f0-9]{64}") && size >= 0 && size <= MAX_OBJECT, "invalid-object");
-    verifyExisting(checked("objects/" + hash.substring(0, 2) + "/" + hash), hash, size, stop);
+    return checked("objects/" + hash.substring(0, 2) + "/" + hash);
+  }
+
+  /** Full SHA-256 read. Reserve for integrity checks (backup, restore, repair), not routine opens. */
+  public void verify(String hash, long size, BooleanSupplier stop) throws IOException {
+    verifyExisting(object(hash, size), hash, size, stop);
+  }
+
+  /** Cheap presence check. put() syncs bytes before its atomic rename, so a finalized object is
+   * complete or absent; this catches lost renames and truncation, not later bit rot. */
+  public File confirm(String hash, long size) throws IOException {
+    File file = object(hash, size);
+    require(file.isFile() && file.length() == size, "stored-object-corrupt");
+    return file;
   }
 
   /** Removes abandoned parts only; completed objects are retained for later job reconciliation. */

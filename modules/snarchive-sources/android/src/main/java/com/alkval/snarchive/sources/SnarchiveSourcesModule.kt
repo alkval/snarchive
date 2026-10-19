@@ -77,11 +77,11 @@ class SnarchiveSourcesModule : Module() {
         mapOf("ok" to true, "sha256" to result.sha256, "relativePath" to result.relativePath, "bytes" to result.bytes)
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
-    AsyncFunction("verifyOriginal") { hash: String, bytes: Double ->
+    AsyncFunction("confirmOriginal") { hash: String, bytes: Double ->
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       try {
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
-        originals().verify(hash, bytes.toLong()) { cancelled.get() }
+        originals().confirm(hash, bytes.toLong())
         mapOf("ok" to true)
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
@@ -90,8 +90,7 @@ class SnarchiveSourcesModule : Module() {
       cancelled.set(false)
       try {
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
-        originals().verify(hash, bytes.toLong()) { cancelled.get() }
-        val file = File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals/objects/${hash.take(2)}/$hash")
+        val file = originals().confirm(hash, bytes.toLong())
         mapOf("ok" to true, "uri" to Uri.fromFile(file).toString())
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
@@ -100,8 +99,7 @@ class SnarchiveSourcesModule : Module() {
       cancelled.set(false)
       try {
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
-        originals().verify(hash, bytes.toLong()) { cancelled.get() }
-        val file = File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals/objects/${hash.take(2)}/$hash")
+        val file = originals().confirm(hash, bytes.toLong())
         val result = mutableMapOf<String, Any>("ok" to true, "uri" to Uri.fromFile(file).toString())
         val metadata = android.media.MediaMetadataRetriever()
         try {

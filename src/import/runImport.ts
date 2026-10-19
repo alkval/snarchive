@@ -2,10 +2,12 @@ import { ImportStore, type Receipt } from '../storage/importStore.ts';
 export interface OriginalCopier {
   open(uri: string, hash: string, remaining: number): Promise<void>;
   preserve(path: string): Promise<Receipt>;
-  verify(hash: string, bytes: number): Promise<void>;
+  /** Presence and length only; a full rehash of every completed file would dominate resume time. */
+  confirm(hash: string, bytes: number): Promise<void>;
   close(): Promise<void>;
 }
-/** Per-file commit boundary. Retrying an uncommitted file verifies/reuses any finalized bytes. */
+/** Per-file commit boundary. Retrying an uncommitted file verifies/reuses any finalized bytes.
+ * Committed files were synced before their atomic rename, so resume only confirms they still exist. */
 export async function runImport(store: ImportStore, copier: OriginalCopier, hash: string, uri: string,
   stopped: () => boolean, progress: (files: number) => void): Promise<void> {
   const check = () => { if (stopped()) throw new Error('cancelled'); };
@@ -19,7 +21,7 @@ export async function runImport(store: ImportStore, copier: OriginalCopier, hash
       check(); const item = await store.item(hash, ordinal); if (!item) break;
       if (item.state === 'done') {
         if (item.object_hash === null || item.bytes === null) throw new Error('stored-object-corrupt');
-        await copier.verify(item.object_hash, item.bytes);
+        await copier.confirm(item.object_hash, item.bytes);
       } else {
         const receipt = await copier.preserve(item.relative_path);
         // Even if cancellation arrived after finalization, commit this complete file before stopping.

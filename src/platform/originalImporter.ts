@@ -10,7 +10,7 @@ interface NativeImporter {
   originalVideo?(hash: string, bytes: number): Promise<Result & LocalVideo>;
   openImportArchive(uri: string, hash: string, remaining: number): Promise<Result>;
   preserveImportEntry(path: string): Promise<Result & Receipt>;
-  verifyOriginal(hash: string, bytes: number): Promise<Result>;
+  confirmOriginal(hash: string, bytes: number): Promise<Result>;
   originalUri?(hash: string, bytes: number): Promise<Result & { uri: string }>;
   closeImportArchive(): Promise<Result>;
 }
@@ -23,7 +23,7 @@ function checked<T extends Result>(result: T): T { if (!result.ok) throw new Err
 export const originalCopier: OriginalCopier = {
   async open(uri, hash, remaining) { checked(await native().openImportArchive(uri, hash, remaining)); },
   async preserve(path) { return checked(await native().preserveImportEntry(path)); },
-  async verify(hash, bytes) { checked(await native().verifyOriginal(hash, bytes)); },
+  async confirm(hash, bytes) { checked(await native().confirmOriginal(hash, bytes)); },
   async close() { checked(await native().closeImportArchive()); },
 };
 let opening: Promise<ImportStore> | undefined;

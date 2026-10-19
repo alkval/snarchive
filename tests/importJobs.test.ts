@@ -22,10 +22,10 @@ const hash = 'a'.repeat(64);
 const receipt = (letter = 'b'): Receipt => ({ sha256: letter.repeat(64), relativePath: `objects/${letter.repeat(2)}/${letter.repeat(64)}`, bytes: 10 });
 const source = (names = ['one', 'two']) => inventoryFromSnapshot({ entries: names.map(name => ({ path: `2026-02-05_${name}-main.jpg` })), metadataBytes: 0, visitedEntries: names.length }, 'source-1');
 class Copier implements OriginalCopier {
-  preserved: string[] = []; verified: string[] = []; closed = 0; failAt = 0; failVerify = false;
+  preserved: string[] = []; confirmed: string[] = []; closed = 0; failAt = 0; failConfirm = false;
   async open(_uri: string, _hash: string, _remaining: number) {}
   async preserve(path: string) { this.preserved.push(path); if (this.failAt === this.preserved.length) throw new Error('cancelled'); return receipt(); }
-  async verify(hash: string, _bytes: number) { if (this.failVerify) throw new Error('stored-object-corrupt'); this.verified.push(hash); }
+  async confirm(hash: string, _bytes: number) { if (this.failConfirm) throw new Error('stored-object-corrupt'); this.confirmed.push(hash); }
   async close() { this.closed++; }
 }
 async function setup(t: { after: (fn: () => void) => void }) {
@@ -44,14 +44,14 @@ test('distinct memories share stored bytes without merging their identities', as
   assert.deepEqual(await store.summary(), { files: 2, objects: 1, memories: 2, unfinished: 0, conflicts: 0 });
   assert.equal(copier.closed, 1);
 });
-test('interrupted job reopens and verifies completed files before continuing', async t => {
+test('interrupted job reopens and confirms completed files before continuing', async t => {
   const { store, db, path } = await setup(t); const first = new Copier(); first.failAt = 2;
   await assert.rejects(runImport(store, first, hash, 'synthetic', () => false, () => {}));
   assert.equal((await store.summary()).files, 1); db.raw.close();
   const reopened = new DB(path); const next = new ImportStore(reopened); await next.initialize(); const second = new Copier();
   try {
     await runImport(next, second, hash, 'synthetic', () => false, () => {});
-    assert.equal(second.preserved.length, 1); assert.equal(second.verified.length, 1);
+    assert.equal(second.preserved.length, 1); assert.equal(second.confirmed.length, 1);
     assert.equal((await next.summary()).unfinished, 0);
   } finally { reopened.raw.close(); }
 });
@@ -68,11 +68,11 @@ test('finalized but uncommitted bytes are retried after database failure', async
   db.failSql = ''; await runImport(store, copier, hash, 'synthetic', () => false, () => {});
   assert.equal(copier.preserved.length, 3); assert.equal((await store.summary()).files, 2);
 });
-test('completed reimport verifies objects without copying or duplicating links', async t => {
+test('completed reimport confirms objects without copying or duplicating links', async t => {
   const { store } = await setup(t); const copier = new Copier();
   await runImport(store, copier, hash, 'synthetic', () => false, () => {});
   await runImport(store, copier, hash, 'synthetic', () => false, () => {});
-  assert.equal(copier.preserved.length, 2); assert.equal(copier.verified.length, 2); assert.equal((await store.summary()).memories, 2);
+  assert.equal(copier.preserved.length, 2); assert.equal(copier.confirmed.length, 2); assert.equal((await store.summary()).memories, 2);
 });
 test('competing bytes for the same memory remain separate and report a conflict', async t => {
   const { store } = await setup(t); await store.commit(hash, 0, receipt());
@@ -90,7 +90,7 @@ test('invalid native receipts cannot create objects or completed work', async t 
   await assert.rejects(store.commit(hash, 0, { ...receipt(), bytes: -1 })); assert.equal((await store.summary()).files, 0);
 });
 test('missing/corrupt completed objects stop resume instead of claiming completion', async t => {
-  const { store } = await setup(t); await store.commit(hash, 0, receipt()); const copier = new Copier(); copier.failVerify = true;
+  const { store } = await setup(t); await store.commit(hash, 0, receipt()); const copier = new Copier(); copier.failConfirm = true;
   await assert.rejects(runImport(store, copier, hash, 'synthetic', () => false, () => {}), /stored-object-corrupt/);
   assert.equal(copier.preserved.length, 0); assert.equal((await store.summary()).unfinished, 1);
 });
