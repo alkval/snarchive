@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { ImportStore, LibraryRow, LibraryCursor, ChronologicalRow } from '../storage/importStore';
@@ -7,6 +7,9 @@ import { VideoPlayerView } from './VideoPlayerView';
 import { thumbnail, originalUri, originalVideo, type LocalVideo } from '../platform/originalImporter';
 import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
 import { pageThumbnails } from '../storage/pageThumbnails';
+import { defaultFilters, type LibraryFilters } from '../domain/libraryFilters';
+import { LibraryFilterForm } from './LibraryFilters';
+import { FavoriteButton } from './FavoriteButton';
 import { en } from '../i18n/en';
 
 type Photo = { uri: string; size: ImageSize };
@@ -21,21 +24,25 @@ function Button({ label, onPress, disabled = false }: { label: string; onPress: 
   return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={[styles.button, disabled && { opacity: 0.5 }]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
 }
 export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose: () => void }) {
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const [filters, setFilters] = useState<LibraryFilters>({ ...defaultFilters });
+  const [editingFilters, setEditingFilters] = useState(false);
   const [rows, setRows] = useState<ChronologicalRow[]>([]);
   const [cursor, setCursor] = useState<LibraryCursor | null>(null);
   const [history, setHistory] = useState<(LibraryCursor | null)[]>([]);
   const [previews, setPreviews] = useState<Record<string, string | null>>({});
   const [next, setNext] = useState(false);
-  const [selected, setSelected] = useState<LibraryRow | null>(null);
+  const [selected, setSelected] = useState<ChronologicalRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let active = true; setLoading(true); setFailed(false); setRows([]); setPreviews({});
-    void store.chronologicalPage(cursor, 31).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
+    void store.chronologicalPage(cursor, 31, filters).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
       .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [store, cursor, retry]);
+  }, [store, cursor, retry, filters]);
   useEffect(() => {
     let stopped = false;
     if (!selected) void pageThumbnails(rows, store, thumbnail, () => stopped,
@@ -44,18 +51,22 @@ export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose
   }, [rows, selected, store]);
   return <SafeAreaView style={styles.root}>
     <StatusBar style="light" />
-    <Button label={selected ? en.libraryBack : en.libraryClose} onPress={selected ? () => setSelected(null) : onClose} />
-    {selected ? <PhotoViewer key={selected.id} row={selected} store={store} /> : <>
+    <Button label={selected ? en.libraryBack : en.libraryClose} onPress={selected ? () => { setSelected(null); setRetry(value => value + 1); } : onClose} />
+    {selected ? <>
+      <FavoriteButton key={`favorite-${selected.id}`} id={selected.id} initial={selected.favorite === 1} store={store} saved={() => { if (active.current) { setCursor(null); setHistory([]); setRetry(value => value + 1); } }} />
+      <PhotoViewer key={selected.id} row={selected} store={store} />
+    </> : editingFilters ? <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)} apply={value => { setFilters(value); setCursor(null); setHistory([]); setEditingFilters(false); }} /> : <>
       <Text accessibilityRole="header" style={styles.title}>{en.libraryTitle}</Text>
       <Text style={styles.text}>{en.libraryOrder}</Text>
+      <Button label={en.filterSummary(filters.media, filters.favorites, filters.month)} onPress={() => setEditingFilters(true)} />
       {loading ? <Text style={styles.text}>{en.libraryLoading}</Text> : failed ? <><Text style={styles.text}>{en.libraryFailed}</Text><Button label={en.libraryRetry} onPress={() => setRetry(value => value + 1)} /></> : <>
-        <FlatList key={JSON.stringify(cursor)} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.libraryEmpty}</Text>}
+        <FlatList key={JSON.stringify(cursor)} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.filterEmpty}</Text>}
           renderItem={({ item }) => <Pressable accessibilityRole="button" onPress={() => setSelected(item)} style={styles.row}>
             <View style={styles.thumbnail}>
               {previews[item.id] ? <Image accessible={false} source={{ uri: previews[item.id]! }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => setPreviews(previous => ({ ...previous, [item.id]: null }))} />
                 : <Text style={styles.id}>{previews[item.id] === undefined ? en.thumbnailLoading : en.thumbnailMissing}</Text>}
             </View>
-            <View style={styles.rowText}><Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.id}</Text>
+            <View style={styles.rowText}><Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.favorite ? `${en.favoriteLabel} · ${item.id}` : item.id}</Text>
             <Text style={styles.text}>{en.libraryKinds(item.photos, item.videos, item.overlays)}</Text></View>
           </Pressable>} />
         <View style={styles.navigation}><Button label={en.libraryPrevious} disabled={!history.length} onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} />

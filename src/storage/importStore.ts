@@ -1,3 +1,4 @@
+import { defaultFilters, validFilters, type LibraryFilters } from '../domain/libraryFilters.ts';
 import type { SqlDatabase, SqlConnection } from './previewStore.ts';
 import { encodePreview, decodePreview } from './previewCodec.ts';
 import { mergeSourceInventories, type SourceInventory } from '../import/sourceInventory.ts';
@@ -12,7 +13,7 @@ export function validateReceipt(value: Receipt): void {
 }
 export type LibraryRow = { id: string; day: string | null; instant: string | null; dateConflict: number; photos: number; videos: number; overlays: number };
 export type LibraryCursor = { day: string; time: string; id: string };
-export type ChronologicalRow = LibraryRow & { sortDay: string; sortTime: string };
+export type ChronologicalRow = LibraryRow & { favorite: number; sortDay: string; sortTime: string };
 export type LibraryObject = Receipt & { role: 'photo' | 'video' | 'overlay' };
 async function indexDates(tx: SqlConnection, source: SourceInventory) {
   const evidence = [
@@ -30,28 +31,30 @@ export class ImportStore {
     await this.db.execAsync('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     await this.db.withExclusiveTransactionAsync(async tx => {
       const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-      if (version?.user_version === 2) return;
-      check(version?.user_version === 0 || version?.user_version === 1);
-      if (version.user_version === 0) await tx.execAsync(`
-        CREATE TABLE import_jobs (hash TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','running','paused','completed')), plan_json TEXT NOT NULL);
-        CREATE TABLE import_items (job_hash TEXT NOT NULL, ordinal INTEGER NOT NULL, relative_path TEXT NOT NULL, memory_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('photo','video','overlay')), date_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','done')), object_hash TEXT, PRIMARY KEY(job_hash,ordinal), UNIQUE(job_hash,relative_path), CHECK((state='pending' AND object_hash IS NULL) OR (state='done' AND object_hash IS NOT NULL)));
-        CREATE TABLE stored_objects (hash TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL CHECK(bytes >= 0));
-        CREATE TABLE memories (id TEXT PRIMARY KEY);
-        CREATE TABLE memory_objects (memory_id TEXT NOT NULL, role TEXT NOT NULL, object_hash TEXT NOT NULL, PRIMARY KEY(memory_id,role,object_hash));
-        CREATE INDEX items_job_state ON import_items(job_hash,state,ordinal);
-      `);
-      await tx.execAsync(`CREATE TABLE library_dates(memory_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(memory_id,kind,value));
-        CREATE INDEX memory_objects_by_memory ON memory_objects(memory_id,role);
-        CREATE INDEX import_items_by_memory ON import_items(memory_id);
-      `);
-      let after = '';
-      while (true) {
-        const job = await tx.getFirstAsync<{ hash: string; plan_json: string }>('SELECT hash,plan_json FROM import_jobs WHERE hash>? ORDER BY hash LIMIT 1', after);
-        if (!job) break;
-        for (const source of decodePreview(job.plan_json).preview.sources) await indexDates(tx, source);
-        after = job.hash;
+      if (version?.user_version === 3) return;
+      check(version && [0, 1, 2].includes(version.user_version));
+      if (version.user_version < 2) {
+        if (version.user_version === 0) await tx.execAsync(`
+          CREATE TABLE import_jobs (hash TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','running','paused','completed')), plan_json TEXT NOT NULL);
+          CREATE TABLE import_items (job_hash TEXT NOT NULL, ordinal INTEGER NOT NULL, relative_path TEXT NOT NULL, memory_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('photo','video','overlay')), date_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','done')), object_hash TEXT, PRIMARY KEY(job_hash,ordinal), UNIQUE(job_hash,relative_path), CHECK((state='pending' AND object_hash IS NULL) OR (state='done' AND object_hash IS NOT NULL)));
+          CREATE TABLE stored_objects (hash TEXT PRIMARY KEY, relative_path TEXT NOT NULL UNIQUE, bytes INTEGER NOT NULL CHECK(bytes >= 0));
+          CREATE TABLE memories (id TEXT PRIMARY KEY);
+          CREATE TABLE memory_objects (memory_id TEXT NOT NULL, role TEXT NOT NULL, object_hash TEXT NOT NULL, PRIMARY KEY(memory_id,role,object_hash));
+          CREATE INDEX items_job_state ON import_items(job_hash,state,ordinal);
+        `);
+        await tx.execAsync(`CREATE TABLE library_dates(memory_id TEXT NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, day TEXT NOT NULL, PRIMARY KEY(memory_id,kind,value));
+          CREATE INDEX memory_objects_by_memory ON memory_objects(memory_id,role);
+          CREATE INDEX import_items_by_memory ON import_items(memory_id);
+        `);
+        let after = '';
+        while (true) {
+          const job = await tx.getFirstAsync<{ hash: string; plan_json: string }>('SELECT hash,plan_json FROM import_jobs WHERE hash>? ORDER BY hash LIMIT 1', after);
+          if (!job) break;
+          for (const source of decodePreview(job.plan_json).preview.sources) await indexDates(tx, source);
+          after = job.hash;
+        }
       }
-      await tx.execAsync('PRAGMA user_version = 2;');
+      await tx.execAsync('CREATE TABLE library_favorites(memory_id TEXT PRIMARY KEY); PRAGMA user_version = 3;');
     });
   }
   async plan(hash: string, source: SourceInventory): Promise<void> {
@@ -101,6 +104,7 @@ export class ImportStore {
     const row = await this.db.getFirstAsync<{ data: string }>(`SELECT json_group_array(json_object(
       'id',id,'day',day,'instant',instant,'dateConflict',dateConflict,'photos',photos,'videos',videos,'overlays',overlays)) AS data FROM (
       SELECT m.id,
+        EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id) AS favorite,
         (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
         (SELECT min(value) FROM library_dates WHERE memory_id=m.id AND kind='instant') AS instant,
         (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict,
@@ -111,10 +115,12 @@ export class ImportStore {
     )`, after, limit);
     return JSON.parse(row?.data ?? '[]') as LibraryRow[];
   }
-  async chronologicalPage(after: LibraryCursor | null = null, limit = 30): Promise<ChronologicalRow[]> {
+  async chronologicalPage(after: LibraryCursor | null = null, limit = 30, filters: LibraryFilters = defaultFilters): Promise<ChronologicalRow[]> {
     check(Number.isInteger(limit) && limit >= 1 && limit <= 100);
+    check(validFilters(filters));
     const row = await this.db.getFirstAsync<{ data: string }>(`WITH facts AS (
       SELECT m.id,
+        EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id) AS favorite,
         (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
         (SELECT min(value) FROM library_dates WHERE memory_id=m.id AND kind='instant') AS instant,
         (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict,
@@ -126,11 +132,21 @@ export class ImportStore {
       SELECT *, CASE WHEN dateConflict=0 THEN coalesce(day,'') ELSE '' END AS sortDay,
         CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts
     ) SELECT json_group_array(json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
-      'photos',photos,'videos',videos,'overlays',overlays,'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
-      SELECT * FROM ordered WHERE ?=1 OR sortDay<? OR (sortDay=? AND sortTime<?) OR (sortDay=? AND sortTime=? AND id>?)
+      'favorite',favorite,'photos',photos,'videos',videos,'overlays',overlays,'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
+      SELECT * FROM ordered WHERE (?=1 OR sortDay<? OR (sortDay=? AND sortTime<?) OR (sortDay=? AND sortTime=? AND id>?))
+        AND (?='all' OR (?='photos' AND photos>0) OR (?='videos' AND videos>0))
+        AND (?=0 OR favorite=1) AND (?='' OR (dateConflict=0 AND substr(day,1,7)=?))
       ORDER BY sortDay DESC,sortTime DESC,id ASC LIMIT ?
-    )`, after ? 0 : 1, after?.day ?? '', after?.day ?? '', after?.time ?? '', after?.day ?? '', after?.time ?? '', after?.id ?? '', limit);
+    )`, after ? 0 : 1, after?.day ?? '', after?.day ?? '', after?.time ?? '', after?.day ?? '', after?.time ?? '', after?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, limit);
     return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
+  }
+  async setFavorite(id: string, favorite: boolean): Promise<void> {
+    check(typeof favorite === 'boolean');
+    await this.db.withExclusiveTransactionAsync(async tx => {
+      check(await tx.getFirstAsync("SELECT 1 FROM memory_objects WHERE memory_id=? AND role!='overlay' LIMIT 1", id));
+      if (favorite) await tx.runAsync('INSERT OR IGNORE INTO library_favorites(memory_id) VALUES (?)', id);
+      else await tx.runAsync('DELETE FROM library_favorites WHERE memory_id=?', id);
+    });
   }
   async objects(id: string): Promise<LibraryObject[]> {
     // Three are enough to detect ambiguity. Never load an unbounded collection of variants.

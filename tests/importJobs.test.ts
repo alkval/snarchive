@@ -130,14 +130,14 @@ test('late metadata enriches existing memories and contradictory instants are ex
 });
 test('version-one migration backfills dates without losing receipts, and can reopen', async t => {
   const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
-  db.raw.exec('DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1;');
+  db.raw.exec('DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1;');
   await store.initialize(); await store.initialize();
   assert.equal((await store.summary()).files, 1);
   assert.equal((await store.page())[0]?.day, '2026-02-05');
 });
 test('failed date migration rolls back and leaves the previous database intact', async t => {
   const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
-  db.raw.exec("DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1; UPDATE import_jobs SET plan_json='invalid';");
+  db.raw.exec("DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1; UPDATE import_jobs SET plan_json='invalid';");
   await assert.rejects(store.initialize());
   assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
   assert.equal((await store.summary()).files, 1);
@@ -192,4 +192,51 @@ test('new date evidence changes chronological order without changing stored iden
   await store.plan('d'.repeat(64), inventoryFromSnapshot({ entries: [{ path: '2026-10-19_new-main.jpg' }], metadataBytes: 0, visitedEntries: 1 }, 'source-3'));
   assert.deepEqual((await store.chronologicalPage()).map(row => row.id), ['one', 'new']);
   assert.equal((await store.summary()).objects, 1);
+});
+
+test('favorites persist across database reopening without merging shared-byte memories', async t => {
+  const { store, db, path } = await setup(t); await store.commit(hash, 0, receipt()); await store.commit(hash, 1, receipt());
+  await store.setFavorite('one', true); await store.setFavorite('one', true);
+  db.raw.close(); const reopened = new DB(path); const next = new ImportStore(reopened);
+  try {
+    await next.initialize();
+    const rows = await next.chronologicalPage(null, 30, { media: 'all', favorites: true, month: '' });
+    assert.deepEqual(rows.map(row => row.id), ['one']); assert.equal(rows[0]?.favorite, 1);
+    assert.equal((await next.summary()).objects, 1);
+    await next.setFavorite('one', false);
+    assert.equal((await next.chronologicalPage(null, 30, { media: 'all', favorites: true, month: '' })).length, 0);
+  } finally { reopened.raw.close(); }
+});
+test('favorite write failure rolls back, and pending or unknown memories cannot be favorited', async t => {
+  const { store, db } = await setup(t);
+  await assert.rejects(store.setFavorite('one', true)); await assert.rejects(store.setFavorite('missing', true));
+  await store.commit(hash, 0, receipt()); db.failSql = 'INSERT OR IGNORE INTO library_favorites';
+  await assert.rejects(store.setFavorite('one', true)); db.failSql = '';
+  assert.equal((await store.chronologicalPage())[0]?.favorite, 0);
+});
+test('schema two upgrade preserves imported files and creates favorites atomically', async t => {
+  const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
+  db.raw.exec('DROP TABLE library_favorites; PRAGMA user_version=2;');
+  await store.initialize(); await store.initialize(); await store.setFavorite('one', true);
+  assert.equal((await store.summary()).files, 1);
+  assert.equal((await store.chronologicalPage())[0]?.favorite, 1);
+});
+test('media, month, and favorite filters compose before cursor pagination', async t => {
+  const { store } = await setup(t); await store.commit(hash, 0, receipt());
+  const other = 'f'.repeat(64);
+  const names = ['2026-10-18_clip-main.mp4', '2026-10-17_photo-main.jpg', '2026-09-01_sept-main.mp4', '2026-02-30_unknown-main.mp4'];
+  await store.plan(other, inventoryFromSnapshot({ entries: names.map(path => ({ path })), visitedEntries: names.length, metadataBytes: 0 }, 'source-2'));
+  for (let i = 0; i < names.length; i++) await store.commit(other, i, receipt());
+  await store.setFavorite('clip', true); await store.setFavorite('sept', true);
+  const filters = { media: 'videos' as const, favorites: true, month: '' };
+  const first = (await store.chronologicalPage(null, 1, filters))[0]!;
+  assert.equal(first.id, 'clip');
+  const second = await store.chronologicalPage({ day: first.sortDay, time: first.sortTime, id: first.id }, 1, filters);
+  assert.equal(second[0]?.id, 'sept');
+  assert.deepEqual((await store.chronologicalPage(null, 30, { ...filters, month: '2026-10' })).map(row => row.id), ['clip']);
+  assert.deepEqual((await store.chronologicalPage(null, 30, { media: 'photos', favorites: false, month: '2026-10' })).map(row => row.id), ['photo']);
+  await assert.rejects(store.chronologicalPage(null, 30, { ...filters, month: '2026-13' }));
+  await store.plan('e'.repeat(64), inventoryFromSnapshot({ entries: [{ path: '2026-10-19_clip-main.mp4' }], visitedEntries: 1, metadataBytes: 0 }, 'source-3'));
+  assert.equal((await store.chronologicalPage(null, 30, { ...filters, month: '2026-10' })).length, 0);
+  assert.equal((await store.chronologicalPage(null, 30, filters)).length, 2);
 });
