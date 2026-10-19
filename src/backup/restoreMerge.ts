@@ -1,5 +1,7 @@
 import type { SqlConnection } from '../storage/previewStore.ts';
 import { indexDates, LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
+import { decodePreview } from '../storage/previewCodec.ts';
+import type { SourceInventory } from '../import/sourceInventory.ts';
 import type { ValidRecord } from './manifest.ts';
 
 /** What a restore changed in the library, as opposed to what the backup contains. */
@@ -20,6 +22,23 @@ export type RestoreChanges = {
 export class RestoreError extends Error {}
 function check(ok: unknown, code = 'restore-conflict'): asserts ok { if (!ok) throw new RestoreError(code); }
 const BATCH = 100;
+
+/** A source's complete evidence (files, metadata records with dates and locations, diagnostics, counts) with only its
+ * per-device label replaced: the source's own ID, each file's ID, and the "<label>:" prefix of metadata IDs. Two scans
+ * of the same archive on different devices (source-1 vs source-7) compare equal; any other difference does not. */
+export function sourceEvidence(source: SourceInventory): string {
+  const label = source.sourceId, neutral = 'source';
+  const relabel = (id: string) => id.startsWith(`${label}:`) ? `${neutral}${id.slice(label.length)}` : id;
+  return JSON.stringify({
+    ...source, sourceId: neutral,
+    files: source.files.map(file => ({ ...file, sourceId: file.sourceId === label ? neutral : file.sourceId })),
+    metadata: source.metadata.map(result => ({
+      ...result,
+      records: result.records.map(record => ({ ...record, sourceId: relabel(record.sourceId) })),
+      diagnostics: result.diagnostics.map(diagnostic => ({ ...diagnostic, sourceId: relabel(diagnostic.sourceId) })),
+    })),
+  });
+}
 
 type Item = { relativePath: string; memoryId: string; role: string; dateJson: string; state: 'pending' | 'done'; objectHash: string | null };
 type Source = { hash: string; isNew: boolean; state: string; items: Item[]; plan: string; source: Extract<ValidRecord, { type: 'source' }>; completed: number };
@@ -96,8 +115,11 @@ export class RestoreMerge {
       dateJson: JSON.stringify(file.captureDate), state: 'pending', objectHash: null }));
     const job = await this.tx.getFirstAsync<{ state: string; plan_json: string }>('SELECT state,plan_json FROM import_jobs WHERE hash=?', record.archiveSha256);
     if (!job) { this.current = { hash: record.archiveSha256, isNew: true, state: 'planned', items: backupItems, plan: record.inventory, source: record, completed: 0 }; return; }
-    // Same archive bytes must mean the same plan. The source label inside a plan (source-1, source-2...) is
-    // assigned per device, so compare what the plan says about each file, ordinal by ordinal.
+    // Same archive bytes must mean the same evidence. Compare the whole codec-normalized inventory, metadata included,
+    // ignoring only the per-device label; the existing plan is kept, so anything the backup adds would otherwise be lost.
+    let existingSource: SourceInventory;
+    try { existingSource = decodePreview(job.plan_json).preview.sources[0]!; } catch { throw new RestoreError('restore-conflict'); }
+    check(sourceEvidence(existingSource) === sourceEvidence(record.saved.preview.sources[0]!));
     const existing = await this.tx.getAllAsync<{ ordinal: number; relative_path: string; memory_id: string; role: string; date_json: string; state: 'pending' | 'done'; object_hash: string | null }>(
       'SELECT ordinal,relative_path,memory_id,role,date_json,state,object_hash FROM import_items WHERE job_hash=? ORDER BY ordinal', record.archiveSha256);
     check(existing.length === backupItems.length);

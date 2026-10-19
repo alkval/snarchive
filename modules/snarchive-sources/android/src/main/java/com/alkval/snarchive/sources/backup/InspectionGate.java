@@ -13,6 +13,8 @@ public final class InspectionGate<T extends Closeable> {
   public static final String CLEANUP_FAILED = "backup-cleanup-failed";
   /** ArchiveSource.removeAbandonedCopies: a private copy left by an earlier operation could not be removed. */
   public static final String STAGING_CLEANUP_FAILED = "staging-cleanup-failed";
+  /** OriginalStore: a partly written original in the store's staging could not be removed. */
+  public static final String STORE_STAGING_CLEANUP_FAILED = "store-staging-cleanup-failed";
   /** The opening outcome: the original failure code (or null), and whether a temporary copy could not be deleted. */
   public static final class Opened {
     public final String code; public final boolean cleanupFailed;
@@ -25,9 +27,19 @@ public final class InspectionGate<T extends Closeable> {
     for (Throwable suppressed : error.getSuppressed()) if (isCleanupFailure(suppressed.getMessage())) return true;
     return false;
   }
+  /** True when a partly written original was left in the store's staging on this error's path. */
+  public static boolean storeCleanupFailed(Throwable error) {
+    if (STORE_STAGING_CLEANUP_FAILED.equals(error.getMessage())) return true;
+    for (Throwable suppressed : error.getSuppressed()) if (STORE_STAGING_CLEANUP_FAILED.equals(suppressed.getMessage())) return true;
+    return false;
+  }
+  /** The work's value, or its original failure code plus which kinds of cleanup failed alongside it. */
   public static final class Result<R> {
-    public final R value; public final String code;
-    Result(R value, String code) { this.value = value; this.code = code; }
+    public final R value; public final String code; public final boolean cleanupFailed, storeCleanupFailed;
+    Result(R value, String code) { this(value, code, false, false); }
+    Result(R value, String code, boolean cleanupFailed, boolean storeCleanupFailed) {
+      this.value = value; this.code = code; this.cleanupFailed = cleanupFailed; this.storeCleanupFailed = storeCleanupFailed;
+    }
   }
 
   private final Object lock = new Object();
@@ -68,12 +80,13 @@ public final class InspectionGate<T extends Closeable> {
       if (working || opening) return new Result<>(null, "busy");
       working = true; current = session;
     }
-    R value = null; String code = null;
-    try { value = work.run(current); } catch (Exception error) { code = codes.code(error); }
+    R value = null; String code = null; boolean cleanup = false, storeCleanup = false;
+    try { value = work.run(current); }
+    catch (Exception error) { code = codes.code(error); cleanup = cleanupFailed(error); storeCleanup = storeCleanupFailed(error); }
     boolean finishNow;
     synchronized (lock) { working = false; finishNow = finishPending; finishPending = false; }
     if (finishNow) finish();
-    return new Result<>(value, code);
+    return new Result<>(value, code, cleanup, storeCleanup);
   }
 
   public boolean active() { synchronized (lock) { return session != null && !finishing; } }

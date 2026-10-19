@@ -34,7 +34,9 @@ public final class BackupInspection implements Closeable {
     // A leftover private copy from an earlier operation could not be removed, so the chosen backup was never opened.
     "staging-cleanup-failed",
     // Restore: a local original of the wrong length or content; the store is left unchanged.
-    "stored-object-corrupt"));
+    "stored-object-corrupt",
+    // Restore: a partly written original in the store's staging could not be removed (see OriginalStore).
+    OriginalStore.STAGING_CLEANUP_FAILED));
 
   public static final class Chunk {
     public final String text; public final boolean done;
@@ -286,7 +288,11 @@ public final class BackupInspection implements Closeable {
           if (result.reused) reused++; else added++;
         } catch (IOException error) {
           String message = error.getMessage();
-          if ("content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)) throw new IOException("backup-damaged", error);
+          if ("content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)) {
+            IOException damaged = new IOException("backup-damaged", error);
+            for (Throwable cleanup : error.getSuppressed()) damaged.addSuppressed(cleanup); // Keep any cleanup failure.
+            throw damaged;
+          }
           throw error;
         }
       }

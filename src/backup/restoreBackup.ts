@@ -2,16 +2,18 @@ import type { SqlDatabase } from '../storage/previewStore.ts';
 import { BackupManifestValidator, type BackupPreview } from './manifest.ts';
 import { RestoreMerge, type RestoreChanges } from './restoreMerge.ts';
 
-type Result = { ok: boolean; code?: string };
+/** A failed step keeps its code; the flags say which cleanup also failed on its path (see RestoreFailure). */
+type Result = { ok: boolean; code?: string; cleanupFailed?: boolean; storeCleanupFailed?: boolean };
 export type StoreProgress = { stored: number; total: number; added: number; reused: number; bytes: number; totalBytes: number; done: boolean };
 /** The native restore session (Android). Media bytes never cross this boundary. */
 export interface RestoreBridge {
   /** Opens the chosen document in restore mode: pass 1 also keeps a private, hashed copy of the manifest. */
-  beginBackupRestore(uri: string): Promise<Result & { inPlace?: boolean; cleanupFailed?: boolean }>;
+  beginBackupRestore(uri: string): Promise<Result & { inPlace?: boolean }>;
   readBackupManifest(): Promise<Result & { text?: string; done?: boolean }>;
   declareBackupObjects(hashes: string[], sizes: number[]): Promise<Result>;
   sealBackupInspection(): Promise<Result>;
-  /** Clears abandoned store staging and checks free space for the objects not already in the library. */
+  /** Clears abandoned store staging (failing with store-staging-cleanup-failed if a part cannot be removed) and
+   * checks free space for the objects not already in the library. */
   prepareBackupRestore(): Promise<Result & { missingBytes?: number }>;
   /** Verifies and stores the next objects; an existing local object is re-hashed, never overwritten. */
   storeBackupObjects(): Promise<Result & Partial<StoreProgress>>;
@@ -23,13 +25,25 @@ export type RestoreProgress = { stage: 'validating' } | ({ stage: 'objects' } & 
 /** files: originals written by this restore vs already present (re-hashed and reused). */
 export type RestoreOutcome = { preview: BackupPreview; changes: RestoreChanges; files: { added: number; reused: number }; inPlace: boolean; cleanupFailed: boolean };
 /** A restore that did not commit: nothing in the library changed. Verified originals may remain in the
- * content-addressed store without any library reference; a later restore re-checks and reuses them. */
+ * content-addressed store without any library reference; a later restore re-checks and reuses them.
+ * cleanupFailed: a private ZIP or manifest copy could not be deleted. storeCleanupFailed: a partly written original
+ * was left in the store's staging; it is never used, and the next restore or import tries to remove it again. */
 export class RestoreFailure extends Error {
   readonly cleanupFailed: boolean;
-  constructor(code: string, cleanupFailed: boolean) { super(code); this.cleanupFailed = cleanupFailed; }
+  readonly storeCleanupFailed: boolean;
+  constructor(code: string, cleanupFailed: boolean, storeCleanupFailed = false) {
+    super(code); this.cleanupFailed = cleanupFailed; this.storeCleanupFailed = storeCleanupFailed;
+  }
 }
 
-function checked<T extends Result>(result: T): T { if (!result.ok) throw new Error(result.code ?? 'backup-unreadable'); return result; }
+class StepFailure extends Error {
+  readonly cleanupFailed: boolean;
+  readonly storeCleanupFailed: boolean;
+  constructor(result: Result) {
+    super(result.code ?? 'backup-unreadable'); this.cleanupFailed = !!result.cleanupFailed; this.storeCleanupFailed = !!result.storeCleanupFailed;
+  }
+}
+function checked<T extends Result>(result: T): T { if (!result.ok) throw new StepFailure(result); return result; }
 const DECLARE_BATCH = 500;
 
 /** Validates the backup again in this session, makes every object durable, then applies the whole manifest in one
@@ -93,7 +107,10 @@ export async function runRestore(bridge: RestoreBridge, db: SqlDatabase, uri: st
   } catch (error) {
     const closed = await bridge.endBackupInspection().catch(() => ({ ok: false }));
     if (changes) return { preview: preview!, changes, files, inPlace: !!opened.inPlace, cleanupFailed: !closed.ok }; // Committed before failing.
-    throw new RestoreFailure(cancelled() ? 'cancelled' : error instanceof Error ? error.message : 'backup-unreadable', !closed.ok);
+    // The step's own code stays the reason; cleanup failures on its path and at close are reported beside it.
+    const step = error instanceof StepFailure ? error : null;
+    throw new RestoreFailure(cancelled() ? 'cancelled' : error instanceof Error ? error.message : 'backup-unreadable',
+      !closed.ok || !!step?.cleanupFailed, !!step?.storeCleanupFailed);
   }
   const closed = await bridge.endBackupInspection().catch(() => ({ ok: false }));
   return { preview, changes: changes!, files, inPlace: !!opened.inPlace, cleanupFailed: !closed.ok };

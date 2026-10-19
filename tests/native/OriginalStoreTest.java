@@ -121,6 +121,41 @@ public class OriginalStoreTest {
       Files.write(new File(r, "staging/unrelated.txt").toPath(), bytes);
       check(store.recoverStaging() == 1 && objects(r) == 1 && new File(r, "staging/unrelated.txt").exists());
     });
+    // Store cleanup failures: deletion is made impossible by removing write permission from staging mid-write.
+    test("a failed staging delete keeps the write error and is attached to it", () -> {
+      File r = root(); put(new OriginalStore(r), bytes); File staging = new File(r, "staging");
+      OriginalStore store = new OriginalStore(r, dir -> Long.MAX_VALUE, point -> {
+        if (point.equals("after-chunk")) { check(staging.setWritable(false)); throw new IOException("injected-write"); } });
+      IOException error = null;
+      try { put(store, new byte[100_000]); } catch (IOException e) { error = e; }
+      try {
+        check(error != null && "injected-write".equals(error.getMessage()) && error.getSuppressed().length == 1
+          && OriginalStore.STAGING_CLEANUP_FAILED.equals(error.getSuppressed()[0].getMessage()));
+        check(staging.list().length == 1 && objects(r) == 1);
+        fails(OriginalStore.STAGING_CLEANUP_FAILED, store::recoverStaging); check(staging.list().length == 1); // Recovery reports it too.
+      } finally { check(staging.setWritable(true)); }
+      // Once deletion is possible again, recovery removes the part and the same write succeeds.
+      check(store.recoverStaging() == 1); emptyStage(r);
+      check(!put(new OriginalStore(r), new byte[100_000]).reused && objects(r) == 2); emptyStage(r);
+    });
+    test("a failed staging delete is reported beside cancellation", () -> {
+      File r = root(); File staging = new File(r, "staging"); AtomicBoolean stop = new AtomicBoolean();
+      OriginalStore store = new OriginalStore(r, dir -> Long.MAX_VALUE, point -> {
+        if (point.equals("after-chunk")) { check(staging.setWritable(false)); stop.set(true); } });
+      IOException error = null;
+      try { store.put(new ByteArrayInputStream(new byte[100_000]), 100_000, -1, budget(), stop::get); } catch (IOException e) { error = e; }
+      try {
+        check(error != null && "cancelled".equals(error.getMessage()) && error.getSuppressed().length == 1
+          && OriginalStore.STAGING_CLEANUP_FAILED.equals(error.getSuppressed()[0].getMessage()) && objects(r) == 0);
+      } finally { check(staging.setWritable(true)); }
+      check(store.recoverStaging() == 1); emptyStage(r);
+    });
+    test("a successful staging delete adds nothing to the error", () -> {
+      File r = root(); OriginalStore store = new OriginalStore(r, dir -> Long.MAX_VALUE, point -> { if (point.equals("after-chunk")) throw new IOException("injected-write"); });
+      IOException error = null;
+      try { put(store, new byte[100_000]); } catch (IOException e) { error = e; }
+      check(error != null && "injected-write".equals(error.getMessage()) && error.getSuppressed().length == 0); emptyStage(r);
+    });
     test("process death while writing leaves only recoverable staging", () -> {
       File r = root();
       Process child = new ProcessBuilder(new File(System.getProperty("java.home"), "bin/java").getPath(), "-cp", System.getProperty("java.class.path"), "OriginalStoreTest", "crash-write", r.getPath()).inheritIO().start();

@@ -202,14 +202,19 @@ export const en = {
     'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Repairing it is not available yet; keep your exports.',
     'restore-schema-unsupported': 'This library uses a version Snarchive cannot restore into. Update the app and try again.',
     'restore-failed': 'The restore could not be completed safely.',
+    'store-staging-cleanup-failed': 'A partly written original in Snarchive’s storage could not be removed, so the restore stopped. Your backup is unchanged. Snarchive tries to remove it again the next time you restore a backup or preserve originals; try again later.',
   } as Record<string, string>,
-  /** Notices for a restore that did not commit: the cause, that the library is unchanged, and any leftover copy. */
-  restoreFailureNotices: (code: string, cleanupFailed: boolean): { tone: 'info' | 'warning' | 'error'; message: string }[] => {
+  restoreStoreCleanupFailed: 'A partly written original could not be removed from Snarchive’s storage. It is never used as a memory. Snarchive tries to remove it again the next time you restore a backup or preserve originals.',
+  /** Notices for a restore that did not commit: the cause, that the library is unchanged, then each kind of leftover:
+   * a private ZIP or manifest copy (cleanupFailed) and a partly written original in store staging (storeCleanupFailed).
+   * A leftover that is itself the cause is explained once. */
+  restoreFailureNotices: (code: string, cleanupFailed: boolean, storeCleanupFailed = false): { tone: 'info' | 'warning' | 'error'; message: string }[] => {
     const notices: { tone: 'info' | 'warning' | 'error'; message: string }[] = code === 'cancelled'
       ? [{ tone: 'info', message: en.restoreCancelled }]
-      : [{ tone: code === 'busy' || code === 'insufficient-storage' || code === 'staging-cleanup-failed' ? 'warning' : 'error',
+      : [{ tone: code === 'busy' || code === 'insufficient-storage' || code === 'staging-cleanup-failed' || code === 'store-staging-cleanup-failed' ? 'warning' : 'error',
         message: en.restoreErrors[code] ?? en.inspectErrors[code] ?? en.restoreErrors['restore-failed']! }, { tone: 'info', message: en.restoreNotChanged }];
     if (cleanupFailed && code !== 'staging-cleanup-failed') notices.push({ tone: 'warning', message: en.inspectCleanupFailed });
+    if (storeCleanupFailed && code !== 'store-staging-cleanup-failed') notices.push({ tone: 'warning', message: en.restoreStoreCleanupFailed });
     return notices;
   },
   /** Notices for a failed or cancelled check: the outcome first, then a copy that could not be deleted. A leftover

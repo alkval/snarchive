@@ -13,6 +13,8 @@ public final class OriginalStore {
   public static final int CHUNK = 65536;
   public static final long MAX_OBJECT = 8L * 1024 * 1024 * 1024;
   public static final long RESERVE = 64L * 1024 * 1024;
+  /** A partly written object in this store's staging could not be removed. Distinct from other temporary files. */
+  public static final String STAGING_CLEANUP_FAILED = "store-staging-cleanup-failed";
   public interface Space { long available(File directory); }
   public interface Faults { void at(String point) throws IOException; }
   public static final class Budget {
@@ -98,6 +100,7 @@ public final class OriginalStore {
         require(lock != null, "storage-busy");
         File stage = checked("staging/" + UUID.randomUUID() + ".part");
         require(stage.createNewFile(), "staging-failed");
+        Throwable failure = null;
         try {
           MessageDigest sha = digest(); CRC32 crc = new CRC32(); long count = 0;
           try (FileOutputStream output = new FileOutputStream(stage)) {
@@ -132,8 +135,15 @@ public final class OriginalStore {
           require(stage.renameTo(target), "finalize-failed");
           faults.at("after-finalize");
           return new Stored(hash, count, false);
+        } catch (IOException | RuntimeException | Error error) {
+          failure = error; throw error;
         } finally {
-          if (stage.exists() && !stage.delete()) throw new IOException("staging-cleanup-failed");
+          // A failed delete never replaces the reason the write stopped: it is attached to it. Only when nothing
+          // else failed is the leftover part itself the error.
+          if (stage.exists() && !stage.delete()) {
+            IOException cleanup = new IOException(STAGING_CLEANUP_FAILED);
+            if (failure != null) failure.addSuppressed(cleanup); else throw cleanup;
+          }
         }
       }
     }
@@ -174,7 +184,7 @@ public final class OriginalStore {
       for (File entry : entries) {
         if (!entry.getName().matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\.part")) continue;
         File part = checked("staging/" + entry.getName());
-        require(part.isFile() && part.delete(), "staging-cleanup-failed"); removed++;
+        require(part.delete() || !part.exists(), STAGING_CLEANUP_FAILED); removed++; // Already gone counts as removed.
       }
       return removed;
     }

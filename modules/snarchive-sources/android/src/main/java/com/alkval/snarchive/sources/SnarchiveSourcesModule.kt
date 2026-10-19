@@ -153,17 +153,17 @@ class SnarchiveSourcesModule : Module() {
         if (StatFs(requireNotNull(appContext.reactContext).filesDir.path).availableBytes < missing + OriginalStore.RESERVE) throw IllegalStateException("insufficient-storage")
         missing
       }
-      result.value?.let { mapOf("ok" to true, "missingBytes" to it.toDouble()) } ?: mapOf("ok" to false, "code" to (result.code ?: "backup-unreadable"))
+      result.value?.let { mapOf("ok" to true, "missingBytes" to it.toDouble()) } ?: runFailure(result)
     }
     AsyncFunction("storeBackupObjects") {
       val result = inspections.run { it.store(originals(), 250) { cancelled.get() } }
       result.value?.let { mapOf("ok" to true, "stored" to it.stored, "total" to it.total, "added" to it.added, "reused" to it.reused,
         "bytes" to it.bytes.toDouble(), "totalBytes" to it.totalBytes.toDouble(), "done" to it.done) }
-        ?: mapOf("ok" to false, "code" to (result.code ?: "backup-unreadable"))
+        ?: runFailure(result)
     }
     AsyncFunction("readStagedManifest") {
       val chunk = inspections.run { it.readStagedManifest(BackupInspection.MAX_CHUNK) { cancelled.get() } }
-      chunk.value?.let { mapOf("ok" to true, "text" to it.text, "done" to it.done) } ?: mapOf("ok" to false, "code" to (chunk.code ?: "backup-unreadable"))
+      chunk.value?.let { mapOf("ok" to true, "text" to it.text, "done" to it.done) } ?: runFailure(chunk)
     }
     AsyncFunction("readBackupManifest") {
       val chunk = inspections.run { it.readManifest(BackupInspection.MAX_CHUNK) { cancelled.get() } }
@@ -301,6 +301,10 @@ class SnarchiveSourcesModule : Module() {
     }
   }
 
+  // A failed step keeps its own code and says which kinds of cleanup also failed on that path: a private ZIP or
+  // manifest copy (cleanupFailed) or a partly written original in the store's staging (storeCleanupFailed).
+  private fun runFailure(result: InspectionGate.Result<*>): Map<String, Any> = mapOf("ok" to false,
+    "code" to (result.code ?: "backup-unreadable"), "cleanupFailed" to result.cleanupFailed, "storeCleanupFailed" to result.storeCleanupFailed)
   private fun backupError(error: Exception): Map<String, Any> = backupResult(BackupCoordinator.code(error, cancelled.get()))
   private fun backupResult(code: String?): Map<String, Any> = if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
   /** Only the document returned by our Create Document request is ever written or deleted. */

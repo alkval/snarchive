@@ -8,6 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ImportStore, type Receipt } from '../src/storage/importStore.ts';
 import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
 import { writeBackupSnapshot } from '../src/backup/snapshot.ts';
+import { en } from '../src/i18n/en.ts';
 import { runRestore, RestoreFailure, type RestoreBridge } from '../src/backup/restoreBackup.ts';
 import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts';
 
@@ -223,6 +224,50 @@ test('native failures keep their code; cleanup failures are reported alongside, 
   assert.equal(done.outcome.cleanupFailed, true); assert.equal(done.outcome.changes.memoriesAdded, 2); // Committed; cleanup reported.
 });
 
+test('store staging cleanup failures are kept apart from the step code and from private-copy cleanup', async t => {
+  const text = await manifest((await sourceLibrary(t)).db); const target = await emptyLibrary(t);
+  const before = await dump(target.db);
+  const failing = (result: { ok: false; code: string; cleanupFailed?: boolean; storeCleanupFailed?: boolean }, cancel = false) => {
+    const { native, state } = bridge(text);
+    native.storeBackupObjects = async () => { if (cancel) state.cancelled = true; return result; };
+    return runRestore(native, target.db, 'x', () => state.cancelled, () => {}).catch(e => e);
+  };
+  // Processing failed and its staged part could not be deleted: the processing code stays the reason.
+  const damaged = await failing({ ok: false, code: 'backup-damaged', storeCleanupFailed: true });
+  assert.ok(damaged instanceof RestoreFailure && damaged.message === 'backup-damaged' && damaged.storeCleanupFailed && !damaged.cleanupFailed);
+  // Cancellation plus a failed delete: both are reported.
+  const cancelled = await failing({ ok: false, code: 'cancelled', storeCleanupFailed: true }, true);
+  assert.ok(cancelled instanceof RestoreFailure && cancelled.message === 'cancelled' && cancelled.storeCleanupFailed);
+  // A private-copy failure on the step's path is not a store failure.
+  const copy = await failing({ ok: false, code: 'backup-unreadable', cleanupFailed: true });
+  assert.ok(copy instanceof RestoreFailure && copy.cleanupFailed && !copy.storeCleanupFailed);
+  // recoverStaging could not remove an abandoned part: its own code, from prepare.
+  const { native } = bridge(text); native.prepareBackupRestore = async () => ({ ok: false, code: 'store-staging-cleanup-failed', storeCleanupFailed: true });
+  const recovered = await runRestore(native, target.db, 'x', () => false, () => {}).catch(e => e);
+  assert.ok(recovered instanceof RestoreFailure && recovered.message === 'store-staging-cleanup-failed' && recovered.storeCleanupFailed);
+  // A failure whose cleanup worked carries no flags.
+  const clean = await failing({ ok: false, code: 'backup-damaged' });
+  assert.ok(clean instanceof RestoreFailure && !clean.storeCleanupFailed && !clean.cleanupFailed);
+  assert.deepEqual(await dump(target.db), before, 'nothing changed');
+  // Then a retry succeeds.
+  assert.equal((await restore(target.db, text)).outcome.changes.memoriesAdded, 2);
+});
+
+test('restore failure wording: each leftover is named once, store staging never claims reopening clears it', () => {
+  const messages = (code: string, copy: boolean, store: boolean) => en.restoreFailureNotices(code, copy, store).map(notice => notice.message);
+  assert.deepEqual(messages('backup-damaged', false, true), [en.inspectErrors['backup-damaged'], en.restoreNotChanged, en.restoreStoreCleanupFailed]);
+  assert.deepEqual(messages('cancelled', false, true), [en.restoreCancelled, en.restoreStoreCleanupFailed]);
+  assert.deepEqual(messages('cancelled', true, true), [en.restoreCancelled, en.inspectCleanupFailed, en.restoreStoreCleanupFailed]);
+  const recover = en.restoreFailureNotices('store-staging-cleanup-failed', false, true);
+  assert.deepEqual(recover.map(notice => notice.message), [en.restoreErrors['store-staging-cleanup-failed'], en.restoreNotChanged]);
+  assert.equal(recover[0]!.tone, 'warning');
+  assert.deepEqual(messages('backup-damaged', false, false), [en.inspectErrors['backup-damaged'], en.restoreNotChanged]);
+  for (const text of [en.restoreErrors['store-staging-cleanup-failed']!, en.restoreStoreCleanupFailed]) {
+    assert.doesNotMatch(text, /reopen|startup|was not opened/i);
+    assert.match(text, /next time you restore a backup or preserve originals/);
+  }
+});
+
 test('the native steps run in order: validate, store every object, then merge from the staged copy', async t => {
   const text = await manifest((await sourceLibrary(t)).db); const target = await emptyLibrary(t);
   const { calls } = await restore(target.db, text);
@@ -248,4 +293,60 @@ test('a process killed inside the merge transaction leaves the library unchanged
   assert.deepEqual(await dump(reopened.db), before);
   const { outcome } = await restore(reopened.db, text);
   assert.equal(outcome.changes.memoriesAdded, 2); assert.equal((await reopened.store.summary()).memories, 3);
+});
+
+type Row = { date: string; link?: string; location?: string };
+const savedMedia = (rows: Row[]) => JSON.stringify({ 'Saved Media': rows.map(row => ({
+  Date: row.date, 'Media Type': 'Image', 'Download Link': row.link ?? 'https://synthetic.invalid/download?mid=one', Location: row.location ?? 'Latitude, Longitude: 10, 20' })) });
+const ONE: Row = { date: '2026-02-06 12:00:00 UTC' };
+/** Plans job1 as a device would after scanning: one media file plus memories_history.json evidence (or none). */
+async function planWithMetadata(store: ImportStore, label: string, rows: Row[] | null) {
+  const metadataText = rows && savedMedia(rows);
+  const entries = [{ path: '2026-02-05_one-main.jpg' }, ...(metadataText ? [{ path: 'memories_history.json', metadataText }] : [])];
+  await store.plan(job1, inventoryFromSnapshot({ entries, metadataBytes: metadataText?.length ?? 0, visitedEntries: entries.length }, label));
+}
+async function metadataBackup(t: { after(fn: () => void): void }) {
+  const { db, store } = await emptyLibrary(t);
+  await planWithMetadata(store, 'source-1', [ONE]); await store.commit(job1, 0, A);
+  return manifest(db);
+}
+
+test('source compatibility: identical evidence under a different device label is accepted, and re-export keeps it', async t => {
+  const text = await metadataBackup(t); assert.match(text, /2026-02-06T12:00:00\.000Z/); assert.match(text, /"latitude":10/);
+  const target = await emptyLibrary(t); await planWithMetadata(target.store, 'source-7', [ONE]);
+  const { outcome } = await restore(target.db, text);
+  assert.equal(outcome.changes.sourcesUpdated, 1); assert.equal(outcome.changes.memoriesAdded, 1);
+  const again = await manifest(target.db);
+  assert.match(again, /2026-02-06T12:00:00\.000Z/); assert.match(again, /"latitude":10/); assert.match(again, /source-7:metadata-1/);
+  const fresh = await emptyLibrary(t); await restore(fresh.db, text);
+  assert.equal(await manifest(fresh.db), text); // Into an empty library, every piece of evidence survives exactly.
+});
+
+test('source compatibility: a library missing the backup\'s metadata is a conflict, not a silent loss', async t => {
+  const text = await metadataBackup(t); const target = await emptyLibrary(t);
+  await planWithMetadata(target.store, 'source-1', null);
+  await rejects(target.db, text, 'restore-conflict');
+});
+
+test('source compatibility: timestamp-only, location-only, diagnostic and metadata-only differences are conflicts', async t => {
+  const text = await metadataBackup(t);
+  const variants: Record<string, Row[]> = {
+    timestamp: [{ date: '2026-02-06 13:00:00 UTC' }],
+    location: [{ ...ONE, location: 'Latitude, Longitude: 11, 20' }],
+    diagnostic: [ONE, { date: 'not a date', link: 'https://synthetic.invalid/download?mid=two' }],
+    pendingEvidence: [ONE, { date: '2026-02-07 09:00:00 UTC', link: 'https://synthetic.invalid/download?mid=later' }],
+  };
+  for (const [name, rows] of Object.entries(variants)) {
+    const target = await emptyLibrary(t); await planWithMetadata(target.store, 'source-3', rows);
+    const before = await dump(target.db);
+    await rejects(target.db, text, 'restore-conflict');
+    assert.deepEqual(await dump(target.db), before, name);
+  }
+});
+
+test('source evidence comparison ignores only the label', async () => {
+  const { sourceEvidence } = await import('../src/backup/restoreMerge.ts');
+  const source = (label: string, rows: Row[]) => inventoryFromSnapshot({ entries: [{ path: '2026-02-05_one-main.jpg' }, { path: 'memories_history.json', metadataText: savedMedia(rows) }], metadataBytes: 10, visitedEntries: 2 }, label);
+  assert.equal(sourceEvidence(source('source-1', [ONE])), sourceEvidence(source('source-7', [ONE])));
+  assert.notEqual(sourceEvidence(source('source-1', [ONE])), sourceEvidence(source('source-1', [{ ...ONE, location: 'Latitude, Longitude: 10, 21' }])));
 });

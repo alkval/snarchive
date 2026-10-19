@@ -2,6 +2,7 @@ import com.alkval.snarchive.sources.backup.BackupInspection;
 import com.alkval.snarchive.sources.backup.BackupWriter;
 import com.alkval.snarchive.sources.backup.BackupWriter.ObjectSpec;
 import com.alkval.snarchive.sources.backup.DeleteOnClose;
+import com.alkval.snarchive.sources.backup.InspectionGate;
 import com.alkval.snarchive.sources.storage.OriginalStore;
 import com.alkval.snarchive.sources.zip.ArchiveSource;
 import java.io.*;
@@ -191,9 +192,91 @@ public class BackupRestoreTest {
       try { fails("backup-cleanup-failed", session::close); check(staged.exists(), "remains"); } finally { staged.getParentFile().setWritable(true); }
       new DeleteOnClose(staged).close(); check(!staged.exists(), "deleted once allowed");
     });
+    // Store staging cleanup failures, through the gate and the production store as the bridge runs them. Deletion is
+    // made impossible by removing write permission from the store's staging directory while the part exists.
+    Backup single = export("synthetic single original, long enough to stage");
+    byte[] singleBytes = Files.readAllBytes(single.file.toPath());
+    test("a damaged object whose staged part cannot be deleted keeps backup-damaged and reports the store leftover", () -> {
+      byte[] bytes = singleBytes.clone(); int at = indexOf(bytes, "synthetic single original".getBytes(StandardCharsets.UTF_8)); check(at > 0, "payload"); bytes[at + 3] ^= 1;
+      File damaged = new File(root, "damaged-single.zip"); Files.write(damaged.toPath(), bytes);
+      File libraryDir = Files.createTempDirectory(root.toPath(), "library-").toFile(); File staging = new File(libraryDir, "staging");
+      Existing existing = existing(libraryDir);
+      OriginalStore store = new OriginalStore(libraryDir, File::getUsableSpace, point -> { if (point.equals("after-chunk")) check(staging.setWritable(false), "locked"); });
+      AtomicBoolean cancel = new AtomicBoolean(); InspectionGate<BackupInspection> gate = gate(damaged, single, cancel);
+      InspectionGate.Result<BackupInspection.Stored> result;
+      try {
+        result = gate.run(session -> storeAll(session, store, cancel::get));
+        check(files(staging).size() == 1, "the part remains");
+      } finally { check(staging.setWritable(true), "unlocked"); }
+      check("backup-damaged".equals(result.code) && result.storeCleanupFailed && !result.cleanupFailed, "original code kept, store leftover reported: " + result.code);
+      check(gate.finish() == null, "private files deleted");
+      check(store.recoverStaging() == 1 && files(staging).isEmpty(), "removed once deletion is possible");
+      existing.unchanged(); check(Arrays.equals(bytes, Files.readAllBytes(damaged.toPath())), "selected backup unchanged");
+    });
+    test("cancellation whose staged part cannot be deleted reports both; a retry succeeds once deletion is possible", () -> {
+      File libraryDir = Files.createTempDirectory(root.toPath(), "library-").toFile(); File staging = new File(libraryDir, "staging");
+      Existing existing = existing(libraryDir); AtomicBoolean cancel = new AtomicBoolean();
+      OriginalStore store = new OriginalStore(libraryDir, File::getUsableSpace, point -> {
+        if (point.equals("after-chunk")) { check(staging.setWritable(false), "locked"); cancel.set(true); } });
+      InspectionGate<BackupInspection> gate = gate(single.file, single, cancel);
+      InspectionGate.Result<BackupInspection.Stored> result;
+      try { result = gate.run(session -> storeAll(session, store, cancel::get)); } finally { check(staging.setWritable(true), "unlocked"); }
+      check("cancelled".equals(result.code) && result.storeCleanupFailed && !result.cleanupFailed, "cancelled with store leftover: " + result.code);
+      check(gate.finish() == null && files(staging).size() == 1, "part left behind");
+      // Retry as prepareBackupRestore does: recover staging first, then store.
+      OriginalStore again = new OriginalStore(libraryDir); AtomicBoolean idle = new AtomicBoolean(); InspectionGate<BackupInspection> retry = gate(single.file, single, idle);
+      InspectionGate.Result<BackupInspection.Stored> done = retry.run(session -> { check(again.recoverStaging() == 1, "recovered"); return storeAll(session, again, idle::get); });
+      check(done.code == null && !done.storeCleanupFailed && !done.cleanupFailed && done.value.added == 1, "retry stores the object");
+      check(retry.finish() == null && files(staging).isEmpty(), "clean");
+      existing.unchanged(); check(Arrays.equals(singleBytes, Files.readAllBytes(single.file.toPath())), "selected backup unchanged");
+    });
+    test("a store staging part that recovery cannot remove stops the restore with its own code", () -> {
+      File libraryDir = Files.createTempDirectory(root.toPath(), "library-").toFile(); File staging = new File(libraryDir, "staging");
+      Existing existing = existing(libraryDir); OriginalStore store = new OriginalStore(libraryDir);
+      Files.write(new File(staging, UUID.randomUUID() + ".part").toPath(), new byte[] { 1, 2, 3 });
+      AtomicBoolean cancel = new AtomicBoolean(); InspectionGate<BackupInspection> gate = gate(single.file, single, cancel);
+      InspectionGate.Result<Long> result;
+      check(staging.setWritable(false), "locked");
+      try { result = gate.run(session -> { store.recoverStaging(); return session.missingBytes(store); }); } finally { check(staging.setWritable(true), "unlocked"); }
+      check("store-staging-cleanup-failed".equals(result.code) && result.storeCleanupFailed && !result.cleanupFailed, "own code: " + result.code);
+      check(gate.finish() == null, "private files deleted");
+      InspectionGate<BackupInspection> retry = gate(single.file, single, cancel);
+      InspectionGate.Result<BackupInspection.Stored> done = retry.run(session -> { check(store.recoverStaging() == 1, "recovered"); return storeAll(session, store, cancel::get); });
+      check(done.code == null && done.value.added == 1 && retry.finish() == null && files(staging).isEmpty(), "retry succeeds");
+      existing.unchanged(); check(Arrays.equals(singleBytes, Files.readAllBytes(single.file.toPath())), "selected backup unchanged");
+    });
+    test("a failure whose staged part is deleted reports no store leftover", () -> {
+      File libraryDir = Files.createTempDirectory(root.toPath(), "library-").toFile(); Existing existing = existing(libraryDir);
+      OriginalStore store = new OriginalStore(libraryDir, File::getUsableSpace, point -> { if (point.equals("before-finalize")) throw new IOException("backup-unreadable"); });
+      AtomicBoolean cancel = new AtomicBoolean(); InspectionGate<BackupInspection> gate = gate(single.file, single, cancel);
+      InspectionGate.Result<BackupInspection.Stored> result = gate.run(session -> storeAll(session, store, cancel::get));
+      check("backup-unreadable".equals(result.code) && !result.storeCleanupFailed && !result.cleanupFailed, "no cleanup flags");
+      check(gate.finish() == null && files(new File(libraryDir, "staging")).isEmpty(), "nothing left");
+      existing.unchanged();
+    });
     System.out.println(passed + " backup restore host tests passed. No device claim.");
   }
 
+  /** An original already in the library before the restore; unchanged() checks its bytes and timestamp. */
+  static final class Existing {
+    final File file; final byte[] bytes; final long modified;
+    Existing(File file) throws Exception { this.file = file; bytes = Files.readAllBytes(file.toPath()); modified = file.lastModified(); }
+    void unchanged() throws Exception { check(Arrays.equals(bytes, Files.readAllBytes(file.toPath())) && file.lastModified() == modified, "existing original unchanged"); }
+  }
+  static Existing existing(File libraryDir) throws Exception {
+    OriginalStore store = new OriginalStore(libraryDir); byte[] value = "an original already in the library".getBytes(StandardCharsets.UTF_8);
+    OriginalStore.Stored stored = store.put(new ByteArrayInputStream(value), value.length, -1, new OriginalStore.Budget(1 << 20), () -> false);
+    return new Existing(store.confirm(stored.sha256, value.length));
+  }
+  /** A restore session opened, validated, declared and sealed through the gate, as the bridge does. */
+  static InspectionGate<BackupInspection> gate(File backupFile, Backup backup, AtomicBoolean cancel) throws Exception {
+    InspectionGate<BackupInspection> gate = new InspectionGate<>(Runnable::run, error -> BackupInspection.code(error, cancel.get()), () -> {});
+    File staged = staged();
+    InspectionGate.Opened opened = gate.beginWithStatus(() -> openRestore(backupFile, staged, cancel::get));
+    check(opened.code == null, "opened");
+    check(gate.run(session -> { declareAll(session, backup); return true; }).code == null, "sealed");
+    return gate;
+  }
   /** Puts one object of the backup into a store directly, as an earlier import would have. */
   static String storeOne(OriginalStore store, Backup backup, String hash) throws Exception {
     byte[] value = backup.objects.get(hash);

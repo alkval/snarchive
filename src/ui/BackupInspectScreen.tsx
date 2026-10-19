@@ -18,7 +18,7 @@ type State =
   | ({ kind: 'verified' } & Verified)
   | { kind: 'failed'; code: string; cleanupFailed: boolean }
   | { kind: 'restoring'; verified: Verified; progress: RestoreProgress | null; cancelling: boolean }
-  | { kind: 'restore-failed'; verified: Verified; code: string; cleanupFailed: boolean }
+  | { kind: 'restore-failed'; verified: Verified; code: string; cleanupFailed: boolean; storeCleanupFailed: boolean }
   | { kind: 'restored'; outcome: RestoreOutcome };
 
 function size(bytes: number): string {
@@ -78,7 +78,8 @@ export function BackupInspectScreen({ onClose, onChanged, onOpenLibrary }: { onC
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
       const cleanupFailed = error instanceof RestoreFailure && error.cleanupFailed;
-      if (mounted.current) setState({ kind: 'restore-failed', verified, code, cleanupFailed });
+      const storeCleanupFailed = error instanceof RestoreFailure && error.storeCleanupFailed;
+      if (mounted.current) setState({ kind: 'restore-failed', verified, code, cleanupFailed, storeCleanupFailed });
     } finally { running.current = null; }
   }
 
@@ -112,7 +113,7 @@ export function BackupInspectScreen({ onClose, onChanged, onOpenLibrary }: { onC
         state.kind === 'cancelled' ? { cancelled: true } : { cancelled: false, code: state.code }, state.cleanupFailed,
       ).map(notice => <Notice key={notice.message} tone={notice.tone} message={notice.message} />)}
       {state.kind === 'picker-closed' && <Notice tone="info" message={en.inspectPickerClosed} />}
-      {state.kind === 'restore-failed' && en.restoreFailureNotices(state.code, state.cleanupFailed)
+      {state.kind === 'restore-failed' && en.restoreFailureNotices(state.code, state.cleanupFailed, state.storeCleanupFailed)
         .map(notice => <Notice key={notice.message} tone={notice.tone} message={notice.message} />)}
       {state.kind === 'restored' && <>
         <Notice tone="success" title={en.restoreDone} message={en.restoreDoneDetail} />
