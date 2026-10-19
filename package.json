@@ -23,7 +23,8 @@
     "prepare:preview": "node scripts/prepare-local-preview.mjs",
     "test:original-store": "node scripts/test-original-store.mjs",
     "fixtures:resume": "python3 scripts/generate-resume-fixture.py",
-    "fixtures:video": "python3 scripts/generate-video-fixture.py"
+    "fixtures:video": "python3 scripts/generate-video-fixture.py",
+    "test:backup-writer": "node scripts/test-backup-writer.mjs"
   },
   "dependencies": {
     "expo": "~58.0.13",
