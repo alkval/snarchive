@@ -1,6 +1,7 @@
 import com.alkval.snarchive.sources.backup.BackupInspection;
 import com.alkval.snarchive.sources.backup.BackupWriter;
 import com.alkval.snarchive.sources.backup.BackupWriter.ObjectSpec;
+import com.alkval.snarchive.sources.backup.DeleteOnClose;
 import com.alkval.snarchive.sources.backup.InspectionGate;
 import com.alkval.snarchive.sources.storage.OriginalStore;
 import com.alkval.snarchive.sources.zip.ArchiveSource;
@@ -278,6 +279,32 @@ public class BackupInspectionTest {
       AtomicInteger released = new AtomicInteger(); InspectionGate<Session> gate = new InspectionGate<>(Runnable::run, codes, released::incrementAndGet);
       Session session = new Session(); session.failClose = true; gate.begin(() -> session);
       check("backup-cleanup-failed".equals(gate.finish()) && released.get() == 1 && !gate.active(), "reported and released");
+    });
+    test("temporary-copy cleanup: deleted, already absent, or reported when it remains", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File copy = new File(dir, "preview-1.part"); Files.write(copy.toPath(), new byte[] { 1 });
+      new DeleteOnClose(copy).close(); check(!copy.exists(), "deleted");
+      new DeleteOnClose(copy).close(); // Already absent: still a successful cleanup.
+      File stuck = new File(dir, "preview-2.part"); Files.write(stuck.toPath(), new byte[] { 1 });
+      check(dir.setWritable(false), "directory locked");
+      try { fails("backup-cleanup-failed", () -> new DeleteOnClose(stuck).close()); check(stuck.exists(), "file remains"); }
+      finally { dir.setWritable(true); }
+    });
+    test("a remaining temporary copy reaches the inspection cleanup result; the chosen backup is never touched", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File copy = new File(dir, "preview-3.part"); Files.copy(valid.toPath(), copy.toPath());
+      byte[] chosen = Files.readAllBytes(valid.toPath());
+      AtomicInteger released = new AtomicInteger();
+      InspectionGate<BackupInspection> gate = new InspectionGate<>(Runnable::run, error -> BackupInspection.code(error, false), released::incrementAndGet);
+      // As in the module: the private copy is the source being read, and DeleteOnClose removes it afterwards.
+      check(gate.begin(() -> BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), () -> false)) == null, "open");
+      check(dir.setWritable(false), "directory locked");
+      try {
+        check("backup-cleanup-failed".equals(gate.finish()) && released.get() == 1 && !gate.active(), "failure reported, guard released after cleanup");
+        check(copy.exists(), "copy still there");
+      } finally { dir.setWritable(true); }
+      check(Arrays.equals(chosen, Files.readAllBytes(valid.toPath())), "chosen backup unchanged");
+      check(gate.begin(() -> BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), () -> false)) == null && gate.finish() == null && !copy.exists(), "successful cleanup reports nothing");
     });
     System.out.println(passed + " backup inspection host tests passed. No device or restore claim.");
   }

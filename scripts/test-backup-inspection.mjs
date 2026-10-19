@@ -10,7 +10,7 @@ try {
   if (createHash('sha256').update(readFileSync(jar)).digest('hex') !== '5f1eb1e9d67cfee200a695e4079751b49e73a226b154193e13f7c602efbe72fb') throw Error();
 } catch { console.error('Missing ZIP engine. Follow docs/development.md for its pinned download.'); process.exit(1); }
 const base = 'modules/snarchive-sources/android/src/main/java/com/alkval/snarchive/sources';
-const sources = ['zip/ArchiveSource.java', 'zip/ZipGuard.java', 'zip/ZipInventory.java', 'storage/OriginalStore.java', 'backup/BackupWriter.java', 'backup/BackupInspection.java', 'backup/InspectionGate.java'].map(name => `${base}/${name}`);
+const sources = ['zip/ArchiveSource.java', 'zip/ZipGuard.java', 'zip/ZipInventory.java', 'storage/OriginalStore.java', 'backup/BackupWriter.java', 'backup/BackupInspection.java', 'backup/InspectionGate.java', 'backup/DeleteOnClose.java'].map(name => `${base}/${name}`);
 const classpath = `${out}/classes${process.platform === 'win32' ? ';' : ':'}${jar}`;
 for (const [cmd, args] of [
   ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, ...sources, 'tests/native/BackupInspectionTest.java']],

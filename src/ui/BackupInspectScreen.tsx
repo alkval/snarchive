@@ -4,17 +4,17 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { BackupPreview } from '../backup/manifest';
 import type { InspectionProgress } from '../backup/inspectBackup';
-import { cancelBackupInspection, inspectBackupDocument } from '../platform/backupInspection';
+import { cancelBackupInspection, inspectBackupDocument, InspectionFailure } from '../platform/backupInspection';
 import { sourcePicker } from '../platform/sourcePicker';
 import { en } from '../i18n/en';
 import { BackButton, Button, Group, LargeTitle, Notice, Row } from './kit';
 import { space, useTheme } from './theme';
 
 type State =
-  | { kind: 'idle' } | { kind: 'cancelled' } | { kind: 'picker-closed' }
+  | { kind: 'idle' } | { kind: 'cancelled'; cleanupFailed: boolean } | { kind: 'picker-closed' }
   | { kind: 'working'; progress: InspectionProgress | null; cancelling: boolean }
   | { kind: 'verified'; preview: BackupPreview; inPlace: boolean; cleanupFailed: boolean }
-  | { kind: 'failed'; code: string };
+  | { kind: 'failed'; code: string; cleanupFailed: boolean };
 
 function size(bytes: number): string {
   const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
@@ -48,13 +48,14 @@ export function BackupInspectScreen({ onClose }: { onClose(): void }) {
       const uri = await sourcePicker.selectBackup();
       if (!mounted.current) return;
       if (!uri) { setState({ kind: 'picker-closed' }); return; }
-      if (stopped.current) { setState({ kind: 'cancelled' }); return; }
+      if (stopped.current) { setState({ kind: 'cancelled', cleanupFailed: false }); return; }
       const outcome = await inspectBackupDocument(uri, () => stopped.current,
         progress => { if (mounted.current) setState(previous => ({ kind: 'working', progress, cancelling: previous.kind === 'working' && previous.cancelling })); });
       if (mounted.current) setState({ kind: 'verified', ...outcome });
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
-      if (mounted.current) setState(code === 'cancelled' || stopped.current ? { kind: 'cancelled' } : { kind: 'failed', code });
+      const cleanupFailed = error instanceof InspectionFailure && error.cleanupFailed;
+      if (mounted.current) setState(code === 'cancelled' || stopped.current ? { kind: 'cancelled', cleanupFailed } : { kind: 'failed', code, cleanupFailed });
     } finally { running.current = false; }
   }
 
@@ -78,6 +79,7 @@ export function BackupInspectScreen({ onClose }: { onClose(): void }) {
       {state.kind === 'failed' && <Notice tone={state.code === 'busy' || state.code === 'insufficient-storage' ? 'warning' : 'error'}
         message={en.inspectErrors[state.code] ?? en.inspectUnreadable} />}
       {state.kind === 'cancelled' && <Notice tone="info" message={en.inspectCancelled} />}
+      {(state.kind === 'failed' || state.kind === 'cancelled') && state.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
       {state.kind === 'picker-closed' && <Notice tone="info" message={en.inspectPickerClosed} />}
       {state.kind === 'verified' && <>
         <Notice tone="success" title={en.inspectVerified} message={en.inspectVerifiedDetail} />

@@ -21,6 +21,8 @@ function native(): NativeInspection {
 function checked<T extends Result>(result: T): T { if (!result.ok) throw new Error(result.code ?? 'backup-unreadable'); return result; }
 
 export type InspectionOutcome = { preview: BackupPreview; inPlace: boolean; cleanupFailed: boolean };
+/** A failed or cancelled check whose private copy also could not be deleted. */
+export class InspectionFailure extends Error { constructor(code: string, readonly cleanupFailed: boolean) { super(code); } }
 export function cancelBackupInspection() { if (Platform.OS === 'android') requireOptionalNativeModule<NativeInspection>('SnarchiveSources')?.cancel(); }
 
 /** Read-only: opens the chosen document (in place, or a private copy), validates it, verifies every object, then
@@ -40,8 +42,9 @@ export async function inspectBackupDocument(uri: string, cancelled: () => boolea
       },
     }, cancelled, progress);
   } catch (error) {
-    await bridge.endBackupInspection().catch(() => undefined);
-    throw error;
+    const closed = await bridge.endBackupInspection().catch(() => ({ ok: false }));
+    if (closed.ok) throw error;
+    throw new InspectionFailure(error instanceof Error ? error.message : 'backup-unreadable', true);
   }
   const closed = await bridge.endBackupInspection().catch(() => ({ ok: false }));
   return { preview, inPlace: !!opened.inPlace, cleanupFailed: !closed.ok };

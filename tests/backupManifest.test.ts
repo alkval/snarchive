@@ -194,3 +194,23 @@ test('line limits: ordinary records are short, and an endless line fails before 
   const validator = new BackupManifestValidator();
   assert.throws(() => validator.push('x'.repeat(MAX_SOURCE_LINE + 1)), /backup-limit/);
 });
+
+test('a duplicate key cannot hide behind numbers whose canonical form is longer', async t => {
+  const { db } = await library(t); const records = await lines(db); const index = at(records, 'source');
+  const line = records[index]!.slice(0, -1);
+  // Codec-valid values with shorter exponent spellings (9e4, 1e5, 1e7) free 10 characters, more than a duplicate key costs.
+  const value = JSON.parse(line); const source = value.inventory.sources[0];
+  source.otherFiles = 90000; source.visitedEntries = 100000; source.metadataBytes = 10000000;
+  // The values are valid for the codec, so the canonical record itself must still be accepted...
+  const canonical = JSON.stringify(value);
+  assert.deepEqual(validate([...records.slice(0, index), canonical + '\n', ...records.slice(index + 1)].join('')).sources, 2);
+  // ...but respelled as exponents, with a duplicate "type" key and padding, it has the canonical length and is rejected.
+  let forged = canonical.replace('"otherFiles":90000', '"otherFiles":9e4').replace('"visitedEntries":100000', '"visitedEntries":1e5')
+    .replace('"metadataBytes":10000000', '"metadataBytes":1e7').replace('{"type":"source"', '{"type":0,"type":"source"');
+  const gap = canonical.length - forged.length;
+  assert.ok(gap >= 0, 'the exponent savings cover the duplicate key');
+  forged = forged.replace(/}$/, `${' '.repeat(gap)}}`);
+  assert.equal(forged.length, canonical.length);
+  assert.deepEqual(JSON.parse(forged), value);
+  assert.throws(() => validate([...records.slice(0, index), forged + '\n', ...records.slice(index + 1)].join('')), /backup-invalid/);
+});

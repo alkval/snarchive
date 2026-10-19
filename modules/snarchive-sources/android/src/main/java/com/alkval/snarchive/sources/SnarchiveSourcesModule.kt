@@ -5,6 +5,7 @@ import android.content.Intent
 import expo.modules.kotlin.Promise
 import com.alkval.snarchive.sources.backup.BackupCoordinator
 import com.alkval.snarchive.sources.backup.BackupInspection
+import com.alkval.snarchive.sources.backup.DeleteOnClose
 import com.alkval.snarchive.sources.backup.InspectionGate
 import com.alkval.snarchive.sources.backup.BackupSession
 import android.net.Uri
@@ -119,7 +120,7 @@ class SnarchiveSourcesModule : Module() {
         val opened = openArchive(uriString)
         inPlace = opened.second == null
         val copy = opened.second
-        BackupInspection.open(opened.first, copy?.let { file -> java.io.Closeable { file.delete() } }) { cancelled.get() }
+        BackupInspection.open(opened.first, copy?.let { DeleteOnClose(it) }) { cancelled.get() }
       }
       if (code != null) return@AsyncFunction mapOf("ok" to false, "code" to code) // The gate already released the guard.
       val info = inspections.run { mapOf("ok" to true, "inPlace" to inPlace, "objects" to it.objectCount(), "objectBytes" to it.objectBytes().toDouble()) }

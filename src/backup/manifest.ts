@@ -101,8 +101,10 @@ export class BackupManifestValidator {
     try { value = JSON.parse(line); } catch { throw new BackupManifestError('backup-invalid'); }
     check(value !== null && typeof value === 'object' && !Array.isArray(value));
     const record = value as Record<string, unknown>;
-    // Exactly what JSON.stringify writes: no duplicate keys, insignificant whitespace or alternative escapes.
-    check(JSON.stringify(record).length === line.length);
+    // The line must be exactly what JSON.stringify writes for the parsed value. JSON.parse drops duplicate keys
+    // (keeping the last value), so any duplicate changes the text; so do extra whitespace, alternative escapes and
+    // non-canonical numbers such as 1e5. Key order is not fixed: parsing keeps keys in the order they appear.
+    check(JSON.stringify(record) === line);
     const type = record.type;
     check(typeof type === 'string' && Object.prototype.hasOwnProperty.call(KEYS, type) && Object.keys(record).sort().join(',') === KEYS[type]);
     if (type !== 'source') check(line.length <= MAX_RECORD_LINE, 'backup-limit');
