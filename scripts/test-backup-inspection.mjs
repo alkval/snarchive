@@ -13,9 +13,10 @@ const base = 'modules/snarchive-sources/android/src/main/java/com/alkval/snarchi
 const sources = ['zip/ArchiveSource.java', 'zip/ZipGuard.java', 'zip/ZipInventory.java', 'storage/OriginalStore.java', 'backup/BackupWriter.java', 'backup/BackupInspection.java', 'backup/InspectionGate.java', 'backup/DeleteOnClose.java'].map(name => `${base}/${name}`);
 const classpath = `${out}/classes${process.platform === 'win32' ? ';' : ':'}${jar}`;
 for (const [cmd, args] of [
-  ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, ...sources, 'tests/native/BackupInspectionTest.java']],
+  ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, ...sources, 'tests/native/BackupInspectionTest.java', 'tests/native/BackupRestoreTest.java']],
   // 128 MiB: the ZIP64 case keeps 65,601 parsed headers; manifest and objects are streamed.
   ['java', ['-Xmx128m', '-cp', classpath, 'BackupInspectionTest', out]],
+  ['java', ['-Xmx128m', '-cp', classpath, 'BackupRestoreTest', out]],
 ]) {
   const result = spawnSync(cmd, args, { cwd: root, stdio: 'inherit' });
   if (result.error || result.status !== 0) process.exit(result.status ?? 1);

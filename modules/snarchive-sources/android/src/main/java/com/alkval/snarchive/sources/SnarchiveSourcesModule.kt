@@ -127,6 +127,44 @@ class SnarchiveSourcesModule : Module() {
       val info = inspections.run { mapOf("ok" to true, "inPlace" to inPlace, "objects" to it.objectCount(), "objectBytes" to it.objectBytes().toDouble()) }
       info.value ?: mapOf("ok" to false, "code" to (info.code ?: "backup-unreadable"))
     }
+    AsyncFunction("beginBackupRestore") { uriString: String ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      var inPlace = false
+      // Restore mode: the same opening and validation as inspection, plus a private hashed copy of the manifest
+      // (created after openArchive, whose abandoned-copy cleanup would otherwise remove it). Both private files
+      // are deleted when the session closes.
+      val opened = inspections.beginWithStatus {
+        val archive = openArchive(uriString)
+        inPlace = archive.second == null
+        val staged = try { File.createTempFile("preview-", ".part", previewRoot()) }
+          catch (error: Exception) { runCatching { archive.first.close() }; archive.second?.let { DeleteOnClose.deleteOrSuppress(it, error) }; throw error }
+        val session = BackupInspection.open(archive.first, DeleteOnClose(archive.second, staged)) { cancelled.get() }
+        try { session.enableRestore(staged) } catch (error: Exception) { try { session.close() } catch (cleanup: Exception) { error.addSuppressed(cleanup) }; throw error }
+        session
+      }
+      if (opened.code != null) return@AsyncFunction mapOf("ok" to false, "code" to opened.code, "cleanupFailed" to opened.cleanupFailed)
+      mapOf("ok" to true, "inPlace" to inPlace)
+    }
+    AsyncFunction("prepareBackupRestore") {
+      val result = inspections.run { session ->
+        val store = originals(); store.recoverStaging()
+        val missing = session.missingBytes(store)
+        if (StatFs(requireNotNull(appContext.reactContext).filesDir.path).availableBytes < missing + OriginalStore.RESERVE) throw IllegalStateException("insufficient-storage")
+        missing
+      }
+      result.value?.let { mapOf("ok" to true, "missingBytes" to it.toDouble()) } ?: mapOf("ok" to false, "code" to (result.code ?: "backup-unreadable"))
+    }
+    AsyncFunction("storeBackupObjects") {
+      val result = inspections.run { it.store(originals(), 250) { cancelled.get() } }
+      result.value?.let { mapOf("ok" to true, "stored" to it.stored, "total" to it.total, "added" to it.added, "reused" to it.reused,
+        "bytes" to it.bytes.toDouble(), "totalBytes" to it.totalBytes.toDouble(), "done" to it.done) }
+        ?: mapOf("ok" to false, "code" to (result.code ?: "backup-unreadable"))
+    }
+    AsyncFunction("readStagedManifest") {
+      val chunk = inspections.run { it.readStagedManifest(BackupInspection.MAX_CHUNK) { cancelled.get() } }
+      chunk.value?.let { mapOf("ok" to true, "text" to it.text, "done" to it.done) } ?: mapOf("ok" to false, "code" to (chunk.code ?: "backup-unreadable"))
+    }
     AsyncFunction("readBackupManifest") {
       val chunk = inspections.run { it.readManifest(BackupInspection.MAX_CHUNK) { cancelled.get() } }
       chunk.value?.let { mapOf("ok" to true, "text" to it.text, "done" to it.done) } ?: mapOf("ok" to false, "code" to (chunk.code ?: "backup-unreadable"))

@@ -82,6 +82,12 @@ public final class OriginalStore {
 
   /** Owns and closes input, including failure paths. Negative expected size/CRC means unknown. */
   public Stored put(InputStream source, long expectedBytes, long expectedCrc, Budget budget, BooleanSupplier stop) throws IOException {
+    return put(source, expectedBytes, expectedCrc, null, budget, stop);
+  }
+
+  /** As put, but when expectedSha256 is given the bytes must hash to it before anything is finalized
+   * ("content-mismatch"); a restore never places unexpected bytes into the store. */
+  public Stored put(InputStream source, long expectedBytes, long expectedCrc, String expectedSha256, Budget budget, BooleanSupplier stop) throws IOException {
     require(source != null, "invalid-source");
     try (InputStream input = new OwnedInput(source)) {
       require(input != null && expectedBytes >= -1 && expectedCrc >= -1 && expectedCrc <= 0xffffffffL, "invalid-source");
@@ -114,6 +120,7 @@ public final class OriginalStore {
           input.close();
           cancel(stop);
           String hash = hex(sha.digest());
+          require(expectedSha256 == null || expectedSha256.equals(hash), "content-mismatch");
           directory("objects/" + hash.substring(0, 2));
           File target = checked("objects/" + hash.substring(0, 2) + "/" + hash);
           if (target.exists()) {
@@ -148,6 +155,15 @@ public final class OriginalStore {
     File file = object(hash, size);
     require(file.isFile() && file.length() == size, "stored-object-corrupt");
     return file;
+  }
+
+  /** False when no object exists at the hash path; true when one exists with the expected length (its content
+   * is not checked here); "stored-object-corrupt" when a file exists with the wrong length. */
+  public boolean present(String hash, long size) throws IOException {
+    File file = object(hash, size);
+    if (!file.exists()) return false;
+    require(file.isFile() && file.length() == size, "stored-object-corrupt");
+    return true;
   }
 
   /** Removes abandoned parts only; completed objects are retained for later job reconciliation. */

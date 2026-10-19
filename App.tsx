@@ -28,7 +28,11 @@ export default function App() {
   const [backingUp, setBackingUp] = useState(false);
   const closeBackup = useCallback(() => setBackingUp(false), []);
   const [inspecting, setInspecting] = useState(false);
-  const closeInspection = useCallback(() => setInspecting(false), []);
+  const refreshLibrary = useCallback(() => {
+    void library.current?.summary().then(summary => { if (mounted.current) setLibrarySummary(summary); }, () => {});
+  }, []);
+  const closeInspection = useCallback(() => { setInspecting(false); refreshLibrary(); }, [refreshLibrary]);
+  const openRestoredLibrary = useCallback(() => { setInspecting(false); refreshLibrary(); setBrowsing(true); }, [refreshLibrary]);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -139,7 +143,7 @@ export default function App() {
   const closeBrowser = () => { if (!browserBack.current?.()) setBrowsing(false); };
   const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
   if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
-  if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} /></SafeAreaProvider>;
+  if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} onChanged={refreshLibrary} onOpenLibrary={openRestoredLibrary} /></SafeAreaProvider>;
   return (
     <SafeAreaProvider>
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>

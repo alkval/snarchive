@@ -1,4 +1,4 @@
-import { decodePreview, encodePreview, MAX_PREVIEW_CHARS } from '../storage/previewCodec.ts';
+import { decodePreview, encodePreview, MAX_PREVIEW_CHARS, type SavedPreview } from '../storage/previewCodec.ts';
 import { MAX_BACKUP_BYTES, MAX_BACKUP_OBJECTS, MAX_MANIFEST_BYTES } from './snapshot.ts';
 
 /** Limits derived from the exporter (snapshot.ts) and the saved-preview codec, never tighter than what it writes. */
@@ -30,6 +30,12 @@ export type BackupPreview = {
 };
 
 export class BackupManifestError extends Error {}
+/** A record that passed every check, for a consumer such as restore. Sources carry the codec-decoded inventory. */
+export type ValidRecord =
+  | { type: 'object'; sha256: string; bytes: number }
+  | { type: 'source'; archiveSha256: string; saved: SavedPreview; inventory: string }
+  | { type: 'preserved'; archiveSha256: string; ordinal: number; memoryId: string; role: 'photo' | 'video' | 'overlay'; sha256: string }
+  | { type: 'favorite'; memoryId: string };
 function check(ok: unknown, code = 'backup-invalid'): asserts ok { if (!ok) throw new BackupManifestError(code); }
 const HASH = /^[a-f0-9]{64}$/;
 const MEMORY = /^[A-Za-z0-9_-]{1,1024}$/;
@@ -66,6 +72,12 @@ export class BackupManifestValidator {
   private readonly sharedObjects = new Set<string>();
   private favorites = 0; private lastFavorite = '';
   private declarations: [string, number][] = [];
+  private readonly keepRecords: boolean;
+  private validRecords: ValidRecord[] = [];
+  /** keepRecords: also return each validated record (takeRecords), for a consumer that applies them. */
+  constructor(options: { keepRecords?: boolean } = {}) { this.keepRecords = !!options.keepRecords; }
+  /** Records validated since the last call (keepRecords only). A record is returned only after it passed. */
+  takeRecords(): ValidRecord[] { const out = this.validRecords; this.validRecords = []; return out; }
 
   /** Accepts the next piece of manifest text. Lines end with LF; a line longer than any record could be fails here. */
   push(text: string): void {
@@ -133,6 +145,7 @@ export class BackupManifestValidator {
     check(this.objects.size < MAX_BACKUP_OBJECTS && (bytes as number) <= MAX_BACKUP_BYTES - this.originalBytes, 'backup-limit');
     this.objects.set(hash, bytes as number); this.originalBytes += bytes as number; this.lastObject = hash;
     this.declarations.push([hash, bytes as number]);
+    if (this.keepRecords) this.validRecords.push({ type: 'object', sha256: hash, bytes: bytes as number });
   }
 
   private source(record: Record<string, unknown>) {
@@ -149,6 +162,7 @@ export class BackupManifestValidator {
     const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
     this.current = { hash, files, lastOrdinal: -1, preserved: 0 };
     this.lastSource = hash; this.sources++; this.phase = 'sources';
+    if (this.keepRecords) this.validRecords.push({ type: 'source', archiveSha256: hash, saved, inventory: text });
   }
 
   private closeSource() {
@@ -173,6 +187,7 @@ export class BackupManifestValidator {
     if (first === undefined) this.firstByRole.set(key, hash); else if (first !== hash) this.variantIds.add(memoryId);
     const user = this.objectUser.get(hash);
     if (user === undefined) this.objectUser.set(hash, memoryId); else if (user !== memoryId) this.sharedObjects.add(hash);
+    if (this.keepRecords) this.validRecords.push({ type: 'preserved', archiveSha256: current.hash, ordinal: ordinal as number, memoryId, role, sha256: hash });
   }
 
   private favorite(record: Record<string, unknown>) {
@@ -183,6 +198,7 @@ export class BackupManifestValidator {
     // Only identities with preserved base media can be favorites.
     check(((this.memories.get(memoryId) ?? 0) & (ROLE_BIT.photo | ROLE_BIT.video)) !== 0);
     this.lastFavorite = memoryId; this.favorites++;
+    if (this.keepRecords) this.validRecords.push({ type: 'favorite', memoryId });
   }
 
   private end(record: Record<string, unknown>) {

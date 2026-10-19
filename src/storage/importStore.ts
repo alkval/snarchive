@@ -17,7 +17,8 @@ export type LibraryRow = { id: string; day: string | null; instant: string | nul
 export type LibraryCursor = { day: string; time: string; id: string };
 export type ChronologicalRow = LibraryRow & { favorite: number; sortDay: string; sortTime: string };
 export type LibraryObject = Receipt & { role: 'photo' | 'video' | 'overlay' };
-async function indexDates(tx: SqlConnection, source: SourceInventory) {
+/** Derives date-index rows from a source's evidence. Shared by planning and restore, so both index alike. */
+export async function indexDates(tx: SqlConnection, source: SourceInventory) {
   const evidence = [
     ...source.files.map(file => ({ id: file.memorySourceId, date: file.captureDate })),
     ...source.metadata.flatMap(result => result.records.map(row => ({ id: row.memorySourceId, date: row.captureDate }))),

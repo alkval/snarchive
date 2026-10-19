@@ -28,7 +28,7 @@ export const en = {
   savedNote: 'Saved on this device. Scan a source again if it has changed. This preview is not a backup.',
   originals: 'Preserve originals',
   importZip: (id: string) => `ZIP ${id}`, importZipDetail: 'Preserve or resume original files',
-  importNote: 'Choose the same scanned ZIP again to copy its original files into Snarchive. Keep space for all expanded originals plus 64 MiB. Folder copying and restore are not ready yet; keep an independent copy of your exports.',
+  importNote: 'Choose the same scanned ZIP again to copy its original files into Snarchive. Keep space for all expanded originals plus 64 MiB. Folder copying is not ready yet; keep an independent copy of your exports.',
   importIos: 'Original-file import is not available on iOS yet.',
   prototype: 'Snarchive is in development. Scanning a source previews it; only preserving originals copies them.',
 
@@ -108,10 +108,10 @@ export const en = {
   backupUnencrypted: 'Not encrypted', backupUnencryptedDetail: 'Contains your photos, videos, overlays and metadata, including any saved locations. Choose a location you trust.',
   backupDirect: 'Saved where you choose', backupDirectDetail: 'Written directly to that location, which needs room for a copy of your library.',
   backupOpenApp: 'Keep Snarchive open', backupOpenAppDetail: 'If the app is closed while saving, an incomplete ZIP may remain there. Delete it before trying again.',
-  backupFooter: 'Only files already preserved are included; pending files stay pending. Restore is not available in this development build.',
+  backupFooter: 'Only files already preserved are included; pending files stay pending. Restore it from Check or restore a backup on the home screen (Android).',
   backupStart: 'Create backup', backupCancel: 'Cancel backup', backupCancelling: 'Cancelling…',
   backupStage: { snapshot: 'Preparing library records…', choose: 'Choose where to save the backup.', save: 'Checking originals, writing the backup and checking the saved file…' },
-  backupSaved: 'Backup saved and checked', backupSavedDetail: 'Restore is not available yet, so keep your original exports too.',
+  backupSaved: 'Backup saved and checked', backupSavedDetail: 'Keep your original exports too: resuming unfinished imports still needs them.',
   backupCancelled: 'Backup cancelled.',
   backupErrors: {
     'backup-partial-remains': 'Saving did not finish. An incomplete file remains at the chosen location. Delete it before trying again.',
@@ -126,11 +126,11 @@ export const en = {
   backupFailed: 'The backup could not be saved and checked. Your library has not changed. Please try again.',
 
   // Backup inspection (read-only)
-  inspectOpen: 'Check a backup', inspectOpenDetail: 'Verify a backup file and preview it',
-  inspectTitle: 'Check a backup', inspectSubtitle: 'Verify a Snarchive backup and see what it contains. Nothing is restored or changed.',
+  inspectOpen: 'Check or restore a backup', inspectOpenDetail: 'Verify a backup file, then restore it if you choose',
+  inspectTitle: 'Check a backup', inspectSubtitle: 'Verify a Snarchive backup and see what it contains. Checking changes nothing; restoring is a separate step.',
   inspectFull: 'Reads every original', inspectFullDetail: 'Every photo and video in the backup is read and checked against its recorded size and checksum, so a large backup takes a while. Keep Snarchive open.',
   inspectReadOnly: 'Read-only', inspectReadOnlyDetail: 'Your library, favorites and import jobs are not touched, and the backup file is not changed.',
-  inspectLater: 'Restore comes later', inspectLaterDetail: 'This checks a backup and previews it. Restoring a backup into your library is not available yet.',
+  inspectLater: 'Restore only when you choose', inspectLaterDetail: 'After a successful check you can restore the backup into your library. Nothing changes until you choose Restore.',
   inspectChoose: 'Choose backup', inspectAgain: 'Check another backup', inspectCancel: 'Cancel check', inspectCancelling: 'Cancelling…',
   inspectStage: { opening: 'Opening the backup…', manifest: 'Checking the backup’s records…' },
   inspectObjects: (verified: number, total: number, bytes: string, totalBytes: string) => `Checked ${verified.toLocaleString()} of ${plural(total, 'original', 'originals')} (${bytes} of ${totalBytes}).`,
@@ -142,7 +142,7 @@ export const en = {
   inspectCopyKept: 'This storage location could not be read in place, so a temporary private copy was used.',
   inspectCleanupFailed: 'A temporary copy of the backup could not be deleted. Reopen the app before checking another backup; Snarchive tries to remove it again at startup.',
   inspectContents: 'What this backup contains',
-  inspectFooter: 'Verifying is not permanent approval: a future restore will check the file again before using it.',
+  inspectFooter: 'Verifying is not permanent approval: restoring checks the file again before using it.',
   /** Never claims a deletion that did not happen: in place there was no copy; a copy that remains is reported separately. */
   inspectFooterFor: (inPlace: boolean, cleanupFailed: boolean): string =>
     inPlace ? en.inspectFooter : `${cleanupFailed ? en.inspectCopyKept : en.inspectCopyNote} ${en.inspectFooter}`,
@@ -171,6 +171,47 @@ export const en = {
     'native-build-required': 'Install the latest Android development build to check backups.',
   } as Record<string, string>,
   inspectUnreadable: 'The backup could not be read. Access may have expired or the storage provider failed. Try choosing it again.',
+
+  // Restore (Android)
+  restoreHeader: 'Restore into this library',
+  restoreAdds: 'Adds to your library', restoreAddsDetail: 'Memories, originals and source details from the backup are added. Nothing in your library is deleted or replaced, and memories already here are not duplicated.',
+  restoreFavorites: 'Favorites are combined', restoreFavoritesDetail: 'A memory that is a favorite in your library or in the backup stays a favorite.',
+  restoreVariants: 'Every version is kept', restoreVariantsDetail: 'If the backup has a different file for a memory you already have, both versions are kept.',
+  restoreChecked: 'Checked again, added in one step', restoreCheckedDetail: 'The backup is verified again while restoring, then added all at once. If anything fails, your library is left as it was.',
+  restoreFooter: 'Needs free space for originals that are not already in your library. Originals already here are checked, never overwritten. Resuming unfinished imports still needs the original export ZIPs.',
+  restoreStart: 'Restore into library', restoreCancel: 'Cancel restore', restoreCancelling: 'Cancelling…',
+  restoreStage: { validating: 'Checking the backup again…', merging: 'Adding memories to your library…' },
+  restoreObjects: (stored: number, total: number, bytes: string, totalBytes: string) => `Adding originals: ${stored.toLocaleString()} of ${total.toLocaleString()} (${bytes} of ${totalBytes}).`,
+  restoreDone: 'Restore complete',
+  restoreDoneDetail: 'Your library now includes this backup. Nothing was removed, and memories that were already here were not duplicated.',
+  restoreChanges: 'Changes to your library',
+  restoreChangeRows: {
+    memories: ['Memories added', 'Memories that had no photo or video in your library before.'],
+    files: ['Original files', 'Written by this restore, and already present (checked, then reused).'],
+    favorites: ['Favorites added', 'Favorites from the backup that were not favorites here.'],
+    sources: ['Export sources', 'Added, and existing ones that gained preserved files.'],
+    preserved: ['Files preserved', 'Inventory files that are now preserved, from new or existing sources.'],
+  } as const,
+  restoreFilesValue: (added: number, reused: number) => `${added.toLocaleString()} new · ${reused.toLocaleString()} reused`,
+  restoreSourcesValue: (added: number, updated: number) => `${added.toLocaleString()} new · ${updated.toLocaleString()} updated`,
+  restoreOpenLibrary: 'Open library', restoreFinish: 'Done',
+  restoreCancelled: 'Restore cancelled. Your library was not changed.',
+  restoreNotChanged: 'Your library was not changed. Originals that were already checked may stay in Snarchive’s storage, unused, and a later restore reuses them.',
+  restoreErrors: {
+    'restore-conflict': 'This backup disagrees with an export already in your library: the same export, with different contents or different preserved files. Nothing was restored.',
+    'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Repairing it is not available yet; keep your exports.',
+    'restore-schema-unsupported': 'This library uses a version Snarchive cannot restore into. Update the app and try again.',
+    'restore-failed': 'The restore could not be completed safely.',
+  } as Record<string, string>,
+  /** Notices for a restore that did not commit: the cause, that the library is unchanged, and any leftover copy. */
+  restoreFailureNotices: (code: string, cleanupFailed: boolean): { tone: 'info' | 'warning' | 'error'; message: string }[] => {
+    const notices: { tone: 'info' | 'warning' | 'error'; message: string }[] = code === 'cancelled'
+      ? [{ tone: 'info', message: en.restoreCancelled }]
+      : [{ tone: code === 'busy' || code === 'insufficient-storage' || code === 'staging-cleanup-failed' ? 'warning' : 'error',
+        message: en.restoreErrors[code] ?? en.inspectErrors[code] ?? en.restoreErrors['restore-failed']! }, { tone: 'info', message: en.restoreNotChanged }];
+    if (cleanupFailed && code !== 'staging-cleanup-failed') notices.push({ tone: 'warning', message: en.inspectCleanupFailed });
+    return notices;
+  },
   /** Notices for a failed or cancelled check: the outcome first, then a copy that could not be deleted. A leftover
    * copy that stopped the check from starting is explained once, without blaming the chosen backup. */
   inspectOutcomeNotices: (outcome: { cancelled: true } | { cancelled: false; code: string }, cleanupFailed: boolean): { tone: 'info' | 'warning' | 'error'; message: string }[] => {

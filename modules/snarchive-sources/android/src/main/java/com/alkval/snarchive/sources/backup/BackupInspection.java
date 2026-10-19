@@ -32,7 +32,9 @@ public final class BackupInspection implements Closeable {
   private static final Set<String> CODES = new HashSet<>(Arrays.asList("unsafe-or-unsupported-zip", "backup-not-snarchive",
     "backup-invalid", "backup-damaged", "backup-limit", "source-changed", "insufficient-storage", "busy", "backup-cleanup-failed",
     // A leftover private copy from an earlier operation could not be removed, so the chosen backup was never opened.
-    "staging-cleanup-failed"));
+    "staging-cleanup-failed",
+    // Restore: a local original of the wrong length or content; the store is left unchanged.
+    "stored-object-corrupt"));
 
   public static final class Chunk {
     public final String text; public final boolean done;
@@ -50,12 +52,21 @@ public final class BackupInspection implements Closeable {
   private final long objectBytes;
   private final Map<String, Long> declared = new HashMap<>();
   private boolean sealed, manifestDone, closed;
-  private Bounded manifestStream;
-  private Reader manifestReader;
-  private char heldSurrogate;
+  private TextChunks manifestText;
   private List<String> order;
   private int verified;
   private long verifiedBytes;
+  // Restore mode: the manifest bytes read in pass 1 are teed to a private file and hashed, objects are stored,
+  // and the staged copy is read again (hash-checked) for the merge.
+  private File stagedManifest;
+  private OutputStream stagedOut;
+  private MessageDigest stagedDigest;
+  private String manifestSha256;
+  private TextChunks stagedText;
+  private MessageDigest stagedCheck;
+  private long stagedCount;
+  private int stored, added, reused;
+  private long storedBytes;
 
   private static void require(boolean ok, String code) throws IOException { if (!ok) throw new IOException(code); }
   private static void cancel(BooleanSupplier stop) throws IOException { require(!stop.getAsBoolean(), "cancelled"); }
@@ -119,34 +130,72 @@ public final class BackupInspection implements Closeable {
     }
   }
 
+  /** Strict UTF-8 text in bounded chunks, never split inside a surrogate pair. */
+  private static final class TextChunks {
+    private final Reader reader; private char held; boolean done;
+    TextChunks(InputStream input) {
+      CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
+      reader = new InputStreamReader(input, decoder);
+    }
+    String next(int maxChars, BooleanSupplier stop) throws IOException {
+      try {
+        StringBuilder out = new StringBuilder(Math.min(maxChars, 65536));
+        if (held != 0) { out.append(held); held = 0; }
+        char[] buffer = new char[Math.min(maxChars, 16384)];
+        while (out.length() < maxChars) {
+          cancel(stop);
+          int n = reader.read(buffer, 0, Math.min(buffer.length, maxChars - out.length()));
+          if (n == -1) { done = true; break; }
+          out.append(buffer, 0, n);
+        }
+        if (done) {
+          reader.close();
+          require(out.length() == 0 || !Character.isHighSurrogate(out.charAt(out.length() - 1)), "backup-invalid");
+        } else if (Character.isHighSurrogate(out.charAt(out.length() - 1))) {
+          held = out.charAt(out.length() - 1); out.setLength(out.length() - 1);
+        }
+        return out.toString();
+      } catch (CharacterCodingException error) { throw new IOException("backup-invalid", error); }
+    }
+    void close() { try { reader.close(); } catch (IOException ignored) {} }
+  }
+
+  /** Copies every byte read to a private file and a digest (restore mode). */
+  private static final class Tee extends FilterInputStream {
+    final OutputStream copy; final MessageDigest digest;
+    Tee(InputStream input, OutputStream copy, MessageDigest digest) { super(input); this.copy = copy; this.digest = digest; }
+    @Override public int read() throws IOException { byte[] one = new byte[1]; return read(one, 0, 1) == -1 ? -1 : one[0] & 255; }
+    @Override public int read(byte[] b, int off, int len) throws IOException {
+      int n = super.read(b, off, len);
+      if (n > 0) { copy.write(b, off, n); digest.update(b, off, n); }
+      return n;
+    }
+  }
+
+  /** Restore mode, before the manifest is read: pass 1 also writes the manifest bytes to this private file. */
+  public void enableRestore(File stagedManifest) throws IOException {
+    require(!closed && manifestText == null && this.stagedManifest == null, "backup-invalid");
+    this.stagedManifest = stagedManifest; stagedOut = new FileOutputStream(stagedManifest); stagedDigest = digest();
+  }
+
   /** The next piece of manifest text, at most maxChars and never split inside a surrogate pair. Malformed
    * UTF-8 fails. The entry's length and CRC are confirmed when its end is reached. */
   public Chunk readManifest(int maxChars, BooleanSupplier stop) throws IOException {
     require(!closed && maxChars >= 2 && maxChars <= MAX_CHUNK, "backup-invalid");
     if (manifestDone) return new Chunk("", true);
-    try {
-      if (manifestReader == null) {
-        CharsetDecoder decoder = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT);
-        manifestStream = new Bounded(ZipInventory.open(source, manifest), manifest.getUncompressedSize());
-        manifestReader = new InputStreamReader(manifestStream, decoder);
+    if (manifestText == null) {
+      InputStream entry = new Bounded(ZipInventory.open(source, manifest), manifest.getUncompressedSize());
+      manifestText = new TextChunks(stagedOut == null ? entry : new Tee(entry, stagedOut, stagedDigest));
+    }
+    String text = manifestText.next(maxChars, stop);
+    if (manifestText.done) {
+      manifestDone = true; source.checkUnchanged();
+      if (stagedOut != null) {
+        stagedOut.flush(); ((FileOutputStream) stagedOut).getFD().sync(); stagedOut.close(); stagedOut = null;
+        manifestSha256 = hex(stagedDigest.digest());
       }
-      StringBuilder out = new StringBuilder(Math.min(maxChars, 65536));
-      if (heldSurrogate != 0) { out.append(heldSurrogate); heldSurrogate = 0; }
-      char[] buffer = new char[Math.min(maxChars, 16384)];
-      while (out.length() < maxChars) {
-        cancel(stop);
-        int n = manifestReader.read(buffer, 0, Math.min(buffer.length, maxChars - out.length()));
-        if (n == -1) { manifestDone = true; break; }
-        out.append(buffer, 0, n);
-      }
-      if (manifestDone) {
-        manifestReader.close(); manifestReader = null; source.checkUnchanged();
-        require(out.length() == 0 || !Character.isHighSurrogate(out.charAt(out.length() - 1)), "backup-invalid");
-      } else if (Character.isHighSurrogate(out.charAt(out.length() - 1))) {
-        heldSurrogate = out.charAt(out.length() - 1); out.setLength(out.length() - 1);
-      }
-      return new Chunk(out.toString(), manifestDone);
-    } catch (CharacterCodingException error) { throw new IOException("backup-invalid", error); }
+    }
+    return new Chunk(text, manifestDone);
   }
 
   /** Records an object the manifest declares. It must exist in the ZIP exactly once with that length. */
@@ -172,8 +221,7 @@ public final class BackupInspection implements Closeable {
   public Progress verify(long maxMillis, BooleanSupplier stop) throws IOException {
     require(!closed && sealed, "backup-invalid");
     long start = System.nanoTime();
-    MessageDigest digest;
-    try { digest = MessageDigest.getInstance("SHA-256"); } catch (NoSuchAlgorithmException e) { throw new AssertionError(e); }
+    MessageDigest digest = digest();
     byte[] buffer = new byte[OriginalStore.CHUNK];
     while (verified < order.size()) {
       cancel(stop);
@@ -193,6 +241,82 @@ public final class BackupInspection implements Closeable {
     return new Progress(verified, order.size(), verifiedBytes, objectBytes);
   }
 
+  private static MessageDigest digest() {
+    try { return MessageDigest.getInstance("SHA-256"); } catch (NoSuchAlgorithmException e) { throw new AssertionError(e); }
+  }
+
+  public static final class Stored {
+    public final int stored, total, added, reused; public final long bytes, totalBytes; public final boolean done;
+    Stored(int stored, int total, int added, int reused, long bytes, long totalBytes) {
+      this.stored = stored; this.total = total; this.added = added; this.reused = reused; this.bytes = bytes; this.totalBytes = totalBytes; this.done = stored == total;
+    }
+  }
+
+  /** Restore mode: bytes of declared objects not yet in the store. A local object of the wrong length fails here. */
+  public long missingBytes(OriginalStore store) throws IOException {
+    require(!closed && sealed && stagedManifest != null, "backup-invalid");
+    long missing = 0;
+    for (String hash : order) { long size = objects.get(hash).getUncompressedSize(); if (!store.present(hash, size)) missing += size; }
+    return missing;
+  }
+
+  /** Restore mode: places every object in the store, in archive order, until maxMillis has passed. A new object
+   * is written through OriginalStore.put, which checks length, CRC and the declared SHA-256 before its atomic
+   * rename. An object already present is never overwritten: the backup's copy is still read and checked, and the
+   * local file is fully re-hashed; a mismatch there is "stored-object-corrupt" and nothing is changed. */
+  public Stored store(OriginalStore store, long maxMillis, BooleanSupplier stop) throws IOException {
+    require(!closed && sealed && stagedManifest != null && manifestSha256 != null, "backup-invalid");
+    long start = System.nanoTime();
+    OriginalStore.Budget budget = new OriginalStore.Budget(BackupWriter.MAX_TOTAL);
+    byte[] buffer = new byte[OriginalStore.CHUNK];
+    while (stored < order.size()) {
+      cancel(stop);
+      String hash = order.get(stored); FileHeader header = objects.get(hash); long size = header.getUncompressedSize();
+      if (store.present(hash, size)) {
+        MessageDigest digest = digest(); CRC32 crc = new CRC32();
+        try (Bounded input = new Bounded(ZipInventory.open(source, header), size)) {
+          for (;;) { cancel(stop); int n = input.read(buffer); if (n == -1) break; digest.update(buffer, 0, n); crc.update(buffer, 0, n); }
+        }
+        require(crc.getValue() == header.getCrc() && hex(digest.digest()).equals(hash), "backup-damaged");
+        store.verify(hash, size, stop); // Same-length local corruption fails here; the local file is left as it is.
+        reused++;
+      } else {
+        try {
+          OriginalStore.Stored result = store.put(new Bounded(ZipInventory.open(source, header), size), size, header.getCrc(), hash, budget, stop);
+          if (result.reused) reused++; else added++;
+        } catch (IOException error) {
+          String message = error.getMessage();
+          if ("content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)) throw new IOException("backup-damaged", error);
+          throw error;
+        }
+      }
+      source.checkUnchanged();
+      stored++; storedBytes += size;
+      if (System.nanoTime() - start >= maxMillis * 1_000_000L) break;
+    }
+    return new Stored(stored, order.size(), added, reused, storedBytes, objectBytes);
+  }
+
+  /** Restore mode, after every object is stored: the manifest again, from the private copy made in pass 1. Its
+   * length and SHA-256 must match pass 1, so the merge consumes exactly the bytes that were validated. */
+  public Chunk readStagedManifest(int maxChars, BooleanSupplier stop) throws IOException {
+    require(!closed && manifestSha256 != null && stored == order.size() && maxChars >= 2 && maxChars <= MAX_CHUNK, "backup-invalid");
+    if (stagedText != null && stagedText.done) return new Chunk("", true);
+    if (stagedText == null) {
+      stagedCheck = digest(); stagedCount = 0;
+      InputStream file = new FilterInputStream(new FileInputStream(stagedManifest)) {
+        @Override public int read() throws IOException { byte[] one = new byte[1]; return read(one, 0, 1) == -1 ? -1 : one[0] & 255; }
+        @Override public int read(byte[] b, int off, int len) throws IOException {
+          int n = super.read(b, off, len); if (n > 0) { stagedCheck.update(b, off, n); stagedCount += n; } return n;
+        }
+      };
+      stagedText = new TextChunks(file);
+    }
+    String text = stagedText.next(maxChars, stop);
+    if (stagedText.done) require(stagedCount == manifest.getUncompressedSize() && hex(stagedCheck.digest()).equals(manifestSha256), "backup-damaged");
+    return new Chunk(text, stagedText.done);
+  }
+
   private static String hex(byte[] bytes) {
     StringBuilder out = new StringBuilder(64);
     for (byte b : bytes) out.append(Character.forDigit((b >>> 4) & 15, 16)).append(Character.forDigit(b & 15, 16));
@@ -202,7 +326,9 @@ public final class BackupInspection implements Closeable {
   /** Releases the source and runs cleanup (for example deleting a private copy). Never touches the backup. */
   @Override public void close() throws IOException {
     if (closed) return; closed = true;
-    try { if (manifestReader != null) manifestReader.close(); } catch (IOException ignored) {}
+    if (manifestText != null) manifestText.close();
+    if (stagedText != null) stagedText.close();
+    if (stagedOut != null) try { stagedOut.close(); } catch (IOException ignored) {}
     try { source.close(); } finally { if (cleanup != null) cleanup.close(); }
   }
 }
