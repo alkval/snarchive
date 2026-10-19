@@ -34,6 +34,27 @@ public final class ArchiveSource implements Closeable {
   }
   private static void require(boolean ok, String code) throws IOException { if (!ok) throw new IOException(code); }
 
+  /** Returns null when that way of reading is unavailable. */
+  public interface Opener { ArchiveSource open() throws Exception; }
+
+  /** Deletes copies left by an interrupted earlier operation: only File.createTempFile("preview-", ".part") names. */
+  public static int removeAbandonedCopies(File copies) throws IOException {
+    File[] entries = copies.listFiles(); if (entries == null) return 0; int removed = 0;
+    for (File entry : entries) {
+      if (!entry.getName().matches("preview-[0-9]+\\.part")) continue;
+      require(entry.delete(), "staging-cleanup-failed"); removed++;
+    }
+    return removed;
+  }
+
+  /** Caller holds the exclusive operation guard, so no live copy exists. Cleanup runs before
+   * either reading path is chosen; reading in place must not leave earlier copies behind. */
+  public static ArchiveSource openSelected(File copies, Opener inPlace, Opener copy) throws Exception {
+    removeAbandonedCopies(copies);
+    ArchiveSource source = inPlace.open();
+    return source != null ? source : copy.open();
+  }
+
   public long size() throws IOException { return channel.size(); }
 
   /** Single sequential read. Pins the identity used by checkUnchanged(). */

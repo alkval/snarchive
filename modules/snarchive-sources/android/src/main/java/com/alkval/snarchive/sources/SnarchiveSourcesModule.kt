@@ -151,14 +151,20 @@ class SnarchiveSourcesModule : Module() {
    * Otherwise copies it to private cache (hashed while copying). Second value is the copy to delete, if any. */
   private fun openArchive(uriString: String): Pair<ArchiveSource, File?> {
     val uri = Uri.parse(uriString); require(uri.scheme == "content" || uri.scheme == "file")
-    openInPlace(uri)?.let { return it to null }
-    val copy = stageArchive(uri)
-    try {
-      return ArchiveSource.open(copy.first).also { source ->
-        try { source.pinCopy(copy.second) } catch (error: Exception) { runCatching { source.close() }; throw error }
-      } to copy.first
-    } catch (error: Exception) { copy.first.delete(); throw error }
+    var staged: File? = null
+    val source = ArchiveSource.openSelected(previewRoot(), { openInPlace(uri) }) {
+      val copy = stageArchive(uri)
+      try {
+        ArchiveSource.open(copy.first).also { source ->
+          try { source.pinCopy(copy.second) } catch (error: Exception) { runCatching { source.close() }; throw error }
+        }.also { staged = copy.first }
+      } catch (error: Exception) { copy.first.delete(); throw error }
+    }
+    return source to staged
   }
+
+  private fun previewRoot(): File =
+    File(requireNotNull(appContext.reactContext).cacheDir, "snarchive-zip-preview").also { check(it.isDirectory || it.mkdirs()) }
 
   private fun openInPlace(uri: Uri): ArchiveSource? {
     val descriptor = try { requireNotNull(appContext.reactContext).contentResolver.openFileDescriptor(uri, "r") } catch (_: Exception) { null } ?: return null
@@ -183,9 +189,7 @@ class SnarchiveSourcesModule : Module() {
 
   private fun stageArchive(uri: Uri): Pair<File, String> {
     val context = requireNotNull(appContext.reactContext)
-    val root = File(context.cacheDir, "snarchive-zip-preview")
-    check(root.isDirectory || root.mkdirs())
-    root.listFiles()?.filter { it.name.startsWith("preview-") && it.name.endsWith(".part") }?.forEach { check(it.delete()) }
+    val root = previewRoot() // Abandoned copies were already removed by openArchive.
     val staged = File.createTempFile("preview-", ".part", root)
     try {
       var copied = 0L; val digest = MessageDigest.getInstance("SHA-256")

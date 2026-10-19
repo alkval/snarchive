@@ -56,6 +56,18 @@ public class ZipInventoryTest {
       catch (IOException e) { if (!"source-changed".equals(e.getMessage())) throw e; }
       passed++; System.out.println("PASS in-place hash cancellation leaves source unpinned");
     }
+    {
+      Path copies = Files.createTempDirectory(root, "copies-");
+      Path abandoned = Files.createTempFile(copies, "preview-", ".part"); // Same naming as the module's copy fallback.
+      Path unrelated = Files.write(copies.resolve("notes.part"), new byte[1]);
+      Path other = Files.write(copies.resolve("preview-keep.txt"), new byte[1]);
+      boolean[] copied = { false };
+      try (ArchiveSource source = ArchiveSource.openSelected(copies.toFile(), () -> unlinked(root.resolve("normal.zip")), () -> { copied[0] = true; return null; })) {
+        if (source == null || copied[0]) throw new AssertionError("in-place source not chosen");
+      }
+      if (Files.exists(abandoned) || !Files.exists(unrelated) || !Files.exists(other)) throw new AssertionError("abandoned copy cleanup");
+      passed++; System.out.println("PASS abandoned copy removed when next archive is read in place");
+    }
     System.out.println(passed + " ZIP-engine host tests passed. Mobile runtime is not verified.");
   }
 }
