@@ -19,6 +19,7 @@ class HostDatabase implements SqlDatabase {
     if (this.failAfterWrite) throw new Error('injected-write-failure');
   }
   async getFirstAsync<T>(sql: string, ...params: (string | number | null)[]) { return (this.raw.prepare(sql).get(...params) as T | undefined) ?? null; }
+  async getAllAsync<T>(sql: string, ...params: (string | number | null)[]) { return this.raw.prepare(sql).all(...params) as T[]; }
   async withExclusiveTransactionAsync(work: (tx: SqlConnection) => Promise<void>) {
     this.raw.exec('BEGIN IMMEDIATE');
     try { await work(this); this.raw.exec('COMMIT'); }

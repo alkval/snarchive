@@ -3,6 +3,7 @@ export interface SqlConnection {
   execAsync(sql: string): Promise<void>;
   runAsync(sql: string, ...params: (string | number | null)[]): Promise<unknown>;
   getFirstAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T | null>;
+  getAllAsync<T>(sql: string, ...params: (string | number | null)[]): Promise<T[]>;
 }
 export interface SqlDatabase extends SqlConnection {
   withExclusiveTransactionAsync(work: (transaction: SqlConnection) => Promise<void>): Promise<void>;

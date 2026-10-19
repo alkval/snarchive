@@ -8,7 +8,7 @@ interface NativeBackup {
   beginBackup(): Promise<Result>;
   appendBackupChunk(chunk: string): Promise<Result>;
   addBackupObject(hash: string, bytes: number): Promise<Result>;
-  buildBackup(): Promise<Result>;
+  sealBackup(): Promise<Result>;
   chooseBackupDestination(): Promise<Result>;
   saveBackup(): Promise<Result>;
   endBackup(): Promise<Result>;
@@ -34,7 +34,7 @@ export async function saveLibraryBackup(cancelled: () => boolean, progress: (sta
       async begin() { checked(await native.beginBackup()); },
       async line(line) { for (const chunk of backupChunks(line)) { if (cancelled()) throw new Error('cancelled'); checked(await native.appendBackupChunk(chunk)); } },
       async object(object) { checked(await native.addBackupObject(object.sha256, object.bytes)); },
-      async build() { checked(await native.buildBackup()); },
+      async seal() { checked(await native.sealBackup()); },
       async choose() { return !checked(await native.chooseBackupDestination()).canceled; },
       async save() { checked(await native.saveBackup()); },
       async end() { checked(await native.endBackup()); },

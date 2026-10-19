@@ -14,6 +14,7 @@ class DB implements SqlDatabase {
   async execAsync(sql: string) { this.raw.exec(sql); }
   async runAsync(sql: string, ...p: (string | number | null)[]) { this.raw.prepare(sql).run(...p); if (this.failSql && sql.includes(this.failSql)) throw new Error('injected-db-failure'); }
   async getFirstAsync<T>(sql: string, ...p: (string | number | null)[]) { return (this.raw.prepare(sql).get(...p) as T | undefined) ?? null; }
+  async getAllAsync<T>(sql: string, ...p: (string | number | null)[]) { return this.raw.prepare(sql).all(...p) as T[]; }
   async withExclusiveTransactionAsync(work: (tx: SqlConnection) => Promise<void>) {
     this.raw.exec('BEGIN IMMEDIATE'); try { await work(this); this.raw.exec('COMMIT'); } catch (error) { this.raw.exec('ROLLBACK'); throw error; }
   }

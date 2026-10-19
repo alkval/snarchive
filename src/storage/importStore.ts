@@ -6,6 +6,8 @@ export type Receipt = { sha256: string; relativePath: string; bytes: number };
 export type ImportItem = { ordinal: number; relative_path: string; memory_id: string; role: string; state: 'pending' | 'done'; object_hash: string | null; bytes: number | null };
 export type ImportSummary = { files: number; objects: number; memories: number; unfinished: number; conflicts: number };
 function check(ok: unknown): asserts ok { if (!ok) throw new Error('invalid-import-state'); }
+/** Bump with each migration. The backup snapshot pins the version it covers; a test fails when they diverge. */
+export const LIBRARY_SCHEMA_VERSION = 3;
 export function validateReceipt(value: Receipt): void {
   check(/^[a-f0-9]{64}$/.test(value.sha256));
   check(value.relativePath === `objects/${value.sha256.slice(0, 2)}/${value.sha256}`);
@@ -31,7 +33,7 @@ export class ImportStore {
     await this.db.execAsync('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     await this.db.withExclusiveTransactionAsync(async tx => {
       const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
-      if (version?.user_version === 3) return;
+      if (version?.user_version === LIBRARY_SCHEMA_VERSION) return;
       check(version && [0, 1, 2].includes(version.user_version));
       if (version.user_version < 2) {
         if (version.user_version === 0) await tx.execAsync(`

@@ -5,6 +5,10 @@ import { validateReceipt, type Receipt } from '../storage/importStore.ts';
 export const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
 export const MAX_BACKUP_OBJECTS = 100_000;
 export const MAX_BACKUP_BYTES = 64 * 1024 ** 3;
+/** The library schema this format covers. A new migration must extend the snapshot (and this) first. */
+export const BACKUP_SCHEMA_VERSION = 3;
+/** Rows per query: each query is a native round trip inside the exclusive transaction. */
+const BATCH = 500;
 /** The sink writes to private staging, never directly to a user-visible completed backup.
  * object() spools the same object catalog for the native ZIP writer. Neither method finalizes it. */
 export interface SnapshotSink {
@@ -30,7 +34,7 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
     await sink.line(line); stop();
   };
   await db.withExclusiveTransactionAsync(async tx => {
-    check((await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version === 3);
+    if ((await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version'))?.user_version !== BACKUP_SCHEMA_VERSION) throw new Error('backup-schema-unsupported');
     // Refuse a lossy snapshot if an association cannot be traced back to its preserved observation.
     check(!await tx.getFirstAsync(`SELECT 1 FROM memory_objects m WHERE NOT EXISTS (
       SELECT 1 FROM import_items i WHERE i.state='done' AND i.memory_id=m.memory_id AND i.role=m.role AND i.object_hash=m.object_hash) LIMIT 1`));
@@ -41,11 +45,13 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
     let after = '';
     while (true) {
       stop();
-      const row = await tx.getFirstAsync<Receipt>(`SELECT hash AS sha256,relative_path AS relativePath,bytes FROM stored_objects WHERE hash>? ORDER BY hash LIMIT 1`, after);
-      if (!row) break;
-      validateReceipt(row); originalBytes += row.bytes;
-      check(++objects <= MAX_BACKUP_OBJECTS && originalBytes <= MAX_BACKUP_BYTES);
-      await emit({ type: 'object', ...row }); await sink.object(row); after = row.sha256;
+      const rows = await tx.getAllAsync<Receipt>(`SELECT hash AS sha256,relative_path AS relativePath,bytes FROM stored_objects WHERE hash>? ORDER BY hash LIMIT ${BATCH}`, after);
+      for (const row of rows) {
+        validateReceipt(row); originalBytes += row.bytes;
+        check(++objects <= MAX_BACKUP_OBJECTS && originalBytes <= MAX_BACKUP_BYTES);
+        await emit({ type: 'object', ...row }); await sink.object(row); after = row.sha256;
+      }
+      if (rows.length < BATCH) break;
     }
     after = '';
     while (true) {
@@ -62,25 +68,28 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
       let ordinal = -1;
       while (true) {
         stop();
-        const item = await tx.getFirstAsync<{ ordinal: number; relative_path: string; memory_id: string; role: string; object_hash: string | null; state: string; bytes: number | null }>(`SELECT i.*,o.bytes FROM import_items i LEFT JOIN stored_objects o ON o.hash=i.object_hash WHERE job_hash=? AND ordinal>? ORDER BY ordinal LIMIT 1`, info.hash, ordinal);
-        if (!item) break;
-        check(item.ordinal === ordinal + 1);
-        const file = source.files[item.ordinal];
-        check(file && file.relativePath === item.relative_path && file.memorySourceId === item.memory_id && file.role === item.role);
-        if (item.state === 'done') {
-          check(item.object_hash && /^[a-f0-9]{64}$/.test(item.object_hash) && item.bytes !== null);
-          check(await tx.getFirstAsync('SELECT 1 FROM memory_objects WHERE memory_id=? AND role=? AND object_hash=?', item.memory_id, item.role, item.object_hash));
-          await emit({ type: 'preserved', archiveSha256: info.hash, ordinal: item.ordinal, memoryId: item.memory_id, role: item.role, sha256: item.object_hash });
-        } else check(item.state === 'pending' && item.object_hash === null);
-        ordinal = item.ordinal;
+        const items = await tx.getAllAsync<{ ordinal: number; relative_path: string; memory_id: string; role: string; object_hash: string | null; state: string; bytes: number | null; linked: number }>(`SELECT i.ordinal,i.relative_path,i.memory_id,i.role,i.object_hash,i.state,o.bytes,
+          EXISTS(SELECT 1 FROM memory_objects m WHERE m.memory_id=i.memory_id AND m.role=i.role AND m.object_hash=i.object_hash) AS linked
+          FROM import_items i LEFT JOIN stored_objects o ON o.hash=i.object_hash WHERE job_hash=? AND ordinal>? ORDER BY ordinal LIMIT ${BATCH}`, info.hash, ordinal);
+        for (const item of items) {
+          check(item.ordinal === ordinal + 1);
+          const file = source.files[item.ordinal];
+          check(file && file.relativePath === item.relative_path && file.memorySourceId === item.memory_id && file.role === item.role);
+          if (item.state === 'done') {
+            check(item.object_hash && /^[a-f0-9]{64}$/.test(item.object_hash) && item.bytes !== null && item.linked === 1);
+            await emit({ type: 'preserved', archiveSha256: info.hash, ordinal: item.ordinal, memoryId: item.memory_id, role: item.role, sha256: item.object_hash });
+          } else check(item.state === 'pending' && item.object_hash === null);
+          ordinal = item.ordinal;
+        }
+        if (items.length < BATCH) break;
       }
       check(ordinal + 1 === source.files.length); after = info.hash;
     }
     after = '';
     while (true) {
-      stop(); const row = await tx.getFirstAsync<{ memory_id: string }>('SELECT memory_id FROM library_favorites WHERE memory_id>? ORDER BY memory_id LIMIT 1', after);
-      if (!row) break;
-      await emit({ type: 'favorite', memoryId: row.memory_id }); after = row.memory_id;
+      stop(); const rows = await tx.getAllAsync<{ memory_id: string }>(`SELECT memory_id FROM library_favorites WHERE memory_id>? ORDER BY memory_id LIMIT ${BATCH}`, after);
+      for (const row of rows) { await emit({ type: 'favorite', memoryId: row.memory_id }); after = row.memory_id; }
+      if (rows.length < BATCH) break;
     }
     await emit({ type: 'end', records, objects, originalBytes });
   });

@@ -5,8 +5,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { cancelBackup, saveLibraryBackup } from '../platform/backup';
 import type { BackupStage } from '../backup/runBackup';
 const stages: Record<BackupStage, string> = {
-  snapshot: 'Preparing library records…', build: 'Checking originals and creating the backup…',
-  choose: 'Choose where to save the backup.', save: 'Saving and checking the saved file…',
+  snapshot: 'Preparing library records…', choose: 'Choose where to save the backup.',
+  save: 'Checking originals, writing the backup and checking the saved file…',
 };
 export function BackupScreen({ onClose }: { onClose(): void }) {
   const dark = useColorScheme() === 'dark';
@@ -31,11 +31,13 @@ export function BackupScreen({ onClose }: { onClose(): void }) {
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
       if (mounted.current) setMessage(code === 'backup-partial-remains' ? 'Saving did not finish. An incomplete file remains at the chosen location. Delete it before trying again.'
+        : code === 'backup-unverified' ? 'The backup was written, but the chosen location could not hand it back for checking (some cloud services are still uploading). It was kept, but it has not been checked. Do not rely on it as your only copy.'
         : code === 'backup-saved-cleanup-failed' ? 'Backup saved and checked, but temporary files could not be cleared. Reopen the app before another backup.'
         : code === 'backup-cleanup-failed' ? 'Temporary backup files could not be cleared. Reopen the app before trying again.'
         : code === 'cancelled' ? 'Backup cancelled.'
         : code === 'stored-object-corrupt' ? 'An original is missing or damaged. No backup was saved.'
         : code === 'insufficient-storage' ? 'Not enough space to create the backup. Free some space and try again.'
+        : code === 'backup-schema-unsupported' ? 'This version of the app cannot back up this library yet. Update the app and try again.'
         : code === 'native-build-required' ? 'Install the latest Android development build to save backups.'
         : 'Backup could not be saved and checked. Your library has not changed. Please try again.');
     } finally { running.current = false; if (mounted.current) setBusy(false); }
@@ -45,7 +47,7 @@ export function BackupScreen({ onClose }: { onClose(): void }) {
     <ScrollView contentContainerStyle={styles.content}>
       <Text accessibilityRole="header" style={[styles.title, { color: colors.text }]}>Back up your library</Text>
       <Text style={[styles.text, { color: colors.text }]}>This ZIP is unencrypted. It contains private photos, videos, overlays and metadata, including any saved locations. Choose a location you trust.</Text>
-      <Text style={[styles.text, { color: colors.text }]}>Keep the app open while it works. Creating the backup needs space for an extra copy of your library. Only files already preserved in Snarchive are included; pending files remain pending.</Text>
+      <Text style={[styles.text, { color: colors.text }]}>Keep the app open while it works. The backup is written directly to the location you choose, which needs room for a copy of your library. Only files already preserved in Snarchive are included; pending files remain pending.</Text>
       <Text style={[styles.text, { color: colors.text }]}>If the app is force-stopped while saving, an incomplete ZIP may remain at the destination. Delete that file before retrying. Restore is not available in this development build.</Text>
       <Text accessibilityLiveRegion="polite" style={[styles.text, { color: colors.text }]}>{message}</Text>
       <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => void save()} style={[styles.button, { backgroundColor: colors.button, opacity: busy ? 0.5 : 1 }]}><Text style={{ color: colors.label }}>Create and save backup</Text></Pressable>

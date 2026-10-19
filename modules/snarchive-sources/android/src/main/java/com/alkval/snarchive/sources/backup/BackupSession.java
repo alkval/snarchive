@@ -8,14 +8,15 @@ import java.security.*;
 import java.util.*;
 import java.util.function.BooleanSupplier;
 
-/** Owns private backup staging. A file lock prevents startup cleanup touching a live writer. */
+/** Owns private backup staging: the manifest and object catalog only. The ZIP itself streams into the
+ * destination, so a backup never needs space for a private copy of the library.
+ * A file lock prevents startup cleanup touching a live writer. */
 public final class BackupSession implements Closeable {
   private final File root, manifest, catalog;
   private final RandomAccessFile lockFile;
   private final FileLock lock;
   private final OriginalStore.Space space;
   private FileOutputStream manifestOut, catalogOut;
-  private File archive;
   private long manifestBytes, objectBytes;
   private int objectCount;
   private boolean sealed, closed;
@@ -48,10 +49,16 @@ public final class BackupSession implements Closeable {
     require(objectCount < 100000 && bytes <= BackupWriter.MAX_TOTAL - objectBytes, "backup-limit");
     space(); catalogOut.write((hash + " " + bytes + "\n").getBytes(StandardCharsets.UTF_8)); objectCount++; objectBytes += bytes;
   }
-  public void build(OriginalStore store, BooleanSupplier stop) throws IOException {
+  /** Ends staging after the snapshot transaction committed. */
+  public void seal() throws IOException {
     writable(); sealed = true;
     manifestOut.getFD().sync(); manifestOut.close(); manifestOut = null;
     catalogOut.getFD().sync(); catalogOut.close(); catalogOut = null;
+  }
+  /** Streams the complete ZIP into output (not closed), checking every original's SHA-256 on the way.
+   * Returns the hash and length of the written bytes for read-back verification. */
+  public BackupWriter.Written write(OutputStream output, OriginalStore store, BooleanSupplier stop) throws IOException {
+    require(!closed && sealed, "backup-state");
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(catalog), StandardCharsets.UTF_8))) {
       // The catalog was generated above, never supplied by an archive or user-selected path.
       Iterable<BackupWriter.ObjectSpec> objects = () -> new Iterator<BackupWriter.ObjectSpec>() {
@@ -66,28 +73,23 @@ public final class BackupSession implements Closeable {
           return new BackupWriter.ObjectSpec(fields[0], Long.parseLong(fields[1]));
         }
       };
-      archive = BackupWriter.write(store, manifest, objects, root, space, stop);
+      return BackupWriter.write(store, manifest, objects, output, root, space, stop);
     } catch (UncheckedIOException e) { throw e.getCause(); }
   }
-  /** Copies a completed private ZIP, returning its SHA-256 for destination read-back verification.
-   * The caller owns the destination stream and must close it before opening it for verification. */
-  public String copy(OutputStream output, BooleanSupplier stop) throws IOException {
-    require(!closed && archive != null, "backup-state");
-    MessageDigest digest = digest(); byte[] buffer = new byte[65536];
-    try (InputStream input = new FileInputStream(archive)) {
-      int n; while (true) {
-        require(!stop.getAsBoolean(), "cancelled"); n = input.read(buffer); if (n == -1) break;
-        output.write(buffer, 0, n); digest.update(buffer, 0, n);
-      }
-    }
-    require(!stop.getAsBoolean(), "cancelled"); output.flush(); return hex(digest.digest());
-  }
-  public long size() throws IOException { require(!closed && archive != null, "backup-state"); return archive.length(); }
+  /** Reads the saved destination back. "backup-save-failed": bytes are present but wrong, so the file must go.
+   * "backup-unverified": the provider could not hand back the full file (for example a cloud provider still
+   * uploading); the written file may be fine, so it is kept and reported as unchecked, never as verified. */
   public static void verify(InputStream input, String expected, long bytes, BooleanSupplier stop) throws IOException {
     MessageDigest digest = digest(); byte[] buffer = new byte[65536]; int n; long read = 0;
-    while (true) { require(!stop.getAsBoolean(), "cancelled"); n = input.read(buffer); if (n == -1) break; require(n > 0 && n <= bytes - read, "backup-save-failed"); digest.update(buffer, 0, n); read += n; }
+    while (true) {
+      require(!stop.getAsBoolean(), "cancelled");
+      try { n = input.read(buffer); } catch (IOException e) { throw new IOException("backup-unverified", e); }
+      if (n == -1) break;
+      require(n > 0 && n <= bytes - read, "backup-save-failed"); digest.update(buffer, 0, n); read += n;
+    }
     require(!stop.getAsBoolean(), "cancelled");
-    require(read == bytes && expected.equals(hex(digest.digest())), "backup-save-failed");
+    require(read == bytes, "backup-unverified");
+    require(expected.equals(hex(digest.digest())), "backup-save-failed");
   }
   private static MessageDigest digest() { try { return MessageDigest.getInstance("SHA-256"); } catch (NoSuchAlgorithmException e) { throw new AssertionError(e); } }
   private static String hex(byte[] bytes) { StringBuilder value = new StringBuilder(); for (byte b : bytes) value.append(Character.forDigit((b >>> 4) & 15, 16)).append(Character.forDigit(b & 15, 16)); return value.toString(); }
@@ -95,6 +97,7 @@ public final class BackupSession implements Closeable {
     File[] files = root.listFiles(); require(files != null, "backup-cleanup-failed");
     for (File file : files) {
       String name = file.getName();
+      // backup-<digits>.part: private ZIPs left by section 17 builds, which staged the whole archive.
       if (name.equals("manifest.part") || name.equals("catalog.part") || name.matches("backup-[0-9]+\\.part")) require(file.delete(), "backup-cleanup-failed");
     }
   }

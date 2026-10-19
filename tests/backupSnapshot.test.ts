@@ -1,16 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { ImportStore, type Receipt } from '../src/storage/importStore.ts';
+import { ImportStore, LIBRARY_SCHEMA_VERSION, type Receipt } from '../src/storage/importStore.ts';
 import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
-import { writeBackupSnapshot } from '../src/backup/snapshot.ts';
+import { BACKUP_SCHEMA_VERSION, writeBackupSnapshot } from '../src/backup/snapshot.ts';
 import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts';
 class DB implements SqlDatabase {
   raw = new DatabaseSync(':memory:');
   active = false;
+  queries = 0;
   async execAsync(sql: string) { this.raw.exec(sql); }
   async runAsync(sql: string, ...p: (string | number | null)[]) { this.raw.prepare(sql).run(...p); }
-  async getFirstAsync<T>(sql: string, ...p: (string | number | null)[]) { return (this.raw.prepare(sql).get(...p) as T | undefined) ?? null; }
+  async getFirstAsync<T>(sql: string, ...p: (string | number | null)[]) { this.queries++; return (this.raw.prepare(sql).get(...p) as T | undefined) ?? null; }
+  async getAllAsync<T>(sql: string, ...p: (string | number | null)[]) { this.queries++; return this.raw.prepare(sql).all(...p) as T[]; }
   async withExclusiveTransactionAsync(work: (tx: SqlConnection) => Promise<void>) {
     this.raw.exec('BEGIN IMMEDIATE'); this.active = true;
     try { await work(this); this.raw.exec('COMMIT'); } catch (e) { this.raw.exec('ROLLBACK'); throw e; } finally { this.active = false; }
@@ -92,4 +94,27 @@ test('empty library produces a valid empty snapshot', async t => {
   const db = new DB(); t.after(() => db.raw.close()); await new ImportStore(db).initialize();
   const { records } = await capture(db);
   assert.deepEqual(records, [{ type: 'header', format: 'snarchive-backup', version: 1 }, { type: 'end', records: 1, objects: 0, originalBytes: 0 }]);
+});
+test('large libraries cross batch boundaries with a bounded number of queries', async t => {
+  const db = new DB(); t.after(() => db.raw.close());
+  const store = new ImportStore(db); await store.initialize();
+  const count = 1201, paths = Array.from({ length: count }, (_, i) => `2026-02-05_m${i}-main.jpg`);
+  await store.plan(hash, inventoryFromSnapshot({ entries: paths.map(path => ({ path })), metadataBytes: 0, visitedEntries: count }, 'source-1'));
+  for (let ordinal = 0; ordinal < count; ordinal++) {
+    const sha256 = ordinal.toString(16).padStart(64, '0');
+    await store.commit(hash, ordinal, { sha256, relativePath: `objects/${sha256.slice(0, 2)}/${sha256}`, bytes: 1 });
+  }
+  for (let i = 0; i < count; i += 2) await store.setFavorite(`m${i}`, true);
+  db.queries = 0; const { records, objects } = await capture(db);
+  assert.equal(objects.length, count);
+  assert.deepEqual(records.filter(r => r.type === 'preserved').map(r => r.ordinal), Array.from({ length: count }, (_, i) => i));
+  assert.equal(records.filter(r => r.type === 'favorite').length, Math.ceil(count / 2));
+  assert.equal(records.at(-1).objects, count);
+  assert.ok(db.queries < 20, `${db.queries} queries`); // One row per query took over 3,600.
+});
+test('backup refuses a library schema it does not cover', async t => {
+  assert.equal(BACKUP_SCHEMA_VERSION, LIBRARY_SCHEMA_VERSION, 'Library schema changed: extend the backup snapshot and format, then bump BACKUP_SCHEMA_VERSION.');
+  const { db } = await setup(t);
+  db.raw.exec(`PRAGMA user_version = ${LIBRARY_SCHEMA_VERSION + 1}`);
+  await assert.rejects(capture(db), /backup-schema-unsupported/);
 });
