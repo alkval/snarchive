@@ -139,9 +139,13 @@ export const en = {
   inspectVerified: 'Backup verified',
   inspectVerifiedDetail: 'Every original matched its recorded size and checksum, and every record checked out. Nothing has been restored; your library has not changed.',
   inspectCopyNote: 'This storage location could not be read in place, so a temporary private copy was used and has been deleted.',
+  inspectCopyKept: 'This storage location could not be read in place, so a temporary private copy was used.',
   inspectCleanupFailed: 'A temporary copy of the backup could not be deleted. Reopen the app before checking another backup; Snarchive tries to remove it again at startup.',
   inspectContents: 'What this backup contains',
   inspectFooter: 'Verifying is not permanent approval: a future restore will check the file again before using it.',
+  /** Never claims a deletion that did not happen: in place there was no copy; a copy that remains is reported separately. */
+  inspectFooterFor: (inPlace: boolean, cleanupFailed: boolean): string =>
+    inPlace ? en.inspectFooter : `${cleanupFailed ? en.inspectCopyKept : en.inspectCopyNote} ${en.inspectFooter}`,
   inspectCounts: {
     memories: ['Memories', 'Distinct memories with a preserved photo or video. Shared files and repeated observations count once.'],
     objects: ['Original files', 'Unique files stored in the backup, and their total size.'],

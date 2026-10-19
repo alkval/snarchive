@@ -10,6 +10,12 @@ public final class DeleteOnClose implements Closeable {
   private final File file;
   public DeleteOnClose(File file) { this.file = file; }
   @Override public void close() throws IOException {
-    if (!file.delete() && file.exists()) throw new IOException("backup-cleanup-failed");
+    if (!file.delete() && file.exists()) throw new IOException(InspectionGate.CLEANUP_FAILED);
+  }
+
+  /** For failure paths: tries to delete the copy and, if it remains, records that on the original error as a
+   * suppressed exception, so the caller learns both what failed and that a copy was left behind. */
+  public static void deleteOrSuppress(File file, Throwable error) {
+    try { new DeleteOnClose(file).close(); } catch (IOException cleanup) { error.addSuppressed(cleanup); }
   }
 }

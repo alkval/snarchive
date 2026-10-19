@@ -116,13 +116,14 @@ class SnarchiveSourcesModule : Module() {
       cancelled.set(false)
       var inPlace = false
       // Read in place when the provider allows it; otherwise a bounded, cancellable private copy that is deleted on close.
-      val code = inspections.begin {
+      val opened = inspections.beginWithStatus {
         val opened = openArchive(uriString)
         inPlace = opened.second == null
         val copy = opened.second
         BackupInspection.open(opened.first, copy?.let { DeleteOnClose(it) }) { cancelled.get() }
       }
-      if (code != null) return@AsyncFunction mapOf("ok" to false, "code" to code) // The gate already released the guard.
+      // The gate already released the guard. A failed open keeps its own code and reports a copy it could not delete.
+      if (opened.code != null) return@AsyncFunction mapOf("ok" to false, "code" to opened.code, "cleanupFailed" to opened.cleanupFailed)
       val info = inspections.run { mapOf("ok" to true, "inPlace" to inPlace, "objects" to it.objectCount(), "objectBytes" to it.objectBytes().toDouble()) }
       info.value ?: mapOf("ok" to false, "code" to (info.code ?: "backup-unreadable"))
     }
@@ -301,7 +302,7 @@ class SnarchiveSourcesModule : Module() {
         ArchiveSource.open(copy.first).also { source ->
           try { source.pinCopy(copy.second) } catch (error: Exception) { runCatching { source.close() }; throw error }
         }.also { staged = copy.first }
-      } catch (error: Exception) { copy.first.delete(); throw error }
+      } catch (error: Exception) { DeleteOnClose.deleteOrSuppress(copy.first, error); throw error }
     }
     return source to staged
   }
@@ -349,7 +350,7 @@ class SnarchiveSourcesModule : Module() {
         }
       }
       return staged to digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
-    } catch (error: Exception) { staged.delete(); throw error }
+    } catch (error: Exception) { DeleteOnClose.deleteOrSuppress(staged, error); throw error }
   }
 
   private fun scan(root: Uri): Map<String, Any> {

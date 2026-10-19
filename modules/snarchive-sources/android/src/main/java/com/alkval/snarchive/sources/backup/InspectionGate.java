@@ -10,6 +10,18 @@ public final class InspectionGate<T extends Closeable> {
   public interface Opener<T> { T open() throws Exception; }
   public interface Work<T, R> { R run(T session) throws Exception; }
   public interface Codes { String code(Exception error); }
+  public static final String CLEANUP_FAILED = "backup-cleanup-failed";
+  /** The opening outcome: the original failure code (or null), and whether a temporary copy could not be deleted. */
+  public static final class Opened {
+    public final String code; public final boolean cleanupFailed;
+    Opened(String code, boolean cleanupFailed) { this.code = code; this.cleanupFailed = cleanupFailed; }
+  }
+  /** True when cleanup failed on this error's path; the error's own code is reported separately. */
+  public static boolean cleanupFailed(Throwable error) {
+    if (CLEANUP_FAILED.equals(error.getMessage())) return true;
+    for (Throwable suppressed : error.getSuppressed()) if (CLEANUP_FAILED.equals(suppressed.getMessage())) return true;
+    return false;
+  }
   public static final class Result<R> {
     public final R value; public final String code;
     Result(R value, String code) { this.value = value; this.code = code; }
@@ -24,24 +36,27 @@ public final class InspectionGate<T extends Closeable> {
 
   public InspectionGate(Executor cleanup, Codes codes, Runnable released) { this.cleanup = cleanup; this.codes = codes; this.released = released; }
 
-  /** The opener owns its partial state: on failure it must have released what it opened. */
-  public String begin(Opener<T> opener) {
+  /** The opener owns its partial state: on failure it must have released what it opened, recording a cleanup
+   * failure as a suppressed exception (see DeleteOnClose.deleteOrSuppress). */
+  public Opened beginWithStatus(Opener<T> opener) {
     synchronized (lock) {
-      if (session != null || opening || finishing) return "busy";
+      if (session != null || opening || finishing) return new Opened("busy", false);
       opening = true; finishPending = false;
     }
-    T opened = null; String code = null;
-    try { opened = opener.open(); } catch (Exception error) { code = codes.code(error); }
+    T opened = null; String code = null; boolean cleanupFailed = false;
+    try { opened = opener.open(); } catch (Exception error) { code = codes.code(error); cleanupFailed = cleanupFailed(error); }
     boolean abandon;
     synchronized (lock) {
       opening = false;
       if (code == null) session = opened;
       abandon = code == null && finishPending;
     }
-    if (code != null) { released.run(); return code; }
-    if (abandon) { finish(); return "cancelled"; } // Torn down while opening.
-    return null;
+    if (code != null) { released.run(); return new Opened(code, cleanupFailed); }
+    if (abandon) return new Opened("cancelled", finish() != null); // Torn down while opening.
+    return new Opened(null, false);
   }
+
+  public String begin(Opener<T> opener) { return beginWithStatus(opener).code; }
 
   public <R> Result<R> run(Work<T, R> work) {
     T current;
@@ -69,7 +84,7 @@ public final class InspectionGate<T extends Closeable> {
       finishing = true; current = session;
     }
     String code = null;
-    try { current.close(); } catch (Exception error) { code = "backup-cleanup-failed"; }
+    try { current.close(); } catch (Exception error) { code = CLEANUP_FAILED; }
     finally {
       synchronized (lock) { session = null; finishing = false; finishPending = false; }
       released.run();

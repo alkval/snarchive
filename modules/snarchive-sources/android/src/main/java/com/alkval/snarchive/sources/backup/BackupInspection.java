@@ -94,7 +94,8 @@ public final class BackupInspection implements Closeable {
       return new BackupInspection(source, cleanup, manifest, objects, total);
     } catch (IOException | RuntimeException error) {
       try { source.close(); } catch (IOException ignored) {}
-      if (cleanup != null) try { cleanup.close(); } catch (IOException ignored) {}
+      // Keep the original failure, and record a copy that could not be deleted alongside it.
+      if (cleanup != null) try { cleanup.close(); } catch (IOException cleanupError) { error.addSuppressed(cleanupError); }
       throw error;
     }
   }

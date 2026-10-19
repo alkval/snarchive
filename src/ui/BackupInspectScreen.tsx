@@ -84,7 +84,7 @@ export function BackupInspectScreen({ onClose }: { onClose(): void }) {
       {state.kind === 'verified' && <>
         <Notice tone="success" title={en.inspectVerified} message={en.inspectVerifiedDetail} />
         {state.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
-        <Group header={en.inspectContents} footer={`${state.inPlace ? '' : `${en.inspectCopyNote} `}${en.inspectFooter}`}>
+        <Group header={en.inspectContents} footer={en.inspectFooterFor(state.inPlace, state.cleanupFailed)}>
           <Row title={counts.memories[0]} detail={counts.memories[1]} value={state.preview.memories.toLocaleString()} />
           <Row title={counts.objects[0]} detail={counts.objects[1]} value={`${state.preview.objects.toLocaleString()} · ${size(state.preview.originalBytes)}`} />
           {state.preview.sharedObjects > 0 && <Row title={counts.shared[0]} detail={counts.shared[1]} value={state.preview.sharedObjects.toLocaleString()} />}

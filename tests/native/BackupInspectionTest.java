@@ -306,6 +306,52 @@ public class BackupInspectionTest {
       check(Arrays.equals(chosen, Files.readAllBytes(valid.toPath())), "chosen backup unchanged");
       check(gate.begin(() -> BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), () -> false)) == null && gate.finish() == null && !copy.exists(), "successful cleanup reports nothing");
     });
+    test("deleteOrSuppress keeps the original error and records a copy that remains", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File gone = new File(dir, "preview-4.part"); Files.write(gone.toPath(), new byte[] { 1 });
+      IOException clean = new IOException("unsafe-or-unsupported-zip"); DeleteOnClose.deleteOrSuppress(gone, clean);
+      check(!gone.exists() && clean.getSuppressed().length == 0 && !InspectionGate.cleanupFailed(clean), "deleted, nothing recorded");
+      DeleteOnClose.deleteOrSuppress(gone, clean); check(clean.getSuppressed().length == 0, "absent is not a failure");
+      File stuck = new File(dir, "preview-5.part"); Files.write(stuck.toPath(), new byte[] { 1 });
+      IllegalStateException cancelled = new IllegalStateException("insufficient-storage");
+      check(dir.setWritable(false), "directory locked");
+      try { DeleteOnClose.deleteOrSuppress(stuck, cancelled); } finally { dir.setWritable(true); }
+      check("insufficient-storage".equals(cancelled.getMessage()) && InspectionGate.cleanupFailed(cancelled) && stuck.exists(), "both outcomes kept");
+    });
+    test("a failed open whose copy cannot be deleted reports both outcomes, releases once, and a retry works", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File copy = new File(dir, "preview-6.part"); byte[] bytes = Files.readAllBytes(valid.toPath());
+      Files.write(copy.toPath(), Arrays.copyOf(bytes, bytes.length / 2)); // A malformed private copy.
+      AtomicBoolean stop = new AtomicBoolean(); AtomicInteger released = new AtomicInteger();
+      InspectionGate<BackupInspection> gate = new InspectionGate<>(Runnable::run, error -> BackupInspection.code(error, stop.get()), released::incrementAndGet);
+      check(dir.setWritable(false), "directory locked");
+      try {
+        InspectionGate.Opened failed = gate.beginWithStatus(() -> BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), stop::get));
+        check("unsafe-or-unsupported-zip".equals(failed.code) && failed.cleanupFailed, "original code and cleanup failure");
+        check(copy.exists() && released.get() == 1 && !gate.active() && gate.finish() == null, "copy remains; guard released once");
+        stop.set(true); // The same failure while cancelling: still reported, and still a cancellation.
+        InspectionGate.Opened cancelled = gate.beginWithStatus(() -> BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), stop::get));
+        check("cancelled".equals(cancelled.code) && cancelled.cleanupFailed && released.get() == 2, "cancellation keeps the cleanup failure");
+      } finally { dir.setWritable(true); stop.set(false); }
+      check(Arrays.equals(bytes, Files.readAllBytes(valid.toPath())), "chosen backup unchanged");
+      File retry = new File(dir, "preview-7.part"); Files.copy(valid.toPath(), retry.toPath());
+      InspectionGate.Opened ok = gate.beginWithStatus(() -> BackupInspection.open(ArchiveSource.open(retry), new DeleteOnClose(retry), stop::get));
+      check(ok.code == null && !ok.cleanupFailed && gate.finish() == null && !retry.exists() && released.get() == 3, "retry opens and cleans up");
+    });
+    test("teardown during an open whose cleanup then fails reports a cancellation with the cleanup failure", () -> {
+      File dir = Files.createTempDirectory(root.toPath(), "copies-").toFile();
+      File copy = new File(dir, "preview-8.part"); Files.copy(valid.toPath(), copy.toPath());
+      AtomicInteger released = new AtomicInteger();
+      InspectionGate<BackupInspection> gate = new InspectionGate<>(c -> { throw new AssertionError("the opener cleans up"); }, error -> BackupInspection.code(error, false), released::incrementAndGet);
+      CountDownLatch opening = new CountDownLatch(1), proceed = new CountDownLatch(1); AtomicReference<InspectionGate.Opened> result = new AtomicReference<>();
+      Thread opener = new Thread(() -> result.set(gate.beginWithStatus(() -> { opening.countDown(); proceed.await();
+        return BackupInspection.open(ArchiveSource.open(copy), new DeleteOnClose(copy), () -> false); }))); opener.start();
+      check(opening.await(5, TimeUnit.SECONDS), "opening");
+      gate.finishLater();
+      check(dir.setWritable(false), "directory locked");
+      try { proceed.countDown(); opener.join(5000); } finally { dir.setWritable(true); }
+      check("cancelled".equals(result.get().code) && result.get().cleanupFailed && copy.exists() && released.get() == 1, "both reported, released once");
+    });
     System.out.println(passed + " backup inspection host tests passed. No device or restore claim.");
   }
 
