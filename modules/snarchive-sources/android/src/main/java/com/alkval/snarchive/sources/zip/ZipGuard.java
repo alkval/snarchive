@@ -29,8 +29,8 @@ public final class ZipGuard {
     }
     return Normalizer.normalize(name, Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
   }
-  public static ZipGuard inspect(File file) throws IOException {
-    try (RandomAccessFile in = new RandomAccessFile(file, "r")) {
+  public static ZipGuard inspect(ArchiveSource source) throws IOException {
+    try (RandomAccessFile in = source.randomAccess()) {
       long length = in.length(); require(length >= 22);
       int tailLength = (int)Math.min(length, 65557);
       byte[] tail = new byte[tailLength]; in.seek(length - tailLength); in.readFully(tail);

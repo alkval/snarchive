@@ -1,6 +1,8 @@
 import com.alkval.snarchive.sources.storage.*;
+import com.alkval.snarchive.sources.zip.ArchiveSource;
 import java.io.*;
 import java.nio.file.*;
+import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.security.MessageDigest;
 import java.util.*;
@@ -36,6 +38,10 @@ public class OriginalStoreTest {
       out.putNextEntry(entry); out.write(payload); out.closeEntry();
     }
     return zip;
+  }
+  /** Hash-pinned session, as openImportArchive builds it after the planned hash matched. */
+  static ArchiveOriginals session(File archive) throws Exception {
+    ArchiveSource source = ArchiveSource.open(archive); source.sha256(() -> false); return new ArchiveOriginals(source, () -> false);
   }
   public static void main(String[] args) throws Exception {
     if (args[0].startsWith("crash-")) {
@@ -150,7 +156,7 @@ public class OriginalStoreTest {
     test("ZIP overlay bytes remain exact and source unchanged", () -> {
       File r = root(), archive = zip("memories/2026-02-05_memoryA-overlay.png", bytes);
       byte[] before = Files.readAllBytes(archive.toPath());
-      try (ArchiveOriginals session = new ArchiveOriginals(archive, () -> false)) {
+      try (ArchiveOriginals session = session(archive)) {
         OriginalStore.Stored saved = session.preserve("memories/2026-02-05_memoryA-overlay.png", new OriginalStore(r), budget(), () -> false);
         check(Arrays.equals(bytes, Files.readAllBytes(new File(r, saved.relativePath).toPath())));
       }
@@ -159,16 +165,16 @@ public class OriginalStoreTest {
     test("ZIP payload corruption is rejected during preservation", () -> {
       File r = root(), archive = zip("2026-02-05_memoryA-main.jpg", bytes);
       byte[] content = Files.readAllBytes(archive.toPath()); int name = (content[26] & 255) | ((content[27] & 255) << 8); int extra = (content[28] & 255) | ((content[29] & 255) << 8); content[30 + name + extra] ^= 1; Files.write(archive.toPath(), content);
-      try (ArchiveOriginals session = new ArchiveOriginals(archive, () -> false)) {
+      try (ArchiveOriginals session = session(archive)) {
         fails(null, () -> session.preserve("2026-02-05_memoryA-main.jpg", new OriginalStore(r), budget(), () -> false));
       }
       emptyStage(r); check(objects(r) == 0);
     });
     test("ZIP traversal and unsupported files cannot enter object storage", () -> {
       File r = root(), bad = zip("../2026-02-05_memoryA-main.jpg", bytes);
-      fails(null, () -> { try (ArchiveOriginals session = new ArchiveOriginals(bad, () -> false)) {} });
+      fails(null, () -> { try (ArchiveOriginals session = session(bad)) {} });
       File html = zip("index.html", bytes);
-      try (ArchiveOriginals session = new ArchiveOriginals(html, () -> false)) {
+      try (ArchiveOriginals session = session(html)) {
         fails("unsupported-entry", () -> session.preserve("index.html", new OriginalStore(r), budget(), () -> false));
       }
       check(objects(r) == 0);
@@ -199,6 +205,55 @@ public class OriginalStoreTest {
       check(!new File(r, "a.jpg").exists() && index.bytes() == 20 && new File(r, "ignored.txt").exists());
       new File(r, "c.jpg").delete(); check(index.hit("c.jpg") == null && index.count() == 1 && index.bytes() == 10);
       fails("cache-entry-too-large", () -> index.reserve(36));
+    });
+    test("in-place source preserves exact bytes after its path is gone", () -> {
+      File r = root(), archive = zip("memories/2026-02-05_memoryA-main.jpg", bytes);
+      String expected = sha(Files.readAllBytes(archive.toPath()));
+      FileChannel channel = FileChannel.open(archive.toPath(), StandardOpenOption.READ);
+      check(archive.delete()); // Nothing below can reopen the archive by path.
+      ArchiveSource source = new ArchiveSource(channel, channel, () -> String.valueOf(channel.size()), new File("/dev/null"));
+      check(source.sha256(() -> false).equals(expected));
+      try (ArchiveOriginals session = new ArchiveOriginals(source, () -> false)) {
+        OriginalStore.Stored saved = session.preserve("memories/2026-02-05_memoryA-main.jpg", new OriginalStore(r), budget(), () -> false);
+        check(saved.sha256.equals(sha(bytes)) && Arrays.equals(bytes, Files.readAllBytes(new File(r, saved.relativePath).toPath())));
+      }
+      check(!channel.isOpen()); emptyStage(r);
+    });
+    test("unpinned source cannot start extraction", () -> {
+      File archive = zip("2026-02-05_memoryA-main.jpg", bytes); ArchiveSource source = ArchiveSource.open(archive);
+      fails("source-changed", () -> new ArchiveOriginals(source, () -> false));
+      fails(null, () -> source.size()); // Rejected sources are closed.
+    });
+    test("source rewritten between hash and extraction start is rejected", () -> {
+      File archive = zip("2026-02-05_memoryA-main.jpg", bytes); ArchiveSource source = ArchiveSource.open(archive);
+      source.sha256(() -> false);
+      byte[] content = Files.readAllBytes(archive.toPath()); Files.write(archive.toPath(), content); archive.setLastModified(archive.lastModified() + 5000);
+      fails("source-changed", () -> new ArchiveOriginals(source, () -> false));
+    });
+    test("source rewritten mid-import stops before storing", () -> {
+      File r = root(), archive = zip("2026-02-05_memoryA-main.jpg", bytes);
+      try (ArchiveOriginals session = session(archive)) {
+        byte[] content = Files.readAllBytes(archive.toPath()); content[content.length - 30] ^= 1; // Central directory, same size.
+        Files.write(archive.toPath(), content); archive.setLastModified(archive.lastModified() + 5000);
+        fails("source-changed", () -> session.preserve("2026-02-05_memoryA-main.jpg", new OriginalStore(r), budget(), () -> false));
+      }
+      check(objects(r) == 0); emptyStage(r);
+    });
+    test("source growing mid-import stops before storing", () -> {
+      File r = root(), archive = zip("2026-02-05_memoryA-main.jpg", bytes);
+      try (ArchiveOriginals session = session(archive)) {
+        Files.write(archive.toPath(), new byte[] { 0 }, StandardOpenOption.APPEND);
+        fails("source-changed", () -> session.preserve("2026-02-05_memoryA-main.jpg", new OriginalStore(r), budget(), () -> false));
+      }
+      check(objects(r) == 0);
+    });
+    test("private copy pinned while copying needs no second hash", () -> {
+      File r = root(), archive = zip("2026-02-05_memoryA-overlay.png", bytes);
+      ArchiveSource source = ArchiveSource.open(archive); source.pinCopy(sha(Files.readAllBytes(archive.toPath())));
+      try (ArchiveOriginals session = new ArchiveOriginals(source, () -> false)) {
+        check(session.preserve("2026-02-05_memoryA-overlay.png", new OriginalStore(r), budget(), () -> false).sha256.equals(sha(bytes)));
+      }
+      ArchiveSource bad = ArchiveSource.open(archive); fails("source-changed", () -> bad.pinCopy("not-a-hash")); bad.close();
     });
     System.out.println(passed + " original-storage host tests passed. No mobile-runtime or completed-import claim.");
   }

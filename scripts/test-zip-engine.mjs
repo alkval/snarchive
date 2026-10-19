@@ -9,7 +9,7 @@ const jar = `${out}/zip4j-2.11.6.jar`;
 const expected = '5f1eb1e9d67cfee200a695e4079751b49e73a226b154193e13f7c602efbe72fb';
 try { if (createHash('sha256').update(readFileSync(jar)).digest('hex') !== expected) throw Error(); }
 catch { console.error('Missing or unexpected ZIP engine. See docs/development.md for the pinned download and checksum.'); process.exit(1); }
-const sources = ['ZipGuard.java', 'ZipInventory.java'].map(name => `modules/snarchive-sources/android/src/main/java/com/alkval/snarchive/sources/zip/${name}`);
+const sources = ['ArchiveSource.java', 'ZipGuard.java', 'ZipInventory.java'].map(name => `modules/snarchive-sources/android/src/main/java/com/alkval/snarchive/sources/zip/${name}`);
 for (const [cmd, args] of [
   ['python3', ['scripts/generate-zip-fixtures.py', `${out}/fixtures`]],
   ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, ...sources, 'tests/native/ZipInventoryTest.java']],
