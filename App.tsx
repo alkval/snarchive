@@ -15,6 +15,7 @@ import type { ImportStore, ImportSummary } from './src/storage/importStore';
 import { LibraryBrowser } from './src/ui/LibraryBrowser';
 import { sourcePicker } from './src/platform/sourcePicker';
 import { BackupScreen } from './src/ui/BackupScreen';
+import { BackupInspectScreen } from './src/ui/BackupInspectScreen';
 import { recoverBackups } from './src/platform/backup';
 import { Group, LargeTitle, Notice, Row, type Tone } from './src/ui/kit';
 import { space, type, useTheme } from './src/ui/theme';
@@ -26,6 +27,8 @@ export default function App() {
   const [browsing, setBrowsing] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const closeBackup = useCallback(() => setBackingUp(false), []);
+  const [inspecting, setInspecting] = useState(false);
+  const closeInspection = useCallback(() => setInspecting(false), []);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -136,6 +139,7 @@ export default function App() {
   const closeBrowser = () => { if (!browserBack.current?.()) setBrowsing(false); };
   const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
   if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
+  if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} /></SafeAreaProvider>;
   return (
     <SafeAreaProvider>
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
@@ -161,6 +165,7 @@ export default function App() {
             <Group inset={52}>
               <Row icon="images-outline" title={en.libraryBrowse} detail={en.libraryBrowseDetail} disabled={!ready || busy} onPress={() => setBrowsing(true)} />
               {Platform.OS === 'android' && <Row icon="archive-outline" title={en.backupOpen} detail={en.backupOpenDetail} disabled={!ready || busy} onPress={() => setBackingUp(true)} />}
+              {Platform.OS === 'android' && <Row icon="shield-checkmark-outline" title={en.inspectOpen} detail={en.inspectOpenDetail} disabled={!ready || busy} onPress={() => setInspecting(true)} />}
             </Group>
           </View>}
           <Group header={en.heading} footer={`${en.explanation} ${en.zipNote}`} inset={52}>

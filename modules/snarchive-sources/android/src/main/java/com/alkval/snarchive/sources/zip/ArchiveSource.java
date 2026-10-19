@@ -80,6 +80,9 @@ public final class ArchiveSource implements Closeable {
     require(copiedSha256 != null && copiedSha256.matches("[a-f0-9]{64}"), "source-changed");
     pinnedStamp = stamp.read(); pinnedSize = channel.size(); sha256 = copiedSha256;
   }
+  /** For readers that verify their own content (backup inspection): pins the stamp without a whole-file hash,
+   * so checkUnchanged() still catches an in-place rewrite. pinnedSha256() stays null. */
+  public void pinStamp() throws IOException { pinnedStamp = stamp.read(); pinnedSize = channel.size(); }
   public String pinnedSha256() { return sha256; }
 
   public void checkUnchanged() throws IOException {

@@ -16,8 +16,12 @@ import net.lingala.zip4j.util.InternalZipConstants;
 
 /** Preview: extracts metadata only. Originals are never written or represented as imported. */
 public final class ZipInventory {
-  private static final long MAX_ENTRY = 8L * 1024 * 1024 * 1024;
-  private static final long MAX_TOTAL = 64L * 1024 * 1024 * 1024;
+  /** Structural limits. Import keeps IMPORT; other readers (backup inspection) pass their own. */
+  public static final class Limits {
+    public final int maxEntries; public final long maxEntry, maxTotal;
+    public Limits(int maxEntries, long maxEntry, long maxTotal) { this.maxEntries = maxEntries; this.maxEntry = maxEntry; this.maxTotal = maxTotal; }
+  }
+  public static final Limits IMPORT = new Limits(ZipGuard.MAX_ENTRIES, 8L * 1024 * 1024 * 1024, 64L * 1024 * 1024 * 1024);
   private static void require(boolean ok) throws IOException { if (!ok) throw new IOException("unsafe-or-unsupported-zip"); }
   private static void checkCancel(BooleanSupplier cancelled) throws IOException { if (cancelled.getAsBoolean()) throw new IOException("cancelled"); }
   private static int le16(byte[] b, int i) { return (b[i] & 255) | ((b[i+1] & 255) << 8); }
@@ -40,9 +44,11 @@ public final class ZipInventory {
     try (ArchiveSource source = ArchiveSource.open(file)) { return scan(source, cancelled); }
   }
 
-  public static Map<String, Object> scan(ArchiveSource source, BooleanSupplier cancelled) throws IOException {
+  /** The bounded guard pass, Zip4j's parse, per-entry limits, local/central cross-checks and overlap checks.
+   * Returns the validated central-directory headers. Reads no entry data. */
+  public static List<FileHeader> validate(ArchiveSource source, Limits limits, BooleanSupplier cancelled) throws IOException {
     checkCancel(cancelled);
-    ZipGuard guard = ZipGuard.inspect(source);
+    ZipGuard guard = ZipGuard.inspect(source, limits.maxEntries);
     ZipModel zip = headers(source);
     List<FileHeader> headers = zip.getCentralDirectory().getFileHeaders(); require(headers.size() == guard.count && !zip.isSplitArchive());
     long total = 0;
@@ -50,8 +56,8 @@ public final class ZipInventory {
     for (FileHeader h : headers) {
       checkCancel(cancelled);
       long size = h.getUncompressedSize(), compressed = h.getCompressedSize(), start = h.getOffsetLocalHeader();
-      require(!h.isEncrypted() && h.getDiskNumberStart() == 0 && size >= 0 && size <= MAX_ENTRY && compressed >= 0);
-      require(size <= MAX_TOTAL - total && (compressed >= size || size / (double)Math.max(1, compressed) <= 1000)); total += size;
+      require(!h.isEncrypted() && h.getDiskNumberStart() == 0 && size >= 0 && size <= limits.maxEntry && compressed >= 0);
+      require(size <= limits.maxTotal - total && (compressed >= size || size / (double)Math.max(1, compressed) <= 1000)); total += size;
       require(!h.isDirectory() || size == 0);
       require(start >= 0 && start <= guard.centralOffset - 30);
       long dataStart;
@@ -73,6 +79,11 @@ public final class ZipInventory {
     ranges.sort(Comparator.comparingLong(a -> a[0]));
     long previousEnd = 0;
     for (long[] range : ranges) { require(range[0] >= previousEnd); previousEnd = range[1]; }
+    return headers;
+  }
+
+  public static Map<String, Object> scan(ArchiveSource source, BooleanSupplier cancelled) throws IOException {
+    List<FileHeader> headers = validate(source, IMPORT, cancelled);
     List<Map<String,Object>> entries = new ArrayList<>();
     int metadataBytes = 0;
     for (FileHeader h : headers) {

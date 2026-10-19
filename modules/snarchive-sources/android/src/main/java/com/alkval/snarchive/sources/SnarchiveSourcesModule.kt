@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Intent
 import expo.modules.kotlin.Promise
 import com.alkval.snarchive.sources.backup.BackupCoordinator
+import com.alkval.snarchive.sources.backup.BackupInspection
+import com.alkval.snarchive.sources.backup.InspectionGate
 import com.alkval.snarchive.sources.backup.BackupSession
 import android.net.Uri
 import android.os.Build
@@ -36,6 +38,9 @@ class SnarchiveSourcesModule : Module() {
   private val busy = AtomicBoolean(false)
   // Provider cleanup after teardown runs on its own thread; busy stays held until it has finished.
   private val backups = BackupCoordinator({ Thread(it, "snarchive-backup-cleanup").start() }, { cancelled.get() }, { busy.set(false) })
+  // Read-only backup inspection. Holds the busy guard for the whole session, so no import, scan or backup overlaps it.
+  private val inspections = InspectionGate<BackupInspection>({ Thread(it, "snarchive-inspection-cleanup").start() },
+    { BackupInspection.code(it, cancelled.get()) }, { busy.set(false) })
   private fun backupRoot() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "snarchive-backups")
   private var thumbnails: com.alkval.snarchive.sources.storage.ThumbnailCache? = null
   private var importArchive: ArchiveOriginals? = null
@@ -49,10 +54,12 @@ class SnarchiveSourcesModule : Module() {
       cancelled.set(true)
       synchronized(backupLock) { backupPicker?.resolve(mapOf("ok" to true, "canceled" to true)); backupPicker = null }
       backups.finishLater()
+      inspections.finishLater()
     }
     AsyncFunction("recoverBackups") {
       if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
-      try { BackupSession(backupRoot(), File::getUsableSpace).use { }; mapOf("ok" to true) }
+      // Also removes private ZIP copies an interrupted preview, import or inspection left behind.
+      try { BackupSession(backupRoot(), File::getUsableSpace).use { }; ArchiveSource.removeAbandonedCopies(previewRoot()); mapOf("ok" to true) }
       catch (error: Exception) { backupError(error) }
       finally { busy.set(false) }
     }
@@ -102,6 +109,52 @@ class SnarchiveSourcesModule : Module() {
     }
     AsyncFunction("saveBackup") { backupResult(backups.save(originals())) }
     AsyncFunction("endBackup") { backupResult(backups.finish()) }
+
+    AsyncFunction("beginBackupInspection") { uriString: String ->
+      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      var inPlace = false
+      // Read in place when the provider allows it; otherwise a bounded, cancellable private copy that is deleted on close.
+      val code = inspections.begin {
+        val opened = openArchive(uriString)
+        inPlace = opened.second == null
+        val copy = opened.second
+        BackupInspection.open(opened.first, copy?.let { file -> java.io.Closeable { file.delete() } }) { cancelled.get() }
+      }
+      if (code != null) return@AsyncFunction mapOf("ok" to false, "code" to code) // The gate already released the guard.
+      val info = inspections.run { mapOf("ok" to true, "inPlace" to inPlace, "objects" to it.objectCount(), "objectBytes" to it.objectBytes().toDouble()) }
+      info.value ?: mapOf("ok" to false, "code" to (info.code ?: "backup-unreadable"))
+    }
+    AsyncFunction("readBackupManifest") {
+      val chunk = inspections.run { it.readManifest(BackupInspection.MAX_CHUNK) { cancelled.get() } }
+      chunk.value?.let { mapOf("ok" to true, "text" to it.text, "done" to it.done) } ?: mapOf("ok" to false, "code" to (chunk.code ?: "backup-unreadable"))
+    }
+    AsyncFunction("declareBackupObjects") { hashes: List<String>, sizes: List<Double> ->
+      val result = inspections.run { session ->
+        if (hashes.size != sizes.size || hashes.size > 1000) throw java.io.IOException("backup-invalid")
+        for (index in hashes.indices) {
+          val bytes = sizes[index]
+          if (!bytes.isFinite() || bytes < 0 || bytes % 1.0 != 0.0 || bytes > OriginalStore.MAX_OBJECT) throw java.io.IOException("backup-invalid")
+          session.declare(hashes[index], bytes.toLong())
+        }
+        true
+      }
+      if (result.code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to result.code)
+    }
+    AsyncFunction("sealBackupInspection") {
+      val result = inspections.run { it.seal(); true }
+      if (result.code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to result.code)
+    }
+    AsyncFunction("verifyBackupObjects") {
+      // Short slices, so progress reaches the screen and Cancel is honoured between calls as well as within them.
+      val result = inspections.run { it.verify(250) { cancelled.get() } }
+      result.value?.let { mapOf("ok" to true, "verified" to it.verified, "total" to it.total, "bytes" to it.bytes.toDouble(), "totalBytes" to it.totalBytes.toDouble(), "done" to it.done) }
+        ?: mapOf("ok" to false, "code" to (result.code ?: "backup-unreadable"))
+    }
+    AsyncFunction("endBackupInspection") {
+      val code = inspections.finish()
+      if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
+    }
 
     AsyncFunction("thumbnail") { hash: String, bytes: Double, video: Boolean ->
       try {

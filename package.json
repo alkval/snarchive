@@ -24,7 +24,8 @@
     "test:original-store": "node scripts/test-original-store.mjs",
     "fixtures:resume": "python3 scripts/generate-resume-fixture.py",
     "fixtures:video": "python3 scripts/generate-video-fixture.py",
-    "test:backup-writer": "node scripts/test-backup-writer.mjs"
+    "test:backup-writer": "node scripts/test-backup-writer.mjs",
+    "test:backup-inspection": "node scripts/test-backup-inspection.mjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",

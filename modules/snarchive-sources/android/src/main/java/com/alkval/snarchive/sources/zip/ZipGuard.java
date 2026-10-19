@@ -29,7 +29,9 @@ public final class ZipGuard {
     }
     return Normalizer.normalize(name, Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
   }
-  public static ZipGuard inspect(ArchiveSource source) throws IOException {
+  public static ZipGuard inspect(ArchiveSource source) throws IOException { return inspect(source, MAX_ENTRIES); }
+  /** maxEntries is never above what the caller's layout needs; import keeps MAX_ENTRIES. */
+  public static ZipGuard inspect(ArchiveSource source, int maxEntries) throws IOException {
     try (RandomAccessFile in = source.randomAccess()) {
       long length = in.length(); require(length >= 22);
       int tailLength = (int)Math.min(length, 65557);
@@ -54,7 +56,7 @@ public final class ZipGuard {
         require(u32(z64, 16) == 0 && u32(z64, 20) == 0 && u64(z64, 24) == u64(z64, 32));
         count = u64(z64, 32); size = u64(z64, 40); offset = u64(z64, 48); centralEnd = pos;
       }
-      require(count <= MAX_ENTRIES && size <= 32 * 1024 * 1024 && offset <= centralEnd && size == centralEnd - offset);
+      require(count <= maxEntries && size <= 32 * 1024 * 1024 && offset <= centralEnd && size == centralEnd - offset);
       in.seek(offset);
       Set<String> paths = new HashSet<>(), files = new HashSet<>();
       byte[] header = new byte[46];
