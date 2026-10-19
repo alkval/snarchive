@@ -7,6 +7,7 @@ import type { ImportStore, LibraryCursor, ChronologicalRow } from '../storage/im
 import { thumbnail } from '../platform/originalImporter';
 import { pageThumbnails } from '../storage/pageThumbnails';
 import { defaultFilters, type LibraryFilters } from '../domain/libraryFilters';
+import { librarySections } from '../domain/librarySections';
 import { LibraryFilterForm } from './LibraryFilters';
 import { MemoryViewer, dayTitle, memoryDate } from './MemoryViewer';
 import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
@@ -16,18 +17,11 @@ import { en } from '../i18n/en';
 const COLUMNS = 3, GAP = 2;
 type Section = { key: string; title: string; count: number; data: ChronologicalRow[][] };
 
-/** Rows arrive newest first with unknown and conflicting dates last, so consecutive rows share a day. */
 function sections(rows: ChronologicalRow[]): Section[] {
-  const groups: { key: string; rows: ChronologicalRow[] }[] = [];
-  for (const row of rows) {
-    const key = row.dateConflict ? 'conflict' : row.day ?? row.instant?.slice(0, 10) ?? 'unknown';
-    const last = groups[groups.length - 1];
-    if (last && last.key === key) last.rows.push(row); else groups.push({ key, rows: [row] });
-  }
-  return groups.map(group => ({
-    key: group.key, count: group.rows.length,
-    title: group.key === 'conflict' ? en.sectionConflict : group.key === 'unknown' ? en.sectionUnknown : dayTitle(group.key),
-    data: Array.from({ length: Math.ceil(group.rows.length / COLUMNS) }, (_, index) => group.rows.slice(index * COLUMNS, index * COLUMNS + COLUMNS)),
+  return librarySections(rows).map(section => ({
+    key: section.key, count: section.rows.length,
+    title: section.group === 'conflict' ? en.sectionConflict : section.group === 'unknown' ? en.sectionUnknown : dayTitle(section.group),
+    data: Array.from({ length: Math.ceil(section.rows.length / COLUMNS) }, (_, index) => section.rows.slice(index * COLUMNS, index * COLUMNS + COLUMNS)),
   }));
 }
 
