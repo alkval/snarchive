@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -14,12 +14,16 @@ import { runImport } from './src/import/runImport';
 import type { ImportStore, ImportSummary } from './src/storage/importStore';
 import { LibraryBrowser } from './src/ui/LibraryBrowser';
 import { sourcePicker } from './src/platform/sourcePicker';
+import { BackupScreen } from './src/ui/BackupScreen';
+import { recoverBackups } from './src/platform/backup';
 
 export default function App() {
   const dark = useColorScheme() === 'dark';
   const colors = dark ? { background: '#151817', text: '#f3f4ef', muted: '#b9c2bc', button: '#b9dec8', buttonText: '#162d20' }
     : { background: '#f8f9f5', text: '#17261d', muted: '#506056', button: '#244f37', buttonText: '#ffffff' };
   const [browsing, setBrowsing] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  const closeBackup = useCallback(() => setBackingUp(false), []);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -41,6 +45,7 @@ export default function App() {
       try {
         const database = await openPreviewStore();
         const saved = await database.load();
+        const recoveredBackupStaging = await recoverBackups().then(() => true, () => false);
         const imports = await openImportStore();
         const summary = await imports.summary();
         if (!active) return;
@@ -49,7 +54,7 @@ export default function App() {
         setLibrarySummary(summary);
         sourceIds.current = saved?.sourceIds ?? new Map();
         setPreview(saved?.preview ?? null);
-        setMessage(saved ? en.restored : en.empty);
+        setMessage(recoveredBackupStaging ? (saved ? en.restored : en.empty) : 'Library ready, but temporary backup files could not be cleared. Reopen the app before creating another backup.');
         setReady(true);
       } catch {
         if (active) setMessage(en.loadFailed);
@@ -124,6 +129,7 @@ export default function App() {
       picking.current = false; if (mounted.current) setBusy(false);
     }
   }
+  if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
   return (
     <SafeAreaProvider>
       <SafeAreaView style={[styles.root, { backgroundColor: colors.background }]}>
@@ -137,6 +143,9 @@ export default function App() {
           <Pressable accessibilityRole="button" disabled={!ready || busy} accessibilityState={{ disabled: !ready || busy }} onPress={() => setBrowsing(true)} style={[styles.button, { backgroundColor: colors.button, opacity: !ready || busy ? 0.5 : 1 }]}>
             <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.libraryBrowse}</Text>
           </Pressable>
+          {Platform.OS === 'android' && <Pressable accessibilityRole="button" disabled={!ready || busy} accessibilityState={{ disabled: !ready || busy }} onPress={() => setBackingUp(true)} style={[styles.button, { backgroundColor: colors.button, opacity: !ready || busy ? 0.5 : 1 }]}>
+            <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>Back up library</Text>
+          </Pressable>}
           <View style={styles.section}>
             <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.heading}</Text>
             <Text style={[styles.body, { color: colors.muted }]}>{en.explanation}</Text>
