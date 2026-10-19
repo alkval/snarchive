@@ -1,5 +1,6 @@
 import { decodePreview, encodePreview, MAX_PREVIEW_CHARS, type SavedPreview } from '../storage/previewCodec.ts';
-import { MAX_BACKUP_BYTES, MAX_BACKUP_OBJECTS, MAX_MANIFEST_BYTES } from './snapshot.ts';
+import { BACKUP_FORMAT_VERSION, MAX_BACKUP_BYTES, MAX_BACKUP_OBJECTS, MAX_MANIFEST_BYTES } from './snapshot.ts';
+import { folderInventoryHash } from '../import/sourceEvidence.ts';
 
 /** Limits derived from the exporter (snapshot.ts) and the saved-preview codec, never tighter than what it writes. */
 export const MAX_MANIFEST_RECORDS = 1_000_000;
@@ -23,8 +24,10 @@ export type BackupPreview = {
   sharedObjects: number;
   /** Catalogued objects no preserved observation references. */
   unreferencedObjects: number;
-  /** Scanned export sources (one per ZIP job), preserved observations, and inventory files without a preserved record. */
+  /** Scanned export sources (one per ZIP or folder job), preserved observations, and inventory files without a preserved record. */
   sources: number; preserved: number; pendingFiles: number;
+  /** How many of those sources are extracted folders (format version 2). */
+  folders: number;
   favorites: number;
   records: number;
 };
@@ -35,6 +38,8 @@ export type ValidRecord =
   | { type: 'object'; sha256: string; bytes: number }
   | { type: 'source'; archiveSha256: string; saved: SavedPreview; inventory: string }
   | { type: 'preserved'; archiveSha256: string; ordinal: number; memoryId: string; role: 'photo' | 'video' | 'overlay'; sha256: string }
+  | { type: 'folder'; inventorySha256: string; saved: SavedPreview; inventory: string }
+  | { type: 'folder-preserved'; inventorySha256: string; ordinal: number; memoryId: string; role: 'photo' | 'video' | 'overlay'; sha256: string }
   | { type: 'favorite'; memoryId: string };
 function check(ok: unknown, code = 'backup-invalid'): asserts ok { if (!ok) throw new BackupManifestError(code); }
 const HASH = /^[a-f0-9]{64}$/;
@@ -42,14 +47,15 @@ const MEMORY = /^[A-Za-z0-9_-]{1,1024}$/;
 const KEYS: Record<string, string> = {
   header: 'format,type,version', object: 'bytes,relativePath,sha256,type', source: 'archiveSha256,inventory,type',
   preserved: 'archiveSha256,memoryId,ordinal,role,sha256,type', favorite: 'memoryId,type', end: 'objects,originalBytes,records,type',
+  folder: 'inventory,inventorySha256,type', 'folder-preserved': 'inventorySha256,memoryId,ordinal,role,sha256,type',
 };
 const integer = (value: unknown, max: number) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
 const ROLE_BIT = { photo: 1, video: 2, overlay: 4 } as const;
 
-type Phase = 'header' | 'objects' | 'sources' | 'favorites' | 'ended';
-type Current = { hash: string; files: { memorySourceId: string; role: string }[]; lastOrdinal: number; preserved: number };
+type Phase = 'header' | 'objects' | 'sources' | 'folders' | 'favorites' | 'ended';
+type Current = { kind: 'zip' | 'folder'; hash: string; files: { memorySourceId: string; role: string }[]; lastOrdinal: number; preserved: number };
 
-/** Streaming reader for manifest.jsonl, version 1. Text arrives in chunks of any size; at most one record
+/** Streaming reader for manifest.jsonl, versions 1 and 2 (version 2 adds extracted-folder sources). Text arrives in chunks of any size; at most one record
  * (for a source, one codec inventory) is held as text at a time.
  *
  * State that grows with the permitted record counts: the object catalog (at most 100,000 entries), one entry per
@@ -63,6 +69,9 @@ export class BackupManifestValidator {
   private originalBytes = 0;
   private lastObject = '';
   private lastSource = '';
+  private lastFolder = '';
+  private version = 0;
+  private folders = 0;
   private current: Current | null = null;
   private sources = 0; private preserved = 0; private pendingFiles = 0;
   private readonly memories = new Map<string, number>();
@@ -102,7 +111,7 @@ export class BackupManifestValidator {
     return {
       memories, overlayOnly, variants: this.variantIds.size, objects: this.objects.size, originalBytes: this.originalBytes,
       sharedObjects: this.sharedObjects.size, unreferencedObjects: this.objects.size - this.objectUser.size,
-      sources: this.sources, preserved: this.preserved, pendingFiles: this.pendingFiles, favorites: this.favorites, records: this.records,
+      sources: this.sources, preserved: this.preserved, pendingFiles: this.pendingFiles, folders: this.folders, favorites: this.favorites, records: this.records,
     };
   }
 
@@ -119,12 +128,14 @@ export class BackupManifestValidator {
     check(JSON.stringify(record) === line);
     const type = record.type;
     check(typeof type === 'string' && Object.prototype.hasOwnProperty.call(KEYS, type) && Object.keys(record).sort().join(',') === KEYS[type]);
-    if (type !== 'source') check(line.length <= MAX_RECORD_LINE, 'backup-limit');
+    if (type !== 'source' && type !== 'folder') check(line.length <= MAX_RECORD_LINE, 'backup-limit');
     switch (type) {
       case 'header': return this.header(record);
       case 'object': return this.object(record);
       case 'source': return this.source(record);
-      case 'preserved': return this.observation(record);
+      case 'preserved': return this.observation(record, 'zip');
+      case 'folder': return this.folder(record);
+      case 'folder-preserved': return this.observation(record, 'folder');
       case 'favorite': return this.favorite(record);
       default: return this.end(record);
     }
@@ -133,7 +144,8 @@ export class BackupManifestValidator {
   private header(record: Record<string, unknown>) {
     check(this.phase === 'header' && this.records === 1 && record.format === 'snarchive-backup');
     check(Number.isSafeInteger(record.version) && (record.version as number) >= 1);
-    check(record.version === 1, 'backup-unsupported');
+    check(record.version === 1 || record.version === BACKUP_FORMAT_VERSION, 'backup-unsupported');
+    this.version = record.version as number;
     this.phase = 'objects';
   }
 
@@ -160,9 +172,28 @@ export class BackupManifestValidator {
     try { saved = decodePreview(text); check(encodePreview(saved) === text); } catch { throw new BackupManifestError('backup-invalid'); }
     check(saved.sourceIds.size === 1 && saved.sourceIds.has(`zip:${hash}`) && saved.preview.sources.length === 1);
     const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
-    this.current = { hash, files, lastOrdinal: -1, preserved: 0 };
+    this.current = { kind: 'zip', hash, files, lastOrdinal: -1, preserved: 0 };
     this.lastSource = hash; this.sources++; this.phase = 'sources';
     if (this.keepRecords) this.validRecords.push({ type: 'source', archiveSha256: hash, saved, inventory: text });
+  }
+
+  /** Version 2: an extracted folder, after every ZIP source, in hash order. Its key must be the hash of its inventory,
+   * recomputed here, so a record can never claim another folder's identity. */
+  private folder(record: Record<string, unknown>) {
+    check(this.version === 2 && (this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders'));
+    const hash = record.inventorySha256;
+    check(typeof hash === 'string' && HASH.test(hash) && hash > this.lastFolder);
+    this.closeSource();
+    const text = JSON.stringify(record.inventory);
+    check(typeof text === 'string' && text.length <= MAX_PREVIEW_CHARS, 'backup-limit');
+    let saved: ReturnType<typeof decodePreview>;
+    try { saved = decodePreview(text); check(encodePreview(saved) === text); } catch { throw new BackupManifestError('backup-invalid'); }
+    check(saved.sourceIds.size === 1 && saved.sourceIds.has(`folder:${hash}`) && saved.preview.sources.length === 1);
+    check(folderInventoryHash(saved.preview.sources[0]!) === hash);
+    const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
+    this.current = { kind: 'folder', hash, files, lastOrdinal: -1, preserved: 0 };
+    this.lastFolder = hash; this.sources++; this.folders++; this.phase = 'folders';
+    if (this.keepRecords) this.validRecords.push({ type: 'folder', inventorySha256: hash, saved, inventory: text });
   }
 
   private closeSource() {
@@ -171,9 +202,10 @@ export class BackupManifestValidator {
     this.current = null;
   }
 
-  private observation(record: Record<string, unknown>) {
+  private observation(record: Record<string, unknown>, kind: 'zip' | 'folder') {
     const current = this.current;
-    check(this.phase === 'sources' && current && record.archiveSha256 === current.hash);
+    check((this.phase === 'sources' || this.phase === 'folders') && current && current.kind === kind
+      && (kind === 'zip' ? record.archiveSha256 : record.inventorySha256) === current.hash);
     const ordinal = record.ordinal, memoryId = record.memoryId, role = record.role, hash = record.sha256;
     // Strictly increasing ordinals: one observation per inventory file, never a duplicate.
     check(integer(ordinal, current.files.length - 1) && (ordinal as number) > current.lastOrdinal);
@@ -187,11 +219,13 @@ export class BackupManifestValidator {
     if (first === undefined) this.firstByRole.set(key, hash); else if (first !== hash) this.variantIds.add(memoryId);
     const user = this.objectUser.get(hash);
     if (user === undefined) this.objectUser.set(hash, memoryId); else if (user !== memoryId) this.sharedObjects.add(hash);
-    if (this.keepRecords) this.validRecords.push({ type: 'preserved', archiveSha256: current.hash, ordinal: ordinal as number, memoryId, role, sha256: hash });
+    if (this.keepRecords) this.validRecords.push(kind === 'zip'
+      ? { type: 'preserved', archiveSha256: current.hash, ordinal: ordinal as number, memoryId, role, sha256: hash }
+      : { type: 'folder-preserved', inventorySha256: current.hash, ordinal: ordinal as number, memoryId, role, sha256: hash });
   }
 
   private favorite(record: Record<string, unknown>) {
-    check(this.phase === 'objects' || this.phase === 'sources' || this.phase === 'favorites');
+    check(this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders' || this.phase === 'favorites');
     this.closeSource(); this.phase = 'favorites';
     const memoryId = record.memoryId;
     check(typeof memoryId === 'string' && MEMORY.test(memoryId) && memoryId > this.lastFavorite);

@@ -2,12 +2,15 @@ import { defaultFilters, validFilters, type LibraryFilters } from '../domain/lib
 import type { SqlDatabase, SqlConnection } from './previewStore.ts';
 import { encodePreview, decodePreview } from './previewCodec.ts';
 import { mergeSourceInventories, type SourceInventory } from '../import/sourceInventory.ts';
+import { folderInventoryHash } from '../import/sourceEvidence.ts';
+/** zip: hash is the archive's SHA-256. folder: hash is the folder's inventory hash (folderInventoryHash). */
+export type JobKind = 'zip' | 'folder';
 export type Receipt = { sha256: string; relativePath: string; bytes: number };
 export type ImportItem = { ordinal: number; relative_path: string; memory_id: string; role: string; state: 'pending' | 'done'; object_hash: string | null; bytes: number | null };
 export type ImportSummary = { files: number; objects: number; memories: number; unfinished: number; conflicts: number };
 function check(ok: unknown): asserts ok { if (!ok) throw new Error('invalid-import-state'); }
 /** Bump with each migration. The backup snapshot pins the version it covers; a test fails when they diverge. */
-export const LIBRARY_SCHEMA_VERSION = 3;
+export const LIBRARY_SCHEMA_VERSION = 4;
 export function validateReceipt(value: Receipt): void {
   check(/^[a-f0-9]{64}$/.test(value.sha256));
   check(value.relativePath === `objects/${value.sha256.slice(0, 2)}/${value.sha256}`);
@@ -35,7 +38,7 @@ export class ImportStore {
     await this.db.withExclusiveTransactionAsync(async tx => {
       const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
       if (version?.user_version === LIBRARY_SCHEMA_VERSION) return;
-      check(version && [0, 1, 2].includes(version.user_version));
+      check(version && [0, 1, 2, 3].includes(version.user_version));
       if (version.user_version < 2) {
         if (version.user_version === 0) await tx.execAsync(`
           CREATE TABLE import_jobs (hash TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','running','paused','completed')), plan_json TEXT NOT NULL);
@@ -57,17 +60,37 @@ export class ImportStore {
           after = job.hash;
         }
       }
-      await tx.execAsync('CREATE TABLE library_favorites(memory_id TEXT PRIMARY KEY); PRAGMA user_version = 3;');
+      if (version.user_version < 3) await tx.execAsync('CREATE TABLE library_favorites(memory_id TEXT PRIMARY KEY);');
+      // Schema 4 (section 21): a job is a ZIP archive or an extracted folder. Existing jobs are all ZIP jobs.
+      await tx.execAsync(`ALTER TABLE import_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'zip' CHECK(kind IN ('zip','folder'));
+        PRAGMA user_version = 4;`);
     });
   }
   async plan(hash: string, source: SourceInventory): Promise<void> {
     check(/^[a-f0-9]{64}$/.test(hash));
-    const json = encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([[`zip:${hash}`, source.sourceId]]) });
+    await this.insertPlan(hash, 'zip', source);
+  }
+  /** Plans an extracted folder from its saved scan. The job is keyed by the inventory hash of the codec-normalized
+   * source, so a second scan of an unchanged folder finds the same job; a changed folder is a different plan. */
+  async planFolder(source: SourceInventory): Promise<string> {
+    const normalized = decodePreview(encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([['folder:' + '0'.repeat(64), source.sourceId]]) })).preview.sources[0]!;
+    const hash = folderInventoryHash(normalized);
+    await this.insertPlan(hash, 'folder', normalized);
+    return hash;
+  }
+  /** A planned folder job's normalized source, or null if hash is not a folder job. */
+  async folderPlan(hash: string): Promise<SourceInventory | null> {
+    const row = await this.db.getFirstAsync<{ plan_json: string }>("SELECT plan_json FROM import_jobs WHERE hash=? AND kind='folder'", hash);
+    return row ? decodePreview(row.plan_json).preview.sources[0]! : null;
+  }
+  private async insertPlan(hash: string, kind: JobKind, source: SourceInventory): Promise<void> {
+    const json = encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([[`${kind}:${hash}`, source.sourceId]]) });
     const normalized = decodePreview(json).preview.sources[0]!;
     await this.db.withExclusiveTransactionAsync(async tx => {
-      const existing = await tx.getFirstAsync('SELECT hash FROM import_jobs WHERE hash = ?', hash);
-      if (existing) return; // An archive's bytes, and therefore its persisted plan, are immutable.
-      await tx.runAsync('INSERT INTO import_jobs(hash,state,plan_json) VALUES (?,\'planned\',?)', hash, json);
+      const existing = await tx.getFirstAsync<{ kind: string }>('SELECT kind FROM import_jobs WHERE hash = ?', hash);
+      // An archive's bytes, or a folder's inventory, fix the persisted plan: an existing job is reused, never replaced.
+      if (existing) { check(existing.kind === kind); return; }
+      await tx.runAsync('INSERT INTO import_jobs(hash,state,plan_json,kind) VALUES (?,\'planned\',?,?)', hash, json, kind);
       await indexDates(tx, normalized);
       for (const [ordinal, file] of normalized.files.entries()) {
         await tx.runAsync('INSERT INTO import_items(job_hash,ordinal,relative_path,memory_id,role,date_json) VALUES (?,?,?,?,?,?)', hash, ordinal, file.relativePath, file.memorySourceId, file.role, JSON.stringify(file.captureDate));
@@ -76,6 +99,9 @@ export class ImportStore {
   }
   async item(hash: string, after: number): Promise<ImportItem | null> {
     return this.db.getFirstAsync<ImportItem>(`SELECT i.ordinal,i.relative_path,i.memory_id,i.role,i.state,i.object_hash,o.bytes FROM import_items i LEFT JOIN stored_objects o ON o.hash=i.object_hash WHERE i.job_hash=? AND i.ordinal>? ORDER BY i.ordinal LIMIT 1`, hash, after);
+  }
+  async hasPending(hash: string): Promise<boolean> {
+    return !!(await this.db.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='pending' LIMIT 1", hash));
   }
   async copiedBytes(hash: string): Promise<number> {
     const row = await this.db.getFirstAsync<{ bytes: number }>('SELECT coalesce(sum(o.bytes),0) AS bytes FROM import_items i JOIN stored_objects o ON o.hash=i.object_hash WHERE i.job_hash=?', hash);

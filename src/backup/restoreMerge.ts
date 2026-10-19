@@ -3,6 +3,7 @@ import { indexDates, LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
 import { decodePreview } from '../storage/previewCodec.ts';
 import type { SourceInventory } from '../import/sourceInventory.ts';
 import type { ValidRecord } from './manifest.ts';
+import { sourceEvidence } from '../import/sourceEvidence.ts';
 
 /** What a restore changed in the library, as opposed to what the backup contains. */
 export type RestoreChanges = {
@@ -23,25 +24,11 @@ export class RestoreError extends Error {}
 function check(ok: unknown, code = 'restore-conflict'): asserts ok { if (!ok) throw new RestoreError(code); }
 const BATCH = 100;
 
-/** A source's complete evidence (files, metadata records with dates and locations, diagnostics, counts) with only its
- * per-device label replaced: the source's own ID, each file's ID, and the "<label>:" prefix of metadata IDs. Two scans
- * of the same archive on different devices (source-1 vs source-7) compare equal; any other difference does not. */
-export function sourceEvidence(source: SourceInventory): string {
-  const label = source.sourceId, neutral = 'source';
-  const relabel = (id: string) => id.startsWith(`${label}:`) ? `${neutral}${id.slice(label.length)}` : id;
-  return JSON.stringify({
-    ...source, sourceId: neutral,
-    files: source.files.map(file => ({ ...file, sourceId: file.sourceId === label ? neutral : file.sourceId })),
-    metadata: source.metadata.map(result => ({
-      ...result,
-      records: result.records.map(record => ({ ...record, sourceId: relabel(record.sourceId) })),
-      diagnostics: result.diagnostics.map(diagnostic => ({ ...diagnostic, sourceId: relabel(diagnostic.sourceId) })),
-    })),
-  });
-}
+export { sourceEvidence };
 
 type Item = { relativePath: string; memoryId: string; role: string; dateJson: string; state: 'pending' | 'done'; objectHash: string | null };
-type Source = { hash: string; isNew: boolean; state: string; items: Item[]; plan: string; source: Extract<ValidRecord, { type: 'source' }>; completed: number };
+type SourceRecord = { kind: 'zip' | 'folder'; hash: string; saved: Extract<ValidRecord, { type: 'source' }>['saved']; inventory: string };
+type Source = { kind: 'zip' | 'folder'; hash: string; isNew: boolean; state: string; items: Item[]; plan: string; source: SourceRecord; completed: number };
 type Counts = { base: number; associations: number; objects: number; favorites: number; jobs: number; done: number };
 
 /** Applies validated backup records to the library inside the caller's exclusive transaction. Additive only:
@@ -84,8 +71,13 @@ export class RestoreMerge {
         if (this.objectRows.length >= BATCH) await this.flushObjects();
         return;
       case 'source':
-        await this.flushObjects(); await this.closeSource(); return this.openSource(record);
-      case 'preserved': return this.observe(record);
+        await this.flushObjects(); await this.closeSource();
+        return this.openSource({ kind: 'zip', hash: record.archiveSha256, saved: record.saved, inventory: record.inventory });
+      case 'folder':
+        await this.flushObjects(); await this.closeSource();
+        return this.openSource({ kind: 'folder', hash: record.inventorySha256, saved: record.saved, inventory: record.inventory });
+      case 'preserved': return this.observe(record.archiveSha256, record);
+      case 'folder-preserved': return this.observe(record.inventorySha256, record);
       case 'favorite':
         await this.closeSource();
         this.favorites.push(record.memoryId);
@@ -109,31 +101,32 @@ export class RestoreMerge {
     }
   }
 
-  private async openSource(record: Extract<ValidRecord, { type: 'source' }>) {
+  private async openSource(record: SourceRecord) {
     const files = record.saved.preview.sources[0]!.files;
     const backupItems: Item[] = files.map(file => ({ relativePath: file.relativePath, memoryId: file.memorySourceId, role: file.role,
       dateJson: JSON.stringify(file.captureDate), state: 'pending', objectHash: null }));
-    const job = await this.tx.getFirstAsync<{ state: string; plan_json: string }>('SELECT state,plan_json FROM import_jobs WHERE hash=?', record.archiveSha256);
-    if (!job) { this.current = { hash: record.archiveSha256, isNew: true, state: 'planned', items: backupItems, plan: record.inventory, source: record, completed: 0 }; return; }
+    const job = await this.tx.getFirstAsync<{ state: string; plan_json: string; kind: string }>('SELECT state,plan_json,kind FROM import_jobs WHERE hash=?', record.hash);
+    if (!job) { this.current = { kind: record.kind, hash: record.hash, isNew: true, state: 'planned', items: backupItems, plan: record.inventory, source: record, completed: 0 }; return; }
+    check(job.kind === record.kind); // A ZIP and a folder never share a job, even if their keys collided.
     // Same archive bytes must mean the same evidence. Compare the whole codec-normalized inventory, metadata included,
     // ignoring only the per-device label; the existing plan is kept, so anything the backup adds would otherwise be lost.
     let existingSource: SourceInventory;
     try { existingSource = decodePreview(job.plan_json).preview.sources[0]!; } catch { throw new RestoreError('restore-conflict'); }
     check(sourceEvidence(existingSource) === sourceEvidence(record.saved.preview.sources[0]!));
     const existing = await this.tx.getAllAsync<{ ordinal: number; relative_path: string; memory_id: string; role: string; date_json: string; state: 'pending' | 'done'; object_hash: string | null }>(
-      'SELECT ordinal,relative_path,memory_id,role,date_json,state,object_hash FROM import_items WHERE job_hash=? ORDER BY ordinal', record.archiveSha256);
+      'SELECT ordinal,relative_path,memory_id,role,date_json,state,object_hash FROM import_items WHERE job_hash=? ORDER BY ordinal', record.hash);
     check(existing.length === backupItems.length);
     const items = existing.map((row, index) => {
       const mine = backupItems[index]!;
       check(row.ordinal === index && row.relative_path === mine.relativePath && row.memory_id === mine.memoryId && row.role === mine.role && row.date_json === mine.dateJson);
       return { ...mine, state: row.state, objectHash: row.object_hash };
     });
-    this.current = { hash: record.archiveSha256, isNew: false, state: job.state, items, plan: job.plan_json, source: record, completed: 0 };
+    this.current = { kind: record.kind, hash: record.hash, isNew: false, state: job.state, items, plan: job.plan_json, source: record, completed: 0 };
   }
 
-  private async observe(record: Extract<ValidRecord, { type: 'preserved' }>) {
+  private async observe(hash: string, record: Extract<ValidRecord, { type: 'preserved' | 'folder-preserved' }>) {
     const source = this.current;
-    check(source && source.hash === record.archiveSha256, 'restore-failed');
+    check(source && source.hash === hash && source.kind === (record.type === 'preserved' ? 'zip' : 'folder'), 'restore-failed');
     const item = source.items[record.ordinal];
     check(item && item.memoryId === record.memoryId && item.role === record.role, 'restore-failed');
     if (item.state === 'done') {
@@ -154,7 +147,7 @@ export class RestoreMerge {
     const done = source.items.some(item => item.state === 'done');
     if (source.isNew) {
       const state = !pending ? 'completed' : done ? 'paused' : 'planned';
-      await this.tx.runAsync('INSERT INTO import_jobs(hash,state,plan_json) VALUES (?,?,?)', source.hash, state, source.plan);
+      await this.tx.runAsync('INSERT INTO import_jobs(hash,state,plan_json,kind) VALUES (?,?,?,?)', source.hash, state, source.plan, source.kind);
       for (let index = 0; index < source.items.length; index += BATCH) {
         const slice = source.items.slice(index, index + BATCH);
         await this.tx.runAsync(`INSERT INTO import_items(job_hash,ordinal,relative_path,memory_id,role,date_json,state,object_hash) VALUES ${slice.map(() => '(?,?,?,?,?,?,?,?)').join(',')}`,

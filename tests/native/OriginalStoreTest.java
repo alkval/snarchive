@@ -156,6 +156,15 @@ public class OriginalStoreTest {
       try { put(store, new byte[100_000]); } catch (IOException e) { error = e; }
       check(error != null && "injected-write".equals(error.getMessage()) && error.getSuppressed().length == 0); emptyStage(r);
     });
+    test("a failing pre-finalize check stores nothing and never reports reuse; a passing one changes nothing", () -> {
+      File r = root(); OriginalStore store = new OriginalStore(r); AtomicInteger checks = new AtomicInteger();
+      fails("source-changed", () -> store.put(new ByteArrayInputStream(bytes), bytes.length, -1, null, budget(), () -> false, () -> { throw new IOException("source-changed"); }));
+      emptyStage(r); check(objects(r) == 0);
+      check(!store.put(new ByteArrayInputStream(bytes), bytes.length, -1, null, budget(), () -> false, checks::incrementAndGet).reused && checks.get() == 1);
+      // An object with these bytes now exists: the check still runs first, and a failure is not turned into reuse.
+      fails("source-changed", () -> store.put(new ByteArrayInputStream(bytes), bytes.length, -1, null, budget(), () -> false, () -> { throw new IOException("source-changed"); }));
+      emptyStage(r); check(objects(r) == 1);
+    });
     test("process death while writing leaves only recoverable staging", () -> {
       File r = root();
       Process child = new ProcessBuilder(new File(System.getProperty("java.home"), "bin/java").getPath(), "-cp", System.getProperty("java.class.path"), "OriginalStoreTest", "crash-write", r.getPath()).inheritIO().start();

@@ -17,6 +17,8 @@ public final class OriginalStore {
   public static final String STAGING_CLEANUP_FAILED = "store-staging-cleanup-failed";
   public interface Space { long available(File directory); }
   public interface Faults { void at(String point) throws IOException; }
+  /** Runs after every byte was read and the source closed, before anything is finalized or reused. */
+  public interface Check { void run() throws IOException; }
   public static final class Budget {
     private long remaining;
     public Budget(long bytes) { if (bytes < 0) throw new IllegalArgumentException("invalid-budget"); remaining = bytes; }
@@ -90,6 +92,14 @@ public final class OriginalStore {
   /** As put, but when expectedSha256 is given the bytes must hash to it before anything is finalized
    * ("content-mismatch"); a restore never places unexpected bytes into the store. */
   public Stored put(InputStream source, long expectedBytes, long expectedCrc, String expectedSha256, Budget budget, BooleanSupplier stop) throws IOException {
+    return put(source, expectedBytes, expectedCrc, expectedSha256, budget, stop, () -> {});
+  }
+
+  /** As put, with beforeFinalize run once the source is drained and closed, before the content hash is used: a source
+   * without a CRC (a folder file) proves there that it did not change while it was read; if it throws, nothing is
+   * finalized or reused, and the error (with any staging cleanup failure attached) propagates. */
+  public Stored put(InputStream source, long expectedBytes, long expectedCrc, String expectedSha256, Budget budget, BooleanSupplier stop,
+      Check beforeFinalize) throws IOException {
     require(source != null, "invalid-source");
     try (InputStream input = new OwnedInput(source)) {
       require(input != null && expectedBytes >= -1 && expectedCrc >= -1 && expectedCrc <= 0xffffffffL, "invalid-source");
@@ -122,6 +132,7 @@ public final class OriginalStore {
           // A source can report a close error. Do not finalize until it has closed successfully.
           input.close();
           cancel(stop);
+          beforeFinalize.run();
           String hash = hex(sha.digest());
           require(expectedSha256 == null || expectedSha256.equals(hash), "content-mismatch");
           directory("objects/" + hash.substring(0, 2));

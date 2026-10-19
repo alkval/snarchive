@@ -131,14 +131,14 @@ test('late metadata enriches existing memories and contradictory instants are ex
 });
 test('version-one migration backfills dates without losing receipts, and can reopen', async t => {
   const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
-  db.raw.exec('DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1;');
+  db.raw.exec('ALTER TABLE import_jobs DROP COLUMN kind; DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1;');
   await store.initialize(); await store.initialize();
   assert.equal((await store.summary()).files, 1);
   assert.equal((await store.page())[0]?.day, '2026-02-05');
 });
 test('failed date migration rolls back and leaves the previous database intact', async t => {
   const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
-  db.raw.exec("DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1; UPDATE import_jobs SET plan_json='invalid';");
+  db.raw.exec("ALTER TABLE import_jobs DROP COLUMN kind; DROP TABLE library_favorites; DROP TABLE library_dates; DROP INDEX memory_objects_by_memory; DROP INDEX import_items_by_memory; PRAGMA user_version=1; UPDATE import_jobs SET plan_json='invalid';");
   await assert.rejects(store.initialize());
   assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 1);
   assert.equal((await store.summary()).files, 1);
@@ -217,7 +217,7 @@ test('favorite write failure rolls back, and pending or unknown memories cannot 
 });
 test('schema two upgrade preserves imported files and creates favorites atomically', async t => {
   const { store, db } = await setup(t); await store.commit(hash, 0, receipt());
-  db.raw.exec('DROP TABLE library_favorites; PRAGMA user_version=2;');
+  db.raw.exec('ALTER TABLE import_jobs DROP COLUMN kind; DROP TABLE library_favorites; PRAGMA user_version=2;');
   await store.initialize(); await store.initialize(); await store.setFavorite('one', true);
   assert.equal((await store.summary()).files, 1);
   assert.equal((await store.chronologicalPage())[0]?.favorite, 1);

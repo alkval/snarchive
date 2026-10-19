@@ -11,6 +11,8 @@ import { openPreviewStore } from './src/platform/previewDatabase';
 import type { PreviewStore } from './src/storage/previewStore';
 import { openImportStore, originalCopier } from './src/platform/originalImporter';
 import { runImport } from './src/import/runImport';
+import { runFolderImport, FolderImportFailure } from './src/import/runFolderImport';
+import { folderCopier } from './src/platform/folderImporter';
 import type { ImportStore, ImportSummary } from './src/storage/importStore';
 import { LibraryBrowser } from './src/ui/LibraryBrowser';
 import { sourcePicker } from './src/platform/sourcePicker';
@@ -139,9 +141,41 @@ export default function App() {
       picking.current = false; if (mounted.current) setBusy(false);
     }
   }
+  /** Folder preservation (section 21): plan from the saved scan, reselect the folder, then copy what it still matches. */
+  async function preserveFolder(sourceId: string) {
+    if (picking.current || !ready || !library.current) return;
+    const source = preview?.sources.find(item => item.sourceId === sourceId);
+    if (!source) return;
+    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.folderPick); scroll.current?.scrollTo({ y: 0 });
+    try {
+      const hash = await library.current.planFolder(source);
+      let selected;
+      try { selected = await sourcePicker.selectDirectory(); } catch { if (mounted.current) setMessage(en.pickerClosed); return; }
+      if (stopped.current || !mounted.current) return;
+      const outcome = await runFolderImport(library.current, folderCopier, hash, selected.uri, () => stopped.current,
+        count => { if (mounted.current) setMessage(en.importProgress(count)); });
+      const done = outcome.preserved + outcome.confirmed;
+      const left = outcome.skipped.missing + outcome.skipped.changed + outcome.skipped.unreadable;
+      if (mounted.current) setMessage([outcome.complete ? en.folderComplete(done) : en.folderPartial(done, left),
+        outcome.changedSincePreserved ? en.folderChangedSince(outcome.changedSincePreserved) : '',
+        outcome.storeCleanupFailed ? en.folderStoreCleanup : ''].filter(Boolean).join(' '));
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      const main = code === 'cancelled' || stopped.current ? en.folderCancelled : code === 'folder-changed' ? en.folderChanged
+        : code === 'folder-access-denied' ? en.folderAccess : code === 'folder-unreadable' ? en.folderUnreadable
+        : code === 'native-build-required' ? en.nativeRequired : code === 'insufficient-storage' ? en.folderStorage
+        : code === 'stored-object-corrupt' ? en.importCorrupt : code === 'store-staging-cleanup-failed' ? en.restoreErrors['store-staging-cleanup-failed']! : en.folderPaused;
+      const cleanup = error instanceof FolderImportFailure && error.storeCleanupFailed && code !== 'store-staging-cleanup-failed';
+      if (mounted.current) setMessage(cleanup ? `${main} ${en.folderStoreCleanup}` : main);
+    } finally {
+      try { const summary = await library.current.summary(); if (mounted.current) setLibrarySummary(summary); } catch {}
+      picking.current = false; if (mounted.current) setBusy(false);
+    }
+  }
   const tone = toneFor(message);
   const closeBrowser = () => { if (!browserBack.current?.()) setBrowsing(false); };
   const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
+  const folderSources = [...sourceIds.current].filter(([key]) => key.startsWith('directory:'));
   if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
   if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} onChanged={refreshLibrary} onOpenLibrary={openRestoredLibrary} /></SafeAreaProvider>;
   return (
@@ -180,6 +214,9 @@ export default function App() {
             {Platform.OS === 'android' && zipSources.map(([key, id]) => (
               <Row key={key} icon="download-outline" title={en.importZip(id)} detail={en.importZipDetail} disabled={busy || !ready} onPress={() => void preserve(key.slice(4), id)} />
             ))}
+            {Platform.OS === 'android' && folderSources.map(([key, id]) => (
+              <Row key={key} icon="folder-outline" title={en.importFolder(id)} detail={en.importFolderDetail} disabled={busy || !ready} onPress={() => void preserveFolder(id)} />
+            ))}
           </Group>}
           {preview && <InventoryReport preview={preview} footer={`${en.previewNote} ${en.savedNote}`} />}
           <Text style={[type.footnote, styles.footer, { color: t.secondary }]}>{en.prototype}</Text>
@@ -191,7 +228,13 @@ export default function App() {
 
 /** Which kind of notice a status message is. Idle guidance needs no card. */
 function toneFor(message: string): Tone | null {
-  if ([en.loading, en.busy, en.scanning, en.saving, en.importPick].includes(message) || /copied or verified/.test(message)) return 'progress';
+  if ([en.loading, en.busy, en.scanning, en.saving, en.importPick, en.folderPick].includes(message) || /copied or verified\. Keep Snarchive open/.test(message)) return 'progress';
+  // Folder results can carry extra sentences (changed files, a leftover part), so they are matched by how they start.
+  if (/Every file in its scan is preserved/.test(message) && !message.includes(en.folderStoreCleanup)) return 'success';
+  if (/left for later|Every file in its scan is preserved/.test(message)) return 'warning';
+  if ([en.folderChanged, en.folderAccess, en.folderUnreadable, en.folderPaused, en.folderStorage, en.restoreErrors['store-staging-cleanup-failed']!].some(text => message.startsWith(text))) return 'warning';
+  if (message.startsWith(en.folderCancelled)) return message === en.folderCancelled ? 'info' : 'warning';
+  if (message.startsWith(en.importCorrupt)) return 'error';
   if (message === en.importComplete || /scanned and saved/.test(message)) return 'success';
   if ([en.loadFailed, en.importCorrupt].includes(message)) return 'error';
   if ([en.saveFailed, en.failed, en.zipFailed, en.zipIos, en.storage, en.nativeRequired, en.importOne, en.importChanged, en.importPaused, en.importStorage, en.stagingNotCleared].includes(message)) return 'warning';

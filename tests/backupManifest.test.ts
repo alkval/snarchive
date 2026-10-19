@@ -67,7 +67,7 @@ test('exporter output validates and counts memories, shared bytes, observations,
     objects: 4, originalBytes: 65,
     sharedObjects: 1,      // A is used by one and two
     unreferencedObjects: 0,
-    sources: 2, preserved: 6, pendingFiles: 1,
+    sources: 2, preserved: 6, pendingFiles: 1, folders: 0,
     favorites: 2, records: records.length,
   });
   // Any chunking gives the same result, including one character at a time across multi-byte boundaries.
@@ -109,7 +109,7 @@ test('cancellation during manifest reading or verification stops before more wor
 
 test('unsupported versions and malformed headers are refused', async t => {
   const { db } = await library(t); const records = await lines(db);
-  rejects(edit(records, 0, value => { value.version = 2; }).join(''), 'backup-unsupported');
+  rejects(edit(records, 0, value => { value.version = 3; }).join(''), 'backup-unsupported');
   rejects(edit(records, 0, value => { value.version = '1'; }).join(''));
   rejects(edit(records, 0, value => { value.format = 'other-backup'; }).join(''));
   rejects(records.slice(1).join(''));                                   // header missing

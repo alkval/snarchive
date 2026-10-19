@@ -11,8 +11,9 @@ try {
 } catch { console.error('Missing ZIP engine. Follow docs/development.md for its pinned download.'); process.exit(1); }
 const base = 'modules/snarchive-sources/android/src/main/java/com/alkval/snarchive/sources';
 for (const [cmd, args] of [
-  ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, `${base}/zip/ArchiveSource.java`, `${base}/zip/ZipGuard.java`, `${base}/zip/ZipInventory.java`, `${base}/storage/OriginalStore.java`, `${base}/storage/ArchiveOriginals.java`, `${base}/storage/LruFileIndex.java`, 'tests/native/OriginalStoreTest.java']],
+  ['javac', ['--release', '8', '-cp', jar, '-d', `${out}/classes`, `${base}/zip/ArchiveSource.java`, `${base}/zip/ZipGuard.java`, `${base}/zip/ZipInventory.java`, `${base}/storage/OriginalStore.java`, `${base}/storage/ArchiveOriginals.java`, `${base}/storage/LruFileIndex.java`, `${base}/storage/FolderOriginals.java`, 'tests/native/OriginalStoreTest.java', 'tests/native/FolderOriginalsTest.java']],
   ['java', ['-Xmx128m', '-cp', `${out}/classes${process.platform === 'win32' ? ';' : ':'}${jar}`, 'OriginalStoreTest', out]],
+  ['java', ['-Xmx128m', '-cp', `${out}/classes${process.platform === 'win32' ? ';' : ':'}${jar}`, 'FolderOriginalsTest', out]],
 ]) {
   const result = spawnSync(cmd, args, { cwd: root, stdio: 'inherit' });
   if (result.error || result.status !== 0) process.exit(result.status ?? 1);

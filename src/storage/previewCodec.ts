@@ -30,7 +30,8 @@ function normalize(value: unknown): SavedPreview {
     const [rawKey, rawId] = array(pair, 2);
     const key = string(rawKey, 8192), id = string(rawId, 16);
     check(/^source-[1-8]$/.test(id) && !usedIds.has(id) && !sourceIds.has(key));
-    check(/^zip:[a-f0-9]{64}$/.test(key) || /^directory:(content|file):\/\//.test(key));
+    // zip: archive SHA-256; folder: a planned folder job's inventory hash (section 21); directory: a scanned tree URI.
+    check(/^(zip|folder):[a-f0-9]{64}$/.test(key) || /^directory:(content|file):\/\//.test(key));
     sourceIds.set(key, id); usedIds.add(id);
   }
   let preview: InventoryPreview | undefined;

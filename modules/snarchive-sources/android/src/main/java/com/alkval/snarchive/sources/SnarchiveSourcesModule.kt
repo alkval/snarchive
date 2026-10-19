@@ -20,6 +20,7 @@ import java.security.MessageDigest
 import java.io.FileOutputStream
 import com.alkval.snarchive.sources.storage.OriginalStore
 import com.alkval.snarchive.sources.storage.ArchiveOriginals
+import com.alkval.snarchive.sources.storage.FolderOriginals
 import com.alkval.snarchive.sources.zip.ArchiveSource
 import com.alkval.snarchive.sources.zip.ZipInventory
 import android.provider.DocumentsContract
@@ -47,6 +48,10 @@ class SnarchiveSourcesModule : Module() {
   private var importArchive: ArchiveOriginals? = null
   private var importFile: File? = null
   private var importBudget: OriginalStore.Budget? = null
+  // A folder preservation session: this run's scan of the reselected tree, pinning each file's document and facts.
+  private var importFolder: FolderOriginals? = null
+  /** True while a ZIP or folder preservation session is open; every other operation is refused meanwhile. */
+  private fun importing() = importArchive != null || importFolder != null
   private fun originals(): OriginalStore = OriginalStore(File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals"))
   override fun definition() = ModuleDefinition {
     Name("SnarchiveSources")
@@ -58,14 +63,14 @@ class SnarchiveSourcesModule : Module() {
       inspections.finishLater()
     }
     AsyncFunction("recoverBackups") {
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       // Also removes private ZIP copies an interrupted preview, import or inspection left behind.
       try { BackupSession(backupRoot(), File::getUsableSpace).use { }; ArchiveSource.removeAbandonedCopies(previewRoot()); mapOf("ok" to true) }
       catch (error: Exception) { backupError(error) }
       finally { busy.set(false) }
     }
     AsyncFunction("beginBackup") {
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       backupResult(backups.begin { BackupSession(backupRoot(), File::getUsableSpace) }.also { if (it != null) busy.set(false) })
     }
@@ -112,7 +117,7 @@ class SnarchiveSourcesModule : Module() {
     AsyncFunction("endBackup") { backupResult(backups.finish()) }
 
     AsyncFunction("beginBackupInspection") { uriString: String ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       var inPlace = false
       // Read in place when the provider allows it; otherwise a bounded, cancellable private copy that is deleted on close.
@@ -128,7 +133,7 @@ class SnarchiveSourcesModule : Module() {
       info.value ?: mapOf("ok" to false, "code" to (info.code ?: "backup-unreadable"))
     }
     AsyncFunction("beginBackupRestore") { uriString: String ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       var inPlace = false
       // Restore mode: the same opening and validation as inspection, plus a private hashed copy of the manifest
@@ -205,7 +210,7 @@ class SnarchiveSourcesModule : Module() {
       } catch (_: Exception) { mapOf("ok" to false, "code" to "thumbnail-unavailable") }
     }
     AsyncFunction("scanArchive") { uriString: String ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       var source: ArchiveSource? = null
       var staged: File? = null
@@ -218,7 +223,7 @@ class SnarchiveSourcesModule : Module() {
       } finally { runCatching { source?.close() }; staged?.delete(); busy.set(false) }
     }
     AsyncFunction("openImportArchive") { uri: String, hash: String, remaining: Double ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       var source: ArchiveSource? = null
       var staged: File? = null
@@ -256,7 +261,7 @@ class SnarchiveSourcesModule : Module() {
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
     AsyncFunction("originalUri") { hash: String, bytes: Double ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       try {
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
@@ -265,7 +270,7 @@ class SnarchiveSourcesModule : Module() {
       } catch (error: Exception) { importError(error) } finally { busy.set(false) }
     }
     AsyncFunction("originalVideo") { hash: String, bytes: Double ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       try {
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
@@ -289,11 +294,49 @@ class SnarchiveSourcesModule : Module() {
       catch (error: Exception) { importError(error) }
       finally { importArchive = null; importBudget = null; importFile?.delete(); importFile = null; busy.set(false) }
     }
-    AsyncFunction("scanDirectory") { uriString: String ->
-      if (importArchive != null || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+    // Folder preservation (section 21). The folder is reselected for every run and scanned again here; JS checks that
+    // the scan's inventory identity equals the planned job's before preserving anything. Files are read in place.
+    AsyncFunction("openFolderImport") { uriString: String ->
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
       try {
-        scan(Uri.parse(uriString))
+        val root = Uri.parse(uriString)
+        require(root.scheme == "content" && DocumentsContract.isTreeUri(root))
+        originals().recoverStaging()
+        val files = HashMap<String, FolderOriginals.Entry>()
+        val snapshot = scan(root, files)
+        @Suppress("UNCHECKED_CAST") val sizes = (snapshot["entries"] as List<Map<String, Any>>).map { (files[it["path"]]?.scanned?.bytes ?: -1L).toDouble() }
+        importFolder = FolderOriginals(SafFolder(root), files); importBudget = null
+        snapshot + ("sizes" to sizes)
+      } catch (error: Exception) { folderError(error, scanning = true) } finally { busy.set(false) }
+    }
+    AsyncFunction("prepareFolderImport") { paths: List<String>, remaining: Double ->
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try {
+        val folder = requireNotNull(importFolder)
+        require(remaining.isFinite() && remaining >= 0 && remaining <= 64L * 1024 * 1024 * 1024 && remaining % 1.0 == 0.0)
+        // Reported sizes only estimate the space needed; OriginalStore enforces the reserve on actual bytes as it writes.
+        if (StatFs(requireNotNull(appContext.reactContext).filesDir.path).availableBytes < folder.knownBytes(paths) + OriginalStore.RESERVE) throw IllegalStateException("insufficient-storage")
+        importBudget = OriginalStore.Budget(remaining.toLong())
+        mapOf("ok" to true)
+      } catch (error: Exception) { folderError(error) } finally { busy.set(false) }
+    }
+    AsyncFunction("preserveFolderEntry") { path: String ->
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try {
+        val result = requireNotNull(importFolder).preserve(path, originals(), requireNotNull(importBudget)) { cancelled.get() }
+        mapOf("ok" to true, "sha256" to result.sha256, "relativePath" to result.relativePath, "bytes" to result.bytes)
+      } catch (error: Exception) { folderError(error) } finally { busy.set(false) }
+    }
+    AsyncFunction("closeFolderImport") {
+      if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try { mapOf("ok" to true) } finally { importFolder = null; importBudget = null; busy.set(false) }
+    }
+    AsyncFunction("scanDirectory") { uriString: String ->
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      try {
+        scan(Uri.parse(uriString), null)
       } catch (error: Exception) {
         // Do not expose provider errors or personal document paths to JS/logs.
         mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else "unreadable-or-limit")
@@ -332,6 +375,52 @@ class SnarchiveSourcesModule : Module() {
       else -> "import-failed"
     }
     return mapOf("ok" to false, "code" to code)
+  }
+  /** A folder run's failure: a known code (provider details never pass through) and whether a partly written original
+   * was left in store staging alongside it. */
+  private fun folderError(error: Exception, scanning: Boolean = false): Map<String, Any> {
+    val code = if (cancelled.get()) "cancelled" else when {
+      error is SecurityException -> "folder-access-denied"
+      error.message in setOf("source-missing", "source-changed", "source-unreadable", "insufficient-storage", "stored-object-corrupt",
+        "byte-limit", "storage-busy", OriginalStore.STAGING_CLEANUP_FAILED) -> error.message!!
+      scanning -> "folder-unreadable"
+      else -> "import-failed"
+    }
+    return mapOf("ok" to false, "code" to code, "storeCleanupFailed" to InspectionGate.storeCleanupFailed(error))
+  }
+  /** Read-only access to documents inside one granted tree. */
+  private inner class SafFolder(private val root: Uri) : FolderOriginals.Provider {
+    private val resolver get() = requireNotNull(appContext.reactContext).contentResolver
+    override fun facts(documentId: String): FolderOriginals.Facts? {
+      val uri = DocumentsContract.buildDocumentUriUsingTree(root, documentId)
+      val cursor = try { resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null) }
+        catch (_: java.io.FileNotFoundException) { return null }
+        catch (_: IllegalArgumentException) { return null } // Some providers report a removed document this way.
+        catch (_: SecurityException) { throw IOException("source-unreadable") }
+      cursor?.use { if (!it.moveToFirst()) return null; return FolderOriginals.Facts(if (it.isNull(0)) -1 else it.getLong(0), if (it.isNull(1)) -1 else it.getLong(1)) }
+      throw IOException("source-unreadable")
+    }
+    override fun open(documentId: String): FolderOriginals.Opened {
+      val uri = DocumentsContract.buildDocumentUriUsingTree(root, documentId)
+      val descriptor = try { resolver.openFileDescriptor(uri, "r") }
+        catch (_: java.io.FileNotFoundException) { throw IOException("source-missing") }
+        catch (_: SecurityException) { throw IOException("source-unreadable") } ?: throw IOException("source-unreadable")
+      val input = ParcelFileDescriptor.AutoCloseInputStream(descriptor) // Closing it closes the descriptor.
+      try {
+        val fd = descriptor.fileDescriptor
+        val stat = Os.fstat(fd)
+        if (!OsConstants.S_ISREG(stat.st_mode)) return FolderOriginals.Opened(input, -1, null) // A pipe: no length or stamp.
+        // Change time cannot be set by a writer, so an in-place rewrite moves it even when the modification time is restored.
+        val stamp = FolderOriginals.Stamp {
+          try {
+            val now = Os.fstat(fd)
+            "${now.st_dev}:${now.st_ino}:${now.st_size}:${now.st_mtime}:${now.st_ctime}" +
+              if (Build.VERSION.SDK_INT >= 27) ":${now.st_mtim.tv_nsec}:${now.st_ctim.tv_nsec}" else ""
+          } catch (error: ErrnoException) { throw IOException("source-changed") }
+        }
+        return FolderOriginals.Opened(input, stat.st_size, stamp)
+      } catch (error: Exception) { runCatching { input.close() }; throw IOException("source-unreadable") }
+    }
   }
   /** Reads the selected document in place when the provider gives a seekable regular-file descriptor.
    * Otherwise copies it to private cache (hashed while copying). Second value is the copy to delete, if any. */
@@ -395,7 +484,9 @@ class SnarchiveSourcesModule : Module() {
     } catch (error: Exception) { DeleteOnClose.deleteOrSuppress(staged, error); throw error }
   }
 
-  private fun scan(root: Uri): Map<String, Any> {
+  /** Lists the granted tree breadth-first. With files set, also records each file's document ID and the provider's
+   * size and modification time (null columns become -1), for a folder preservation run. */
+  private fun scan(root: Uri, files: MutableMap<String, FolderOriginals.Entry>?): Map<String, Any> {
     require(root.scheme == "content" && DocumentsContract.isTreeUri(root))
     val resolver = requireNotNull(appContext.reactContext).contentResolver
     val pending = ArrayDeque<Pair<String, String>>()
@@ -406,7 +497,8 @@ class SnarchiveSourcesModule : Module() {
     var metadataBytes = 0
     var count = 0
     val columns = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-      DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
+      DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE,
+      DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED)
     while (pending.isNotEmpty()) {
       check(!cancelled.get())
       val (parentId, prefix) = pending.removeFirst()
@@ -425,6 +517,8 @@ class SnarchiveSourcesModule : Module() {
             pending.add(id to path)
           } else {
             val item = mutableMapOf<String, Any>("path" to path)
+            files?.put(path, FolderOriginals.Entry(id, FolderOriginals.Facts(
+              if (cursor.isNull(3)) -1 else cursor.getLong(3), if (cursor.isNull(4)) -1 else cursor.getLong(4))))
             if (name.equals("memories_history.json", ignoreCase = true)) {
               val uri = DocumentsContract.buildDocumentUriUsingTree(root, id)
               val bytes = ByteArrayOutputStream()
