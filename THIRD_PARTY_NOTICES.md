@@ -12,3 +12,5 @@ The npm dependency graph and licenses still need a complete release audit. This 
 Video viewing uses expo-video 58.0.11 (MIT), copyright 2015-present 650 Industries, Inc. See `licenses/expo-video-LICENSE.txt`. Android playback uses its AndroidX Media3 1.9.1 dependencies (Apache-2.0). The full transitive license audit remains open.
 
 Expo Video API reference: https://docs.expo.dev/versions/v58.0.0/sdk/video/
+
+Interface icons use @expo/vector-icons 15.1.1 (MIT), copyright 2015 Joel Arvidsson and 2020 650 Industries, with the Ionicons font (MIT, Ionic). See `licenses/expo-vector-icons-LICENSE.txt`. Only the Ionicons set is imported.

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useColorScheme, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
+import { Modal, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
@@ -16,11 +16,13 @@ import { LibraryBrowser } from './src/ui/LibraryBrowser';
 import { sourcePicker } from './src/platform/sourcePicker';
 import { BackupScreen } from './src/ui/BackupScreen';
 import { recoverBackups } from './src/platform/backup';
+import { Group, LargeTitle, Notice, Row, type Tone } from './src/ui/kit';
+import { space, type, useTheme } from './src/ui/theme';
 
 export default function App() {
-  const dark = useColorScheme() === 'dark';
-  const colors = dark ? { background: '#151817', text: '#f3f4ef', muted: '#b9c2bc', button: '#b9dec8', buttonText: '#162d20' }
-    : { background: '#f8f9f5', text: '#17261d', muted: '#506056', button: '#244f37', buttonText: '#ffffff' };
+  const t = useTheme();
+  const browserBack = useRef<(() => boolean) | null>(null);
+  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const [browsing, setBrowsing] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const closeBackup = useCallback(() => setBackingUp(false), []);
@@ -54,7 +56,7 @@ export default function App() {
         setLibrarySummary(summary);
         sourceIds.current = saved?.sourceIds ?? new Map();
         setPreview(saved?.preview ?? null);
-        setMessage(recoveredBackupStaging ? (saved ? en.restored : en.empty) : 'Library ready, but temporary backup files could not be cleared. Reopen the app before creating another backup.');
+        setMessage(recoveredBackupStaging ? (saved ? en.restored : en.empty) : en.stagingNotCleared);
         setReady(true);
       } catch {
         if (active) setMessage(en.loadFailed);
@@ -69,6 +71,7 @@ export default function App() {
     setBusy(true);
     stopped.current = false;
     setMessage(en.busy);
+    scroll.current?.scrollTo({ y: 0 });
     let checkpointing = false;
     try {
       const sources = kind === 'zip' ? await sourcePicker.selectArchives() : [await sourcePicker.selectDirectory()];
@@ -108,7 +111,7 @@ export default function App() {
     if (picking.current || !ready || !library.current) return;
     const source = preview?.sources.find(item => item.sourceId === sourceId);
     if (!source) return;
-    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.importPick);
+    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.importPick); scroll.current?.scrollTo({ y: 0 });
     try {
       const selected = await sourcePicker.selectArchives();
       if (stopped.current || !mounted.current) return;
@@ -129,65 +132,68 @@ export default function App() {
       picking.current = false; if (mounted.current) setBusy(false);
     }
   }
+  const tone = toneFor(message);
+  const closeBrowser = () => { if (!browserBack.current?.()) setBrowsing(false); };
+  const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
   if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={[styles.root, { backgroundColor: colors.background }]}>
-        <StatusBar style={dark ? 'light' : 'dark'} />
-        <Modal visible={browsing} animationType="slide" onRequestClose={() => setBrowsing(false)}>
-          {browsing && library.current && <LibraryBrowser store={library.current} onClose={() => setBrowsing(false)} />}
+      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
+        <StatusBar style={t.dark ? 'light' : 'dark'} />
+        <Modal visible={browsing} animationType="slide" onRequestClose={closeBrowser}>
+          {browsing && library.current && <LibraryBrowser store={library.current} onClose={() => setBrowsing(false)} backHandler={browserBack} />}
         </Modal>
-        <ScrollView contentContainerStyle={styles.content}>
-          <Text accessibilityRole="header" style={[styles.title, { color: colors.text }]}>{en.title}</Text>
-          <Text style={[styles.body, { color: colors.muted }]}>{en.promise}</Text>
-          <Pressable accessibilityRole="button" disabled={!ready || busy} accessibilityState={{ disabled: !ready || busy }} onPress={() => setBrowsing(true)} style={[styles.button, { backgroundColor: colors.button, opacity: !ready || busy ? 0.5 : 1 }]}>
-            <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.libraryBrowse}</Text>
-          </Pressable>
-          {Platform.OS === 'android' && <Pressable accessibilityRole="button" disabled={!ready || busy} accessibilityState={{ disabled: !ready || busy }} onPress={() => setBackingUp(true)} style={[styles.button, { backgroundColor: colors.button, opacity: !ready || busy ? 0.5 : 1 }]}>
-            <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>Back up library</Text>
-          </Pressable>}
-          <View style={styles.section}>
-            <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.heading}</Text>
-            <Text style={[styles.body, { color: colors.muted }]}>{en.explanation}</Text>
-            <Text style={[styles.body, { color: colors.muted }]}>{en.zipNote}</Text>
-            {(['zip', 'directory'] as const).map((kind) => (
-              <Pressable key={kind} accessibilityRole="button" accessibilityState={{ disabled: busy || !ready }} disabled={busy || !ready}
-                onPress={() => void pick(kind)} style={({ pressed }) => [styles.button, { backgroundColor: colors.button, opacity: pressed || busy || !ready ? 0.6 : 1 }]}>
-                <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{kind === 'zip' ? en.zip : en.folder}</Text>
-              </Pressable>
+        <ScrollView ref={scroll} contentContainerStyle={styles.content}>
+          <LargeTitle title={en.title} subtitle={en.promise} />
+          {tone && <Notice tone={tone} message={message}
+            action={busy && !saving ? { label: en.cancel, onPress: () => { stopped.current = true; cancelDirectoryScan(); setMessage(en.cancelled); } }
+              : !ready && message === en.loadFailed ? { label: en.retry, onPress: () => setLoadAttempt(value => value + 1) } : undefined} />}
+          {librarySummary && <View style={styles.section}>
+            <View style={[styles.hero, { backgroundColor: t.surface }]}>
+              <View accessible accessibilityLabel={`${librarySummary.memories} ${en.libraryHeadline(librarySummary.memories)}. ${en.libraryStats(librarySummary.objects, librarySummary.files)}`}>
+                <Text style={[type.figure, { color: t.text }]}>{librarySummary.memories.toLocaleString()}</Text>
+                <Text style={[type.headline, { color: t.text }]}>{en.libraryHeadline(librarySummary.memories)}</Text>
+                <Text style={[type.footnote, styles.heroStats, { color: t.secondary }]}>{en.libraryStats(librarySummary.objects, librarySummary.files)}</Text>
+              </View>
+              {librarySummary.unfinished > 0 && <Text style={[type.footnote, { color: t.warning }]}>{en.libraryUnfinished(librarySummary.unfinished)}</Text>}
+              {librarySummary.conflicts > 0 && <Text style={[type.footnote, { color: t.secondary }]}>{en.libraryConflicts(librarySummary.conflicts)}</Text>}
+            </View>
+            <Group inset={52}>
+              <Row icon="images-outline" title={en.libraryBrowse} detail={en.libraryBrowseDetail} disabled={!ready || busy} onPress={() => setBrowsing(true)} />
+              {Platform.OS === 'android' && <Row icon="archive-outline" title={en.backupOpen} detail={en.backupOpenDetail} disabled={!ready || busy} onPress={() => setBackingUp(true)} />}
+            </Group>
+          </View>}
+          <Group header={en.heading} footer={`${en.explanation} ${en.zipNote}`} inset={52}>
+            <Row icon="file-tray-full-outline" title={en.zip} detail={en.zipDetail} disabled={busy || !ready} onPress={() => void pick('zip')} />
+            <Row icon="folder-open-outline" title={en.folder} detail={en.folderDetail} disabled={busy || !ready} onPress={() => void pick('directory')} />
+          </Group>
+          {librarySummary && <Group header={en.originals} footer={Platform.OS === 'android' ? en.importNote : en.importIos} inset={52}>
+            {Platform.OS === 'android' && zipSources.map(([key, id]) => (
+              <Row key={key} icon="download-outline" title={en.importZip(id)} detail={en.importZipDetail} disabled={busy || !ready} onPress={() => void preserve(key.slice(4), id)} />
             ))}
-            <Text accessibilityLiveRegion="polite" style={[styles.body, { color: colors.text }]}>{message}</Text>
-            {!ready && message === en.loadFailed && <Pressable accessibilityRole="button" onPress={() => setLoadAttempt(value => value + 1)} style={[styles.button, { backgroundColor: colors.button }]}>
-              <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.retry}</Text>
-            </Pressable>}
-            {busy && !saving && <Pressable accessibilityRole="button" onPress={() => { stopped.current = true; cancelDirectoryScan(); setMessage(en.cancelled); }} style={[styles.button, { backgroundColor: colors.button }]}>
-              <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.cancel}</Text>
-            </Pressable>}
-            {preview && <Text style={[styles.body, { color: colors.muted }]}>{en.savedNote}</Text>}
-            {preview && <InventoryReport preview={preview} color={colors.text} />}
-            {librarySummary && <View style={styles.section}>
-              <Text accessibilityRole="header" style={[styles.heading, { color: colors.text }]}>{en.originals}</Text>
-              {busy && <Text style={[styles.body, { color: colors.text }]}>{message}</Text>}
-              <Text style={[styles.body, { color: colors.text }]}>{en.libraryCounts(librarySummary.files, librarySummary.objects, librarySummary.memories, librarySummary.unfinished, librarySummary.conflicts)}</Text>
-              <Text style={[styles.body, { color: colors.muted }]}>{en.importNote}</Text>
-              {Platform.OS === 'android' ? [...sourceIds.current].filter(([key]) => key.startsWith('zip:')).map(([key, id]) => (
-                <Pressable key={key} accessibilityRole="button" disabled={busy || !ready} accessibilityState={{ disabled: busy || !ready }}
-                  onPress={() => void preserve(key.slice(4), id)} style={[styles.button, { backgroundColor: colors.button, opacity: busy || !ready ? 0.6 : 1 }]}>
-                  <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>{en.importZip(id)}</Text>
-                </Pressable>
-              )) : <Text style={[styles.body, { color: colors.muted }]}>{en.importIos}</Text>}
-            </View>}
-            <Text style={[styles.body, { color: colors.muted }]}>{en.prototype}</Text>
-          </View>
+          </Group>}
+          {preview && <InventoryReport preview={preview} footer={`${en.previewNote} ${en.savedNote}`} />}
+          <Text style={[type.footnote, styles.footer, { color: t.secondary }]}>{en.prototype}</Text>
         </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
+
+/** Which kind of notice a status message is. Idle guidance needs no card. */
+function toneFor(message: string): Tone | null {
+  if ([en.loading, en.busy, en.scanning, en.saving, en.importPick].includes(message) || /copied or verified/.test(message)) return 'progress';
+  if (message === en.importComplete || /scanned and saved/.test(message)) return 'success';
+  if ([en.loadFailed, en.importCorrupt].includes(message)) return 'error';
+  if ([en.saveFailed, en.failed, en.zipFailed, en.zipIos, en.storage, en.nativeRequired, en.importOne, en.importChanged, en.importPaused, en.importStorage, en.stagingNotCleared].includes(message)) return 'warning';
+  if ([en.cancelled, en.pickerClosed].includes(message)) return 'info';
+  return null;
+}
 const styles = StyleSheet.create({
-  root: { flex: 1 }, content: { padding: 24, gap: 8, width: '100%', maxWidth: 640, alignSelf: 'center' },
-  title: { fontSize: 28, fontWeight: '600' }, heading: { fontSize: 22, fontWeight: '600' },
-  body: { fontSize: 16, lineHeight: 24 }, section: { marginTop: 48, gap: 20 },
-  button: { minHeight: 48, padding: 16, borderRadius: 10, alignItems: 'center' },
-  buttonLabel: { fontSize: 16, fontWeight: '600' },
+  root: { flex: 1 },
+  content: { paddingHorizontal: space.gutter, paddingBottom: 48, gap: space.section, width: '100%', maxWidth: 640, alignSelf: 'center' },
+  section: { gap: 12 },
+  hero: { borderRadius: space.radius, padding: 20, gap: 6 },
+  heroStats: { marginTop: 4 },
+  footer: { marginHorizontal: 4 },
 });

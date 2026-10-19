@@ -27,6 +27,7 @@
     "test:backup-writer": "node scripts/test-backup-writer.mjs"
   },
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "expo": "~58.0.13",
     "expo-dev-client": "~58.0.13",
     "expo-document-picker": "~58.0.4",

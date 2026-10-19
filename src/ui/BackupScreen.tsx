@@ -1,59 +1,64 @@
 import { useEffect, useRef, useState } from 'react';
-import { BackHandler, Pressable, ScrollView, StyleSheet, Text, useColorScheme } from 'react-native';
+import { BackHandler, ScrollView, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { cancelBackup, saveLibraryBackup } from '../platform/backup';
-import type { BackupStage } from '../backup/runBackup';
-const stages: Record<BackupStage, string> = {
-  snapshot: 'Preparing library records…', choose: 'Choose where to save the backup.',
-  save: 'Checking originals, writing the backup and checking the saved file…',
-};
+import { en } from '../i18n/en';
+import { BackButton, Button, Group, LargeTitle, Notice, Row, type Tone } from './kit';
+import { space, useTheme } from './theme';
+
+type Status = { tone: Tone; title?: string; message: string };
+
 export function BackupScreen({ onClose }: { onClose(): void }) {
-  const dark = useColorScheme() === 'dark';
-  const colors = { background: dark ? '#151817' : '#f8f9f5', text: dark ? '#f3f4ef' : '#17261d', button: dark ? '#b9dec8' : '#244f37', label: dark ? '#162d20' : '#ffffff' };
-  const [busy, setBusy] = useState(false), [message, setMessage] = useState('');
+  const t = useTheme();
+  const [busy, setBusy] = useState(false), [status, setStatus] = useState<Status | null>(null);
   const running = useRef(false), stopped = useRef(false), mounted = useRef(true);
-  const cancel = () => { if (running.current) { stopped.current = true; cancelBackup(); setMessage('Cancelling…'); } };
+  const cancel = () => { if (running.current) { stopped.current = true; cancelBackup(); setStatus({ tone: 'progress', message: en.backupCancelling }); } };
   useEffect(() => {
     mounted.current = true;
     const back = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (running.current) { stopped.current = true; cancelBackup(); setMessage('Cancelling…'); } else onClose();
+      if (running.current) cancel(); else onClose();
       return true;
     });
     return () => { back.remove(); mounted.current = false; if (running.current) { stopped.current = true; cancelBackup(); } };
   }, [onClose]);
   async function save() {
     if (running.current) return;
-    running.current = true; stopped.current = false; setBusy(true); setMessage(stages.snapshot);
+    running.current = true; stopped.current = false; setBusy(true); setStatus({ tone: 'progress', message: en.backupStage.snapshot });
     try {
-      const result = await saveLibraryBackup(() => stopped.current, stage => { if (mounted.current) setMessage(stages[stage]); });
-      if (mounted.current) setMessage(result === 'saved' ? 'Backup saved and checked. Restore is not available yet; keep your original exports.' : 'Backup cancelled.');
+      const result = await saveLibraryBackup(() => stopped.current, stage => { if (mounted.current) setStatus({ tone: 'progress', message: en.backupStage[stage] }); });
+      if (mounted.current) setStatus(result === 'saved' ? { tone: 'success', title: en.backupSaved, message: en.backupSavedDetail } : { tone: 'info', message: en.backupCancelled });
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
-      if (mounted.current) setMessage(code === 'backup-partial-remains' ? 'Saving did not finish. An incomplete file remains at the chosen location. Delete it before trying again.'
-        : code === 'backup-unverified' ? 'The backup was written, but the chosen location could not hand it back for checking (some cloud services are still uploading). It was kept, but it has not been checked. Do not rely on it as your only copy.'
-        : code === 'backup-saved-cleanup-failed' ? 'Backup saved and checked, but temporary files could not be cleared. Reopen the app before another backup.'
-        : code === 'backup-cleanup-failed' ? 'Temporary backup files could not be cleared. Reopen the app before trying again.'
-        : code === 'cancelled' ? 'Backup cancelled.'
-        : code === 'stored-object-corrupt' ? 'An original is missing or damaged. No backup was saved.'
-        : code === 'insufficient-storage' ? 'Not enough space to create the backup. Free some space and try again.'
-        : code === 'backup-schema-unsupported' ? 'This version of the app cannot back up this library yet. Update the app and try again.'
-        : code === 'native-build-required' ? 'Install the latest Android development build to save backups.'
-        : 'Backup could not be saved and checked. Your library has not changed. Please try again.');
+      if (!mounted.current) return;
+      if (code === 'cancelled') setStatus({ tone: 'info', message: en.backupCancelled });
+      // Saved and checked, but staging cleanup failed: the backup itself is good.
+      else if (code === 'backup-saved-cleanup-failed') setStatus({ tone: 'warning', title: en.backupSaved, message: en.backupErrors[code]! });
+      else setStatus({ tone: code === 'backup-unverified' || code === 'backup-partial-remains' ? 'warning' : 'error', message: en.backupErrors[code] ?? en.backupFailed });
     } finally { running.current = false; if (mounted.current) setBusy(false); }
   }
-  return <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
-    <StatusBar style={dark ? 'light' : 'dark'} />
+  return <SafeAreaView style={[styles.root, { backgroundColor: t.ground }]}>
+    <StatusBar style={t.dark ? 'light' : 'dark'} />
+    <View style={styles.topBar}><BackButton label={en.title} onPress={() => { if (running.current) cancel(); else onClose(); }} /></View>
     <ScrollView contentContainerStyle={styles.content}>
-      <Text accessibilityRole="header" style={[styles.title, { color: colors.text }]}>Back up your library</Text>
-      <Text style={[styles.text, { color: colors.text }]}>This ZIP is unencrypted. It contains private photos, videos, overlays and metadata, including any saved locations. Choose a location you trust.</Text>
-      <Text style={[styles.text, { color: colors.text }]}>Keep the app open while it works. The backup is written directly to the location you choose, which needs room for a copy of your library. Only files already preserved in Snarchive are included; pending files remain pending.</Text>
-      <Text style={[styles.text, { color: colors.text }]}>If the app is force-stopped while saving, an incomplete ZIP may remain at the destination. Delete that file before retrying. Restore is not available in this development build.</Text>
-      <Text accessibilityLiveRegion="polite" style={[styles.text, { color: colors.text }]}>{message}</Text>
-      <Pressable accessibilityRole="button" disabled={busy} accessibilityState={{ disabled: busy }} onPress={() => void save()} style={[styles.button, { backgroundColor: colors.button, opacity: busy ? 0.5 : 1 }]}><Text style={{ color: colors.label }}>Create and save backup</Text></Pressable>
-      {busy ? <Pressable accessibilityRole="button" onPress={cancel} style={[styles.button, { backgroundColor: colors.button }]}><Text style={{ color: colors.label }}>Cancel backup</Text></Pressable>
-        : <Pressable accessibilityRole="button" onPress={onClose} style={[styles.button, { backgroundColor: colors.button }]}><Text style={{ color: colors.label }}>Back</Text></Pressable>}
+      <LargeTitle title={en.backupTitle} subtitle={en.backupSubtitle} />
+      <Group footer={en.backupFooter} inset={52}>
+        <Row icon="lock-open-outline" title={en.backupUnencrypted} detail={en.backupUnencryptedDetail} tone="warning" />
+        <Row icon="folder-outline" title={en.backupDirect} detail={en.backupDirectDetail} />
+        <Row icon="time-outline" title={en.backupOpenApp} detail={en.backupOpenAppDetail} />
+      </Group>
+      {status && <Notice tone={status.tone} title={status.title} message={status.message} />}
     </ScrollView>
+    <View style={[styles.actions, { backgroundColor: t.ground }]}>
+      {busy ? <Button variant="secondary" label={en.backupCancel} onPress={cancel} />
+        : <Button icon="archive-outline" label={en.backupStart} onPress={() => void save()} />}
+    </View>
   </SafeAreaView>;
 }
-const styles = StyleSheet.create({ content: { padding: 24, gap: 20, maxWidth: 640, width: '100%', alignSelf: 'center' }, title: { fontSize: 24, fontWeight: '600' }, text: { fontSize: 16, lineHeight: 24 }, button: { minHeight: 48, padding: 16, borderRadius: 10, alignItems: 'center' } });
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  topBar: { minHeight: 52, justifyContent: 'center', paddingHorizontal: space.gutter - 4 },
+  content: { paddingHorizontal: space.gutter, paddingBottom: 24, gap: space.section, width: '100%', maxWidth: 640, alignSelf: 'center' },
+  actions: { paddingHorizontal: space.gutter, paddingTop: 12, paddingBottom: 16, width: '100%', maxWidth: 640, alignSelf: 'center' },
+});

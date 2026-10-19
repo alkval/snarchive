@@ -1,29 +1,38 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useRef, useState } from 'react';
-import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { ActivityIndicator, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import type { ImportStore, LibraryRow, LibraryCursor, ChronologicalRow } from '../storage/importStore';
-import { VideoPlayerView } from './VideoPlayerView';
-import { thumbnail, originalUri, originalVideo, type LocalVideo } from '../platform/originalImporter';
-import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import type { ImportStore, LibraryCursor, ChronologicalRow } from '../storage/importStore';
+import { thumbnail } from '../platform/originalImporter';
 import { pageThumbnails } from '../storage/pageThumbnails';
 import { defaultFilters, type LibraryFilters } from '../domain/libraryFilters';
 import { LibraryFilterForm } from './LibraryFilters';
-import { FavoriteButton } from './FavoriteButton';
+import { MemoryViewer, dayTitle, memoryDate } from './MemoryViewer';
+import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
+import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
 
-type Photo = { uri: string; size: ImageSize };
-function measure(uri: string): Promise<Photo> {
-  return new Promise((resolve, reject) => Image.getSize(uri, (width, height) => resolve({ uri, size: { width, height } }), reject));
+const COLUMNS = 3, GAP = 2;
+type Section = { key: string; title: string; count: number; data: ChronologicalRow[][] };
+
+/** Rows arrive newest first with unknown and conflicting dates last, so consecutive rows share a day. */
+function sections(rows: ChronologicalRow[]): Section[] {
+  const groups: { key: string; rows: ChronologicalRow[] }[] = [];
+  for (const row of rows) {
+    const key = row.dateConflict ? 'conflict' : row.day ?? row.instant?.slice(0, 10) ?? 'unknown';
+    const last = groups[groups.length - 1];
+    if (last && last.key === key) last.rows.push(row); else groups.push({ key, rows: [row] });
+  }
+  return groups.map(group => ({
+    key: group.key, count: group.rows.length,
+    title: group.key === 'conflict' ? en.sectionConflict : group.key === 'unknown' ? en.sectionUnknown : dayTitle(group.key),
+    data: Array.from({ length: Math.ceil(group.rows.length / COLUMNS) }, (_, index) => group.rows.slice(index * COLUMNS, index * COLUMNS + COLUMNS)),
+  }));
 }
-function dateLabel(row: LibraryRow): string {
-  return row.dateConflict ? en.libraryDateConflict : row.instant ? `${row.instant.replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')} ${en.libraryMetadata}`
-    : row.day ? `${row.day} ${en.libraryInferred}` : en.libraryUnknownDate;
-}
-function Button({ label, onPress, disabled = false }: { label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={[styles.button, disabled && { opacity: 0.5 }]}><Text style={styles.buttonText}>{label}</Text></Pressable>;
-}
-export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose: () => void }) {
+
+export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportStore; onClose: () => void; backHandler: MutableRefObject<(() => boolean) | null> }) {
+  const t = useTheme();
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [filters, setFilters] = useState<LibraryFilters>({ ...defaultFilters });
@@ -49,85 +58,102 @@ export function LibraryBrowser({ store, onClose }: { store: ImportStore; onClose
       (id, uri) => setPreviews(previous => ({ ...previous, [id]: uri })));
     return () => { stopped = true; };
   }, [rows, selected, store]);
-  return <SafeAreaView style={styles.root}>
-    <StatusBar style="light" />
-    <Button label={selected ? en.libraryBack : en.libraryClose} onPress={selected ? () => { setSelected(null); setRetry(value => value + 1); } : onClose} />
-    {selected ? <>
-      <FavoriteButton key={`favorite-${selected.id}`} id={selected.id} initial={selected.favorite === 1} store={store} saved={() => { if (active.current) { setCursor(null); setHistory([]); setRetry(value => value + 1); } }} />
-      <PhotoViewer key={selected.id} row={selected} store={store} />
-    </> : editingFilters ? <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)} apply={value => { setFilters(value); setCursor(null); setHistory([]); setEditingFilters(false); }} /> : <>
-      <Text accessibilityRole="header" style={styles.title}>{en.libraryTitle}</Text>
-      <Text style={styles.text}>{en.libraryOrder}</Text>
-      <Button label={en.filterSummary(filters.media, filters.favorites, filters.month)} onPress={() => setEditingFilters(true)} />
-      {loading ? <Text style={styles.text}>{en.libraryLoading}</Text> : failed ? <><Text style={styles.text}>{en.libraryFailed}</Text><Button label={en.libraryRetry} onPress={() => setRetry(value => value + 1)} /></> : <>
-        <FlatList key={JSON.stringify(cursor)} data={rows} keyExtractor={row => row.id} ListEmptyComponent={<Text style={styles.text}>{en.filterEmpty}</Text>}
-          renderItem={({ item }) => <Pressable accessibilityRole="button" onPress={() => setSelected(item)} style={styles.row}>
-            <View style={styles.thumbnail}>
-              {previews[item.id] ? <Image accessible={false} source={{ uri: previews[item.id]! }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => setPreviews(previous => ({ ...previous, [item.id]: null }))} />
-                : <Text style={styles.id}>{previews[item.id] === undefined ? en.thumbnailLoading : en.thumbnailMissing}</Text>}
+  const closeViewer = () => { setSelected(null); setRetry(value => value + 1); };
+  // System Back steps out of the viewer or filters before it leaves the library.
+  useEffect(() => {
+    backHandler.current = () => {
+      if (selected) { closeViewer(); return true; }
+      if (editingFilters) { setEditingFilters(false); return true; }
+      return false;
+    };
+    return () => { backHandler.current = null; };
+  });
+  const grouped = useMemo(() => sections(rows), [rows]);
+  const chips = en.filterChips(filters.media, filters.favorites, filters.month);
+
+  if (selected) return <MemoryViewer key={selected.id} row={selected} store={store} onBack={closeViewer}
+    onFavoriteSaved={() => { if (active.current) { setCursor(null); setHistory([]); } }} />;
+  if (editingFilters) return <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)}
+    apply={value => { setFilters(value); setCursor(null); setHistory([]); setEditingFilters(false); }} />;
+
+  const header = <View style={styles.header}>
+    <LargeTitle title={en.libraryTitle} subtitle={en.libraryOrder} />
+    {chips.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
+      {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
+    </Pressable>}
+  </View>;
+  const empty = loading ? <View style={styles.centered}><ActivityIndicator color={t.secondary} accessibilityLabel={en.libraryLoading} /></View>
+    : failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => setRetry(value => value + 1) }} /></View>
+    : <View style={styles.centered}>
+      <Ionicons name={chips.length ? 'funnel-outline' : 'images-outline'} size={40} color={t.secondary} />
+      <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
+    </View>;
+  const footer = rows.length > 0 ? <View style={styles.footer}>
+    {(history.length > 0 || next) && <View style={styles.pager}>
+      <View style={styles.pagerButton}><Button variant="secondary" icon="chevron-back" label={en.libraryPrevious} disabled={!history.length}
+        onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} /></View>
+      <Text style={[type.footnote, { color: t.secondary }]}>{en.libraryPage(history.length + 1)}</Text>
+      <View style={styles.pagerButton}><Button variant="secondary" label={en.libraryNext} disabled={!next}
+        onPress={() => { setHistory([...history, cursor]); const last = rows[rows.length - 1]!; setCursor({ day: last.sortDay, time: last.sortTime, id: last.id }); }} /></View>
+    </View>}
+    <Text style={[type.footnote, { color: t.secondary, textAlign: 'center' }]}>{en.libraryPreviewNote}</Text>
+  </View> : undefined;
+
+  return <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
+    <StatusBar style={t.dark ? 'light' : 'dark'} />
+    <View style={styles.topBar}>
+      <BackButton label={en.libraryClose} onPress={onClose} />
+      <Pressable accessibilityRole="button" accessibilityLabel={en.filterButton} onPress={() => setEditingFilters(true)} hitSlop={8}
+        style={({ pressed }) => [styles.filterButton, { opacity: pressed ? 0.5 : 1 }]}>
+        <Ionicons name={chips.length ? 'options' : 'options-outline'} size={22} color={t.accent} />
+        <Text style={[type.body, { color: t.accent }]}>{en.filterButton}</Text>
+      </Pressable>
+    </View>
+    <SectionList key={JSON.stringify(cursor)} sections={loading || failed ? [] : grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
+      ListHeaderComponent={header} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
+      renderSectionHeader={({ section }) => <View style={[styles.sectionHeader, { backgroundColor: t.ground }]} accessibilityRole="header">
+        <Text style={[type.headline, { color: t.text }]}>{section.title}</Text>
+        <Text style={[type.footnote, { color: t.secondary, fontVariant: ['tabular-nums'] }]}>{section.count}</Text>
+      </View>}
+      renderItem={({ item }) => <View style={styles.tileRow}>
+        {item.map(row => {
+          const date = memoryDate(row);
+          const uri = previews[row.id];
+          return <Pressable key={row.id} accessibilityRole="button" accessibilityLabel={en.libraryTile(date.title, row.videos > 0, row.favorite === 1)}
+            onPress={() => setSelected(row)} style={({ pressed }) => [styles.tile, { backgroundColor: t.raised, opacity: pressed ? 0.7 : 1 }]}>
+            {uri ? <FadeImage accessible={false} source={{ uri }} resizeMode="cover" style={StyleSheet.absoluteFill}
+              onError={() => setPreviews(previous => ({ ...previous, [row.id]: null }))} />
+              : uri === null ? <View style={styles.missing}><Ionicons name="image-outline" size={24} color={t.secondary} accessibilityLabel={en.thumbnailMissing} /></View> : null}
+            <View style={styles.badges} pointerEvents="none">
+              {row.videos > 0 ? <Ionicons name="videocam" size={15} color="#FFFFFF" style={styles.badge} /> : <View />}
+              {row.favorite === 1 && <Ionicons name="heart" size={15} color="#FFFFFF" style={styles.badge} />}
             </View>
-            <View style={styles.rowText}><Text style={styles.text}>{dateLabel(item)}</Text><Text style={styles.id}>{item.favorite ? `${en.favoriteLabel} · ${item.id}` : item.id}</Text>
-            <Text style={styles.text}>{en.libraryKinds(item.photos, item.videos, item.overlays)}</Text></View>
-          </Pressable>} />
-        <View style={styles.navigation}><Button label={en.libraryPrevious} disabled={!history.length} onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} />
-          <Button label={en.libraryNext} disabled={!next} onPress={() => { setHistory([...history, cursor]); const last = rows[rows.length - 1]!; setCursor({ day: last.sortDay, time: last.sortTime, id: last.id }); }} /></View>
-      </>}
-    </>}
+          </Pressable>;
+        })}
+        {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
+      </View>} />
   </SafeAreaView>;
 }
-function PhotoViewer({ row, store }: { row: LibraryRow; store: ImportStore }) {
-  const [video, setVideo] = useState<LocalVideo | null>(null);
-  const [base, setBase] = useState<Photo | null>(null);
-  const [overlay, setOverlay] = useState<Photo | null>(null);
-  const [showOverlay, setShowOverlay] = useState(false);
-  const [status, setStatus] = useState(en.libraryLoading);
-  const [overlayStatus, setOverlayStatus] = useState('');
-  useEffect(() => {
-    let active = true;
-    void (async () => {
-      if (row.photos + row.videos !== 1) { setStatus(en.libraryVariants); return; }
-      try {
-        const objects = await store.objects(row.id);
-        const object = objects.find(item => item.role === (row.videos ? 'video' : 'photo'));
-        if (!object) throw new Error('missing-object');
-        if (row.videos) {
-          const local = await originalVideo(object);
-          if (active) { setVideo(local); setStatus(''); }
-          return;
-        }
-        const photo = await measure(await originalUri(object));
-        if (!active) return;
-        setBase(photo); setStatus('');
-        if (row.overlays > 1) { setOverlayStatus(en.libraryOverlayVariants); return; }
-        const layer = objects.find(item => item.role === 'overlay');
-        if (!layer) return;
-        try {
-          const image = await measure(await originalUri(layer));
-          if (!active) return;
-          if (!matchingAspect(photo.size, image.size)) { setOverlayStatus(en.libraryOverlaySize); return; }
-          setOverlay(image);
-        } catch { if (active) setOverlayStatus(en.libraryOverlayFailed); }
-      } catch { if (active) setStatus(row.videos ? en.libraryVideoFailed : en.libraryPhotoFailed); }
-    })();
-    return () => { active = false; };
-  }, [row, store]);
-  return <View style={styles.viewer}>
-    <Text style={styles.text}>{dateLabel(row)}</Text><Text style={styles.id}>{row.id}</Text>
-    {!!status && <Text accessibilityLiveRegion="polite" style={styles.text}>{status}</Text>}
-    {video && <VideoPlayerView video={video} row={row} store={store} />}
-    {base && <View style={styles.canvas}>
-      <Image accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
-      {overlay && showOverlay && <Image accessible={false} source={{ uri: overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}
-    </View>}
-    {!!overlayStatus && <Text style={styles.text}>{overlayStatus}</Text>}
-    {overlay && <Button label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />}
-  </View>;
-}
+
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#151817', padding: 16, gap: 12 },
-  title: { fontSize: 24, fontWeight: '600', color: '#f3f4ef' }, text: { fontSize: 16, lineHeight: 23, color: '#f3f4ef' },
-  id: { fontSize: 13, color: '#b9c2bc' }, thumbnail: { width: 96, height: 96, backgroundColor: '#000000', alignItems: 'center', justifyContent: 'center', padding: 6 }, rowText: { flex: 1, gap: 6 },
-  row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 18, gap: 12, borderBottomWidth: 1, borderBottomColor: '#506056' },
-  button: { padding: 14, minHeight: 48, backgroundColor: '#b9dec8', borderRadius: 8, alignItems: 'center' }, buttonText: { color: '#162d20', fontSize: 16, fontWeight: '600' },
-  navigation: { flexDirection: 'row', justifyContent: 'space-between' }, viewer: { flex: 1, gap: 12 }, canvas: { flex: 1, backgroundColor: '#000000' },
+  root: { flex: 1 },
+  topBar: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.gutter - 4 },
+  filterButton: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, paddingLeft: 8 },
+  header: { paddingHorizontal: space.gutter, paddingBottom: 12, gap: 12 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
+  sectionHeader: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', paddingHorizontal: space.gutter, paddingTop: 16, paddingBottom: 8 },
+  tileRow: { flexDirection: 'row', gap: GAP, marginBottom: GAP },
+  // Tiles share the row exactly; a short last row keeps their size with spacers.
+  tile: { flex: 1, aspectRatio: 1 },
+  spacer: { flex: 1 },
+  missing: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center' },
+  badges: { position: 'absolute', left: 6, right: 6, bottom: 5, flexDirection: 'row', justifyContent: 'space-between' },
+  badge: { textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 4, textShadowOffset: { width: 0, height: 1 } },
+  centered: { alignItems: 'center', justifyContent: 'center', paddingVertical: 96, gap: 12, paddingHorizontal: space.gutter },
+  emptyText: { textAlign: 'center' },
+  pad: { paddingHorizontal: space.gutter },
+  footer: { paddingHorizontal: space.gutter, paddingTop: 24, paddingBottom: 48, gap: 16 },
+  pager: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  pagerButton: { flex: 1 },
 });
