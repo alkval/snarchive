@@ -1,7 +1,6 @@
-import type { ImportStore, Receipt } from '../storage/importStore.ts';
-import { encodePreview, decodePreview } from '../storage/previewCodec.ts';
+import { normalizeSource, type ImportStore, type Receipt } from '../storage/importStore.ts';
 import { folderInventoryHash } from './sourceEvidence.ts';
-import { inventoryFromSnapshot, mergeSourceInventories, type DirectorySnapshot } from './sourceInventory.ts';
+import { inventoryFromSnapshot, type DirectorySnapshot } from './sourceInventory.ts';
 
 /** This run's scan of the reselected folder; sizes[i] is the provider-reported length of entries[i], or -1. */
 export type FolderScan = DirectorySnapshot & { sizes: number[] };
@@ -54,12 +53,10 @@ export async function runFolderImport(store: ImportStore, copier: FolderCopier, 
     await store.state(hash, 'running');
     const scan = await copier.open(uri); opened = true;
     const sizes = new Map(scan.entries.map((entry, index) => [entry.path, scan.sizes[index] ?? -1]));
-    // The same label as the plan, so the comparison is of evidence only; the hash ignores the label anyway.
+    // The same label as the plan, so the comparison is of evidence only; the hash ignores the label and the provider's
+    // listing order (folderInventoryHash compares the canonical form).
     let current;
-    try {
-      const source = inventoryFromSnapshot(scan, plan.sourceId);
-      current = decodePreview(encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([[`folder:${hash}`, plan.sourceId]]) })).preview.sources[0]!;
-    } catch { throw new FolderStepError('folder-changed'); }
+    try { current = normalizeSource(inventoryFromSnapshot(scan, plan.sourceId)); } catch { throw new FolderStepError('folder-changed'); }
     if (folderInventoryHash(current) !== hash) throw new FolderStepError('folder-changed');
     const pending: string[] = [];
     for (let ordinal = -1; ;) { const item = await store.item(hash, ordinal); if (!item) break; if (item.state === 'pending') pending.push(item.relative_path); ordinal = item.ordinal; }

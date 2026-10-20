@@ -2,10 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { ImportStore, type Receipt } from '../src/storage/importStore.ts';
+import { ImportStore, normalizeSource, type Receipt } from '../src/storage/importStore.ts';
 import { inventoryFromSnapshot, type DirectorySnapshot } from '../src/import/sourceInventory.ts';
 import { runFolderImport, FolderStepError, FolderImportFailure, type FolderCopier, type FolderScan } from '../src/import/runFolderImport.ts';
-import { folderInventoryHash, sourceEvidence } from '../src/import/sourceEvidence.ts';
+import { canonicalFolderSource, folderInventoryHash, isCanonicalFolderSource, listedFolderHash, sourceEvidence } from '../src/import/sourceEvidence.ts';
 import { sha256Hex } from '../src/domain/sha256.ts';
 import { writeBackupSnapshot } from '../src/backup/snapshot.ts';
 import { BackupManifestValidator } from '../src/backup/manifest.ts';
@@ -32,12 +32,14 @@ const metadata = (rows: { date: string; mid: string; location?: string }[]) => J
   Date: row.date, 'Media Type': 'Image', 'Download Link': `https://synthetic.invalid/download?mid=${row.mid}`, Location: row.location ?? 'Latitude, Longitude: 10, 20' })) });
 
 /** A synthetic extracted folder: media files with their content, plus optional memories_history.json. */
-type Folder = { files: Map<string, string>; metadataText?: string };
+type Folder = { files: Map<string, string>; metadataText?: string; extra?: DirectorySnapshot['entries'] };
 const folder = (files: Record<string, string>, metadataText?: string): Folder => ({ files: new Map(Object.entries(files)), metadataText });
 function snapshot(dir: Folder): DirectorySnapshot {
   const entries: DirectorySnapshot['entries'] = [...dir.files.keys()].map(path => ({ path }));
   if (dir.metadataText !== undefined) entries.push({ path: 'json/memories_history.json', metadataText: dir.metadataText });
-  return { entries, metadataBytes: dir.metadataText?.length ?? 0, visitedEntries: entries.length + 1 };
+  entries.push(...dir.extra ?? []); // Further metadata files and unrelated entries.
+  const metadataBytes = entries.reduce((n, entry) => n + (entry.metadataText?.length ?? 0), 0);
+  return { entries, metadataBytes, visitedEntries: entries.length + 1 };
 }
 const receiptFor = (content: string): Receipt => {
   const sha256 = createHash('sha256').update(content).digest('hex');
@@ -49,10 +51,12 @@ class Copier implements FolderCopier {
   faults = new Map<string, { code: string; storeCleanupFailed?: boolean }>();
   openFails: string | null = null; prepareFails: string | null = null; confirmFails = false; cancelAfter = 0; cancelled = false;
   dir: Folder; sizes = new Map<string, number>();
+  /** How the provider lists the folder this time (the default is the order the fixture was written in). */
+  order: (entries: DirectorySnapshot['entries']) => DirectorySnapshot['entries'] = entries => entries;
   constructor(dir: Folder) { this.dir = dir; }
   async open(_uri: string): Promise<FolderScan> {
     this.opened++; if (this.openFails) throw new FolderStepError(this.openFails);
-    const scan = snapshot(this.dir);
+    const listed = snapshot(this.dir), scan = { ...listed, entries: this.order(listed.entries) };
     return { ...scan, sizes: scan.entries.map(entry => this.sizes.get(entry.path) ?? (this.dir.files.has(entry.path) ? Buffer.byteLength(this.dir.files.get(entry.path)!) : -1)) };
   }
   async prepare() { if (this.prepareFails) throw new FolderStepError(this.prepareFails); }
@@ -211,7 +215,7 @@ test('folder identity ignores the device label and nothing else', () => {
   const normalize = (dir: Folder, label: string) => decodePreview(encodePreview({ preview: { sources: [inventoryFromSnapshot(snapshot(dir), label)], inventory: null as never, otherFiles: 0 }, sourceIds: new Map([[`folder:${'0'.repeat(64)}`, label]]) })).preview.sources[0]!;
   const a = normalize(EXPORT, 'source-1'), b = normalize(EXPORT, 'source-6');
   assert.equal(folderInventoryHash(a), folderInventoryHash(b));
-  assert.equal(folderInventoryHash(a), sha256Hex(`snarchive-folder-inventory\n1\n${sourceEvidence(a)}`));
+  assert.equal(folderInventoryHash(a), sha256Hex(`snarchive-folder-inventory\n1\n${sourceEvidence(canonicalFolderSource(a))}`));
   const moved = folder(Object.fromEntries([...EXPORT.files].map(([path, content]) => [path.replace('memories/', 'other/'), content])), EXPORT.metadataText);
   assert.notEqual(folderInventoryHash(normalize(moved, 'source-1')), folderInventoryHash(a));
 });
@@ -282,16 +286,204 @@ test('a library without folder jobs still writes version 1, and version 1 backup
   assert.equal((target.db.raw.prepare('SELECT kind FROM import_jobs').get() as { kind: string }).kind, 'zip');
 });
 
-test('schema 3 libraries migrate to 4: existing jobs become ZIP jobs and folder jobs can be added', async t => {
+test('schema 3 libraries migrate to 5: existing jobs become ZIP jobs and folder jobs can be added', async t => {
   const { db, store } = await library(t); const zip = '0'.repeat(64);
   await store.plan(zip, inventoryFromSnapshot({ entries: [{ path: '2026-02-05_one-main.jpg' }], metadataBytes: 0, visitedEntries: 1 }, 'source-1'));
   await store.commit(zip, 0, receiptFor('photo one'));
   db.raw.exec('ALTER TABLE import_jobs DROP COLUMN kind; PRAGMA user_version=3;');
   await store.initialize(); await store.initialize();
-  assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
+  assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
   assert.equal((db.raw.prepare('SELECT kind FROM import_jobs').get() as { kind: string }).kind, 'zip');
   assert.throws(() => db.raw.exec("UPDATE import_jobs SET kind='other'"));
   const hash = await plan(store, EXPORT); await run(store, new Copier(EXPORT), hash);
   assert.equal((await store.summary()).memories, 3);
   await assert.rejects(store.plan(hash, inventoryFromSnapshot(snapshot(EXPORT), 'source-3')), 'a folder key is never reused as a ZIP job');
+});
+
+// Provider listing order (section 21 review). A folder's identity, plan order and metadata IDs must not depend on it.
+/** A seeded permutation, so a failure reproduces. */
+function shuffled<T>(items: readonly T[], seed: number): T[] {
+  const out = [...items]; let state = seed;
+  for (let i = out.length - 1; i > 0; i--) { state = (state * 1103515245 + 12345) % 2147483648; const j = state % (i + 1); [out[i], out[j]] = [out[j]!, out[i]!]; }
+  return out;
+}
+/** Two metadata files in nested folders, unrelated entries and media, so metadata sits among other entries. */
+const NESTED = folder({
+  'part-a/memories/2026-02-05_one-main.jpg': 'photo one', 'part-a/memories/2026-02-05_one-overlay.png': 'overlay one',
+  'part-b/memories/2026-02-06_two-main.mp4': 'video two', 'part-b/memories/2026-02-07_three-main.jpg': 'photo three',
+}, undefined);
+NESTED.extra = [
+  { path: 'part-a/json/memories_history.json', metadataText: metadata([{ date: '2026-02-05 12:00:00 UTC', mid: 'one' }]) },
+  { path: 'part-b/json/memories_history.json', metadataText: metadata([{ date: '2026-02-06 08:00:00 UTC', mid: 'two', location: 'Latitude, Longitude: 59.9, 10.7' }]) },
+  { path: 'part-a/index.html' }, { path: 'part-b/notes.txt' },
+];
+const reversed = (entries: DirectorySnapshot['entries']) => [...entries].reverse();
+const listings: [string, (entries: DirectorySnapshot['entries']) => DirectorySnapshot['entries']][] = [
+  ['reversed', reversed], ['shuffled 1', e => shuffled(e, 1)], ['shuffled 7', e => shuffled(e, 7)], ['shuffled 42', e => shuffled(e, 42)],
+  ['metadata first', e => [...e.filter(x => x.metadataText !== undefined), ...e.filter(x => x.metadataText === undefined)]],
+  ['metadata last, swapped', e => [...e.filter(x => x.metadataText === undefined), ...e.filter(x => x.metadataText !== undefined).reverse()]],
+  ['unrelated between metadata', e => { const meta = e.filter(x => x.metadataText !== undefined), rest = e.filter(x => x.metadataText === undefined);
+    return [meta[1]!, ...rest.filter(x => !/\.(jpg|mp4|png)$/.test(x.path)), meta[0]!, ...rest.filter(x => /\.(jpg|mp4|png)$/.test(x.path)).reverse()]; }],
+];
+const scanned = (dir: Folder, order: (entries: DirectorySnapshot['entries']) => DirectorySnapshot['entries'], label = 'source-1') => {
+  const listed = snapshot(dir); return inventoryFromSnapshot({ ...listed, entries: order(listed.entries) }, label);
+};
+
+test('any listing order, including reversed and shuffled, plans the same canonical job with the same metadata IDs', async t => {
+  const { db, store } = await library(t); const hash = await plan(store, NESTED); const first = await store.folderPlan(hash);
+  assert.ok(isCanonicalFolderSource(first!));
+  assert.deepEqual(first!.files.map(file => file.relativePath), [...NESTED.files.keys()].sort());
+  assert.deepEqual(first!.metadata.map(result => result.records[0]!.sourceId), ['source-1:metadata-0', 'source-1:metadata-1']);
+  for (const [name, order] of listings) {
+    const source = scanned(NESTED, order, 'source-3');
+    assert.equal(folderInventoryHash(normalizeSource(source)), hash, name);
+    assert.equal(await store.planFolder(source), hash, name);
+  }
+  assert.equal((db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 1, 'no duplicate job');
+  assert.equal((await store.folderPlan(hash))!.sourceId, 'source-1', 'the first plan is kept');
+});
+
+test('a job partly preserved from one listing resumes from reversed and shuffled listings without duplicates', async t => {
+  const { db, store } = await library(t); const hash = await plan(store, NESTED);
+  const first = new Copier(NESTED); first.faults.set('part-b/memories/2026-02-06_two-main.mp4', { code: 'source-unreadable' });
+  assert.equal((await run(store, first, hash)).complete, false);
+  for (const [name, order] of listings) {
+    const copier = new Copier(NESTED); copier.order = order; for (const [sha, bytes] of first.stored) copier.stored.set(sha, bytes);
+    const outcome = await run(store, copier, hash);
+    assert.equal(outcome.complete, true, name);
+    for (const [sha, bytes] of copier.stored) first.stored.set(sha, bytes);
+  }
+  assert.deepEqual(await store.summary(), { files: 4, objects: 4, memories: 3, unfinished: 0, conflicts: 0 });
+  assert.equal((db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 1);
+});
+
+test('genuine changes are still refused before copying, whatever the listing order', async t => {
+  const { store } = await library(t); const hash = await plan(store, NESTED);
+  const variants: [string, Folder][] = [];
+  const edit = (name: string, change: (dir: Folder) => void) => {
+    const dir: Folder = { files: new Map(NESTED.files), extra: NESTED.extra!.map(entry => ({ ...entry })) }; change(dir); variants.push([name, dir]);
+  };
+  edit('media added', dir => dir.files.set('part-b/memories/2026-02-08_four-main.jpg', 'new'));
+  edit('media removed', dir => dir.files.delete('part-a/memories/2026-02-05_one-overlay.png'));
+  edit('media renamed', dir => { dir.files.delete('part-b/memories/2026-02-07_three-main.jpg'); dir.files.set('part-b/memories/2026-02-07_tree-main.jpg', 'photo three'); });
+  edit('media moved', dir => { dir.files.delete('part-b/memories/2026-02-07_three-main.jpg'); dir.files.set('part-a/memories/2026-02-07_three-main.jpg', 'photo three'); });
+  edit('metadata edited', dir => { dir.extra![1]!.metadataText = metadata([{ date: '2026-02-06 08:00:01 UTC', mid: 'two', location: 'Latitude, Longitude: 59.9, 10.7' }]); });
+  edit('metadata diagnostic', dir => { dir.extra![0]!.metadataText = '{"Saved Media": ['; });
+  edit('metadata removed', dir => { dir.extra!.splice(1, 1); });
+  edit('metadata added', dir => { dir.extra!.push({ path: 'part-c/json/memories_history.json', metadataText: metadata([{ date: '2026-03-01 08:00:00 UTC', mid: 'later' }]) }); });
+  edit('unrelated file added', dir => { dir.extra!.push({ path: 'part-b/readme.txt' }); });
+  for (const [name, dir] of variants) {
+    for (const order of [reversed, (e: DirectorySnapshot['entries']) => shuffled(e, 3)]) {
+      const copier = new Copier(dir); copier.order = order;
+      await assert.rejects(run(store, copier, hash), (error: Error) => error instanceof FolderImportFailure && error.message === 'folder-changed', name);
+      assert.equal(copier.preserved.length, 0, name);
+    }
+    assert.notEqual(await store.planFolder(scanned(dir, reversed)), hash, name);
+  }
+});
+
+test('a restored folder job resumes from a differently ordered listing under another label', async t => {
+  const source = await library(t); const hash = await plan(source.store, NESTED);
+  const copier = new Copier(NESTED); copier.faults.set('part-a/memories/2026-02-05_one-overlay.png', { code: 'source-changed' });
+  await run(source.store, copier, hash);
+  const text = await manifest(source.db);
+  const target = await library(t); await restoreInto(target.db, text);
+  assert.equal(await target.store.planFolder(scanned(NESTED, e => shuffled(e, 9), 'source-6')), hash, 'a new scan finds the restored job');
+  const resume = new Copier(NESTED); resume.order = reversed; for (const [sha, bytes] of copier.stored) resume.stored.set(sha, bytes);
+  const outcome = await run(target.store, resume, hash);
+  assert.deepEqual([outcome.preserved, outcome.confirmed, outcome.complete], [1, 3, true]);
+  assert.equal((target.db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 1);
+});
+
+/** A folder job as schema 4 (commit 307eda2) planned it: evidence in listing order, keyed by its listed-order hash. */
+async function legacyJob(db: DB, order: (entries: DirectorySnapshot['entries']) => DirectorySnapshot['entries'], label = 'source-1') {
+  const listed = normalizeSource(scanned(NESTED, order, label));
+  assert.ok(!isCanonicalFolderSource(listed), 'the fixture listing is not already canonical');
+  const key = listedFolderHash(listed);
+  const planJson = encodePreview({ preview: { sources: [listed], inventory: null as never, otherFiles: 0 }, sourceIds: new Map([[`folder:${key}`, label]]) });
+  db.raw.prepare("INSERT INTO import_jobs(hash,state,plan_json,kind) VALUES (?,'planned',?,'folder')").run(key, planJson);
+  for (const [ordinal, file] of listed.files.entries()) {
+    db.raw.prepare('INSERT INTO import_items(job_hash,ordinal,relative_path,memory_id,role,date_json) VALUES (?,?,?,?,?,?)').run(key, ordinal, file.relativePath, file.memorySourceId, file.role, JSON.stringify(file.captureDate));
+  }
+  return { key, listed };
+}
+const ordinalOf = (listed: { files: { relativePath: string }[] }, path: string) => listed.files.findIndex(file => file.relativePath === path);
+
+test('schema 5 re-keys a listing-order folder job to its canonical key, keeping each file with its state and object', async t => {
+  const { db, store } = await library(t);
+  const legacy = await legacyJob(db, reversed);
+  const done = ['part-b/memories/2026-02-06_two-main.mp4', 'part-a/memories/2026-02-05_one-main.jpg'];
+  for (const path of done) await store.commit(legacy.key, ordinalOf(legacy.listed, path), receiptFor(NESTED.files.get(path)!));
+  const before = await dump(db);
+  db.raw.exec('PRAGMA user_version=4;'); await store.initialize(); await store.initialize();
+  const canonicalKey = folderInventoryHash(legacy.listed); assert.notEqual(canonicalKey, legacy.key);
+  const after = await dump(db);
+  assert.deepEqual(after.jobs.map(job => (job as { hash: string }).hash), [canonicalKey]);
+  const items = after.items as { ordinal: number; relative_path: string; state: string; object_hash: string | null; job_hash: string }[];
+  assert.deepEqual(items.map(item => item.relative_path), [...NESTED.files.keys()].sort(), 'ordinals follow canonical order');
+  for (const item of items) {
+    assert.equal(item.state, done.includes(item.relative_path) ? 'done' : 'pending', item.relative_path);
+    if (item.state === 'done') assert.equal(item.object_hash, receiptFor(NESTED.files.get(item.relative_path)!).sha256, 'object stays with its path');
+  }
+  assert.deepEqual([after.objects, after.memories, after.associations, after.dates], [before.objects, before.memories, before.associations, before.dates]);
+  assert.ok(isCanonicalFolderSource((await store.folderPlan(canonicalKey))!));
+  // The re-keyed job resumes from any listing and exports a canonical record.
+  const copier = new Copier(NESTED); copier.order = e => shuffled(e, 5);
+  for (const path of done) { const r = receiptFor(NESTED.files.get(path)!); copier.stored.set(r.sha256, r.bytes); }
+  assert.deepEqual([(await run(store, copier, canonicalKey)).preserved, (await store.summary()).files], [2, 4]);
+  const text = await manifest(db); assert.ok(text.includes(`"inventorySha256":"${canonicalKey}"`));
+});
+
+test('schema 5 merges two listing-order jobs for the same folder where they agree, and keeps conflicting work', async t => {
+  const agree = await library(t);
+  const a = await legacyJob(agree.db, reversed), b = await legacyJob(agree.db, e => shuffled(e, 11));
+  assert.notEqual(a.key, b.key);
+  const one = 'part-a/memories/2026-02-05_one-main.jpg', two = 'part-b/memories/2026-02-06_two-main.mp4';
+  await agree.store.commit(a.key, ordinalOf(a.listed, one), receiptFor('photo one'));
+  await agree.store.commit(b.key, ordinalOf(b.listed, two), receiptFor('video two'));
+  agree.db.raw.exec('PRAGMA user_version=4;'); await agree.store.initialize();
+  const jobs = agree.db.raw.prepare('SELECT hash,state FROM import_jobs').all() as { hash: string; state: string }[];
+  assert.deepEqual(jobs.map(job => [job.hash, job.state]), [[folderInventoryHash(a.listed), 'paused']]);
+  assert.equal((await agree.store.summary()).files, 2, 'both files stay done, once');
+  await manifest(agree.db); // Still exportable.
+
+  const conflict = await library(t);
+  const c = await legacyJob(conflict.db, reversed), d = await legacyJob(conflict.db, e => shuffled(e, 11));
+  await conflict.store.commit(c.key, ordinalOf(c.listed, one), receiptFor('photo one'));
+  await conflict.store.commit(d.key, ordinalOf(d.listed, one), receiptFor('photo one, changed later'));
+  conflict.db.raw.exec('PRAGMA user_version=4;'); await conflict.store.initialize();
+  assert.equal((conflict.db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 2, 'conflicting work is kept, not merged');
+  assert.equal((await conflict.store.summary()).files, 2);
+  const text = await manifest(conflict.db); validate(text); // Both remain exportable and valid.
+  const empty = await library(t); const before = await dump(empty.db);
+  await assert.rejects(restoreInto(empty.db, text), (error: Error) => error.message === 'restore-conflict', 'both map to one canonical job');
+  assert.deepEqual(await dump(empty.db), before);
+});
+
+test('a version-2 backup written in listing order (307eda2) verifies, restores under the canonical key, and maps observations by path', async t => {
+  const source = await library(t); const legacy = await legacyJob(source.db, reversed);
+  const done = 'part-b/memories/2026-02-07_three-main.jpg';
+  await source.store.commit(legacy.key, ordinalOf(legacy.listed, done), receiptFor('photo three'));
+  const text = await manifest(source.db); // A listing-order job, as 307eda2 exported it.
+  assert.ok(text.includes(`"inventorySha256":"${legacy.key}"`));
+  assert.equal(validate(text).folders, 1);
+  const target = await library(t); await restoreInto(target.db, text);
+  const canonicalKey = folderInventoryHash(legacy.listed);
+  const items = target.db.raw.prepare('SELECT relative_path,state,object_hash FROM import_items WHERE job_hash=? ORDER BY ordinal').all(canonicalKey) as { relative_path: string; state: string; object_hash: string | null }[];
+  assert.deepEqual(items.map(item => item.relative_path), [...NESTED.files.keys()].sort());
+  assert.deepEqual(items.filter(item => item.state === 'done').map(item => [item.relative_path, item.object_hash]), [[done, receiptFor('photo three').sha256]]);
+  const reexport = await manifest(target.db);
+  assert.ok(reexport.includes(`"inventorySha256":"${canonicalKey}"`) && !reexport.includes(legacy.key));
+  // Restoring the legacy backup again, or its canonical re-export, into the canonical library changes nothing.
+  const before = await dump(target.db); await restoreInto(target.db, text); await restoreInto(target.db, reexport);
+  assert.deepEqual(await dump(target.db), before);
+});
+
+test('ZIP sources keep their listing order and identity', async t => {
+  const { store } = await library(t); const zip = 'a'.repeat(64);
+  const listed = { entries: [{ path: '2026-02-07_three-main.jpg' }, { path: '2026-02-05_one-main.jpg' }], metadataBytes: 0, visitedEntries: 2 };
+  await store.plan(zip, inventoryFromSnapshot(listed, 'source-1'));
+  const db = (store as unknown as { db: DB }).db;
+  assert.deepEqual(db.raw.prepare('SELECT relative_path FROM import_items WHERE job_hash=? ORDER BY ordinal').all(zip).map(row => (row as { relative_path: string }).relative_path),
+    ['2026-02-07_three-main.jpg', '2026-02-05_one-main.jpg']);
 });

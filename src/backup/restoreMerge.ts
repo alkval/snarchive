@@ -1,9 +1,10 @@
 import type { SqlConnection } from '../storage/previewStore.ts';
 import { indexDates, LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
-import { decodePreview } from '../storage/previewCodec.ts';
+import { decodePreview, encodePreview } from '../storage/previewCodec.ts';
+import { mergeSourceInventories } from '../import/sourceInventory.ts';
 import type { SourceInventory } from '../import/sourceInventory.ts';
 import type { ValidRecord } from './manifest.ts';
-import { sourceEvidence } from '../import/sourceEvidence.ts';
+import { canonicalFolderSource, folderInventoryHash, sourceEvidence } from '../import/sourceEvidence.ts';
 
 /** What a restore changed in the library, as opposed to what the backup contains. */
 export type RestoreChanges = {
@@ -27,7 +28,9 @@ const BATCH = 100;
 export { sourceEvidence };
 
 type Item = { relativePath: string; memoryId: string; role: string; dateJson: string; state: 'pending' | 'done'; objectHash: string | null };
-type SourceRecord = { kind: 'zip' | 'folder'; hash: string; saved: Extract<ValidRecord, { type: 'source' }>['saved']; inventory: string };
+/** hash: the job key in this library; written: the key in the backup (they differ only for a folder record written in
+ * listing order by 307eda2). ordinals maps the backup's file ordinals to the job's, for folders; null for archives. */
+type SourceRecord = { kind: 'zip' | 'folder'; hash: string; written: string; saved: Extract<ValidRecord, { type: 'source' }>['saved']; inventory: string; ordinals: number[] | null };
 type Source = { kind: 'zip' | 'folder'; hash: string; isNew: boolean; state: string; items: Item[]; plan: string; source: SourceRecord; completed: number };
 type Counts = { base: number; associations: number; objects: number; favorites: number; jobs: number; done: number };
 
@@ -72,10 +75,16 @@ export class RestoreMerge {
         return;
       case 'source':
         await this.flushObjects(); await this.closeSource();
-        return this.openSource({ kind: 'zip', hash: record.archiveSha256, saved: record.saved, inventory: record.inventory });
-      case 'folder':
+        return this.openSource({ kind: 'zip', hash: record.archiveSha256, written: record.archiveSha256, saved: record.saved, inventory: record.inventory, ordinals: null });
+      case 'folder': {
         await this.flushObjects(); await this.closeSource();
-        return this.openSource({ kind: 'folder', hash: record.inventorySha256, saved: record.saved, inventory: record.inventory });
+        // Folder jobs are stored in canonical order under their canonical key, whatever order the backup listed them in.
+        const listed = record.saved.preview.sources[0]!, canonical = canonicalFolderSource(listed), key = folderInventoryHash(listed);
+        const position = new Map(canonical.files.map((file, ordinal) => [file.relativePath, ordinal]));
+        const inventory = encodePreview({ preview: mergeSourceInventories([], canonical), sourceIds: new Map([[`folder:${key}`, canonical.sourceId]]) });
+        return this.openSource({ kind: 'folder', hash: key, written: record.inventorySha256, saved: decodePreview(inventory), inventory,
+          ordinals: listed.files.map(file => position.get(file.relativePath)!) });
+      }
       case 'preserved': return this.observe(record.archiveSha256, record);
       case 'folder-preserved': return this.observe(record.inventorySha256, record);
       case 'favorite':
@@ -112,7 +121,8 @@ export class RestoreMerge {
     // ignoring only the per-device label; the existing plan is kept, so anything the backup adds would otherwise be lost.
     let existingSource: SourceInventory;
     try { existingSource = decodePreview(job.plan_json).preview.sources[0]!; } catch { throw new RestoreError('restore-conflict'); }
-    check(sourceEvidence(existingSource) === sourceEvidence(record.saved.preview.sources[0]!));
+    const evidence = (source: SourceInventory) => sourceEvidence(record.kind === 'folder' ? canonicalFolderSource(source) : source);
+    check(evidence(existingSource) === evidence(record.saved.preview.sources[0]!));
     const existing = await this.tx.getAllAsync<{ ordinal: number; relative_path: string; memory_id: string; role: string; date_json: string; state: 'pending' | 'done'; object_hash: string | null }>(
       'SELECT ordinal,relative_path,memory_id,role,date_json,state,object_hash FROM import_items WHERE job_hash=? ORDER BY ordinal', record.hash);
     check(existing.length === backupItems.length);
@@ -126,15 +136,17 @@ export class RestoreMerge {
 
   private async observe(hash: string, record: Extract<ValidRecord, { type: 'preserved' | 'folder-preserved' }>) {
     const source = this.current;
-    check(source && source.hash === hash && source.kind === (record.type === 'preserved' ? 'zip' : 'folder'), 'restore-failed');
-    const item = source.items[record.ordinal];
+    check(source && source.source.written === hash && source.kind === (record.type === 'preserved' ? 'zip' : 'folder'), 'restore-failed');
+    const ordinal = source.source.ordinals ? source.source.ordinals[record.ordinal] : record.ordinal;
+    check(ordinal !== undefined, 'restore-failed');
+    const item = source.items[ordinal];
     check(item && item.memoryId === record.memoryId && item.role === record.role, 'restore-failed');
     if (item.state === 'done') {
       // Completed work never changes: the same file must already be preserved with the same bytes.
       check(item.objectHash === record.sha256);
     } else {
       item.state = 'done'; item.objectHash = record.sha256; source.completed++;
-      if (!source.isNew) await this.tx.runAsync("UPDATE import_items SET state='done',object_hash=? WHERE job_hash=? AND ordinal=? AND state='pending'", record.sha256, source.hash, record.ordinal);
+      if (!source.isNew) await this.tx.runAsync("UPDATE import_items SET state='done',object_hash=? WHERE job_hash=? AND ordinal=? AND state='pending'", record.sha256, source.hash, ordinal);
     }
     this.associations.push([record.memoryId, record.role, record.sha256]);
     if (this.associations.length >= BATCH) await this.flushAssociations();

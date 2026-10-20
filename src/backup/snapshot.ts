@@ -1,13 +1,13 @@
 import type { SqlDatabase } from '../storage/previewStore.ts';
 import { decodePreview, encodePreview, MAX_PREVIEW_CHARS } from '../storage/previewCodec.ts';
 import { validateReceipt, type JobKind, type Receipt } from '../storage/importStore.ts';
-import { folderInventoryHash } from '../import/sourceEvidence.ts';
+import { listedFolderHash } from '../import/sourceEvidence.ts';
 
 export const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
 export const MAX_BACKUP_OBJECTS = 100_000;
 export const MAX_BACKUP_BYTES = 64 * 1024 ** 3;
 /** The library schema this format covers. A new migration must extend the snapshot (and this) first. */
-export const BACKUP_SCHEMA_VERSION = 4;
+export const BACKUP_SCHEMA_VERSION = 5;
 /** Version 1 has ZIP sources only; version 2 adds extracted-folder sources (section 21). The writer uses version 1
  * whenever the library has no folder job, so those backups stay readable by version-1 readers. */
 export const BACKUP_FORMAT_VERSION = 2;
@@ -71,8 +71,9 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
         const saved = decodePreview(row.plan_json);
         check(saved.sourceIds.size === 1 && saved.sourceIds.has(`${kind}:${info.hash}`));
         const source = saved.preview.sources[0]!;
-        // A folder job's key must still be its inventory's hash, or a reader could not verify the record.
-        if (kind === 'folder') check(folderInventoryHash(source) === info.hash);
+        // A folder job's key must be the hash of its inventory as written, so a reader can verify the record. Jobs are in
+        // canonical order (schema 5); one kept in listing order by that migration is written as it is, and still checks.
+        if (kind === 'folder') check(listedFolderHash(source) === info.hash);
         // Re-encode allowlisted fields, stripping anything outside the saved-preview schema.
         const inventory = JSON.parse(encodePreview(saved));
         await emit(kind === 'zip' ? { type: 'source', archiveSha256: info.hash, inventory } : { type: 'folder', inventorySha256: info.hash, inventory });

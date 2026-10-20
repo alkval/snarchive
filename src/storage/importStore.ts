@@ -2,7 +2,7 @@ import { defaultFilters, validFilters, type LibraryFilters } from '../domain/lib
 import type { SqlDatabase, SqlConnection } from './previewStore.ts';
 import { encodePreview, decodePreview } from './previewCodec.ts';
 import { mergeSourceInventories, type SourceInventory } from '../import/sourceInventory.ts';
-import { folderInventoryHash } from '../import/sourceEvidence.ts';
+import { canonicalFolderSource, folderInventoryHash, isCanonicalFolderSource } from '../import/sourceEvidence.ts';
 /** zip: hash is the archive's SHA-256. folder: hash is the folder's inventory hash (folderInventoryHash). */
 export type JobKind = 'zip' | 'folder';
 export type Receipt = { sha256: string; relativePath: string; bytes: number };
@@ -10,7 +10,7 @@ export type ImportItem = { ordinal: number; relative_path: string; memory_id: st
 export type ImportSummary = { files: number; objects: number; memories: number; unfinished: number; conflicts: number };
 function check(ok: unknown): asserts ok { if (!ok) throw new Error('invalid-import-state'); }
 /** Bump with each migration. The backup snapshot pins the version it covers; a test fails when they diverge. */
-export const LIBRARY_SCHEMA_VERSION = 4;
+export const LIBRARY_SCHEMA_VERSION = 5;
 export function validateReceipt(value: Receipt): void {
   check(/^[a-f0-9]{64}$/.test(value.sha256));
   check(value.relativePath === `objects/${value.sha256.slice(0, 2)}/${value.sha256}`);
@@ -30,6 +30,56 @@ export async function indexDates(tx: SqlConnection, source: SourceInventory) {
     if (id && date.kind !== 'unknown') await tx.runAsync('INSERT OR IGNORE INTO library_dates(memory_id,kind,value,day) VALUES (?,?,?,?)', id, date.kind, date.kind === 'instant' ? date.utc : date.date, date.kind === 'instant' ? date.utc.slice(0, 10) : date.date);
   }
 }
+/** Schema 5. Folder jobs planned by schema 4 (commit 307eda2) were keyed by their evidence in the provider's listing
+ * order. Each is rewritten in canonical order under its canonical key, and each item keeps its state and object,
+ * found by its path (unique per job), at its new ordinal. If the canonical key already belongs to a folder job
+ * (the same folder planned twice from different listings), the two are merged where they agree: a file done in
+ * either becomes done. If both completed a file with different objects, the older job is left as it was, so no
+ * preserved observation is lost; it stays valid, but a new scan matches only the canonical job. */
+async function canonicalizeFolderJobs(tx: SqlConnection) {
+  const jobs = await tx.getAllAsync<{ hash: string }>("SELECT hash FROM import_jobs WHERE kind='folder' ORDER BY hash");
+  for (const { hash } of jobs) {
+    const job = await tx.getFirstAsync<{ plan_json: string }>('SELECT plan_json FROM import_jobs WHERE hash=?', hash);
+    if (!job) continue; // Merged into another job earlier in this loop.
+    const source = decodePreview(job.plan_json).preview.sources[0]!;
+    const key = folderInventoryHash(source);
+    if (key === hash && isCanonicalFolderSource(source)) continue;
+    const canonical = canonicalFolderSource(source);
+    const order = new Map(canonical.files.map((file, ordinal) => [file.relativePath, ordinal]));
+    const items = await tx.getAllAsync<{ relative_path: string; state: string; object_hash: string | null }>('SELECT relative_path,state,object_hash FROM import_items WHERE job_hash=?', hash);
+    check(items.length === order.size && items.every(item => order.has(item.relative_path)));
+    const target = key === hash ? null : await tx.getFirstAsync<{ kind: string; state: string }>('SELECT kind,state FROM import_jobs WHERE hash=?', key);
+    if (!target) {
+      const plan = encodePreview({ preview: mergeSourceInventories([], canonical), sourceIds: new Map([[`folder:${key}`, canonical.sourceId]]) });
+      await tx.runAsync('UPDATE import_jobs SET hash=?,plan_json=? WHERE hash=?', key, plan, hash);
+      // Two steps, so no intermediate ordinal collides with another item's: first out of range, then into place.
+      await tx.runAsync('UPDATE import_items SET job_hash=?,ordinal=-1-ordinal WHERE job_hash=?', key, hash);
+      for (const item of items) await tx.runAsync('UPDATE import_items SET ordinal=? WHERE job_hash=? AND relative_path=?', order.get(item.relative_path)!, key, item.relative_path);
+      continue;
+    }
+    if (target.kind !== 'folder') continue;
+    const theirs = new Map((await tx.getAllAsync<{ relative_path: string; state: string; object_hash: string | null }>(
+      'SELECT relative_path,state,object_hash FROM import_items WHERE job_hash=?', key)).map(item => [item.relative_path, item]));
+    const compatible = items.every(item => { const other = theirs.get(item.relative_path);
+      return other && !(item.state === 'done' && other.state === 'done' && item.object_hash !== other.object_hash); });
+    if (!compatible) continue;
+    for (const item of items) {
+      if (item.state === 'done' && theirs.get(item.relative_path)!.state === 'pending') {
+        await tx.runAsync("UPDATE import_items SET state='done',object_hash=? WHERE job_hash=? AND relative_path=?", item.object_hash, key, item.relative_path);
+      }
+    }
+    await tx.runAsync('DELETE FROM import_items WHERE job_hash=?', hash);
+    await tx.runAsync('DELETE FROM import_jobs WHERE hash=?', hash);
+    const pending = await tx.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='pending' LIMIT 1", key);
+    const anyDone = await tx.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='done' LIMIT 1", key);
+    const state = !pending ? 'completed' : anyDone && target.state === 'planned' ? 'paused' : target.state;
+    await tx.runAsync('UPDATE import_jobs SET state=? WHERE hash=?', state, key);
+  }
+}
+/** A source as the saved-preview codec stores it: allowlisted fields in a fixed key order. */
+export function normalizeSource(source: SourceInventory): SourceInventory {
+  return decodePreview(encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([[`folder:${'0'.repeat(64)}`, source.sourceId]]) })).preview.sources[0]!;
+}
 export class ImportStore {
   private db: SqlDatabase;
   constructor(db: SqlDatabase) { this.db = db; }
@@ -38,7 +88,7 @@ export class ImportStore {
     await this.db.withExclusiveTransactionAsync(async tx => {
       const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
       if (version?.user_version === LIBRARY_SCHEMA_VERSION) return;
-      check(version && [0, 1, 2, 3].includes(version.user_version));
+      check(version && [0, 1, 2, 3, 4].includes(version.user_version));
       if (version.user_version < 2) {
         if (version.user_version === 0) await tx.execAsync(`
           CREATE TABLE import_jobs (hash TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','running','paused','completed')), plan_json TEXT NOT NULL);
@@ -62,20 +112,23 @@ export class ImportStore {
       }
       if (version.user_version < 3) await tx.execAsync('CREATE TABLE library_favorites(memory_id TEXT PRIMARY KEY);');
       // Schema 4 (section 21): a job is a ZIP archive or an extracted folder. Existing jobs are all ZIP jobs.
-      await tx.execAsync(`ALTER TABLE import_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'zip' CHECK(kind IN ('zip','folder'));
-        PRAGMA user_version = 4;`);
+      if (version.user_version < 4) await tx.execAsync("ALTER TABLE import_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'zip' CHECK(kind IN ('zip','folder'));");
+      // Schema 5 (section 21 review): folder evidence in canonical order, independent of provider listing order.
+      await canonicalizeFolderJobs(tx);
+      await tx.execAsync('PRAGMA user_version = 5;');
     });
   }
   async plan(hash: string, source: SourceInventory): Promise<void> {
     check(/^[a-f0-9]{64}$/.test(hash));
     await this.insertPlan(hash, 'zip', source);
   }
-  /** Plans an extracted folder from its saved scan. The job is keyed by the inventory hash of the codec-normalized
-   * source, so a second scan of an unchanged folder finds the same job; a changed folder is a different plan. */
+  /** Plans an extracted folder from its saved scan, in canonical order (files by path, metadata by content), keyed by
+   * its inventory hash. A second scan of an unchanged folder finds the same job, however the provider listed it, and
+   * so does a preview saved before evidence was canonical; a changed folder is a different plan. */
   async planFolder(source: SourceInventory): Promise<string> {
-    const normalized = decodePreview(encodePreview({ preview: mergeSourceInventories([], source), sourceIds: new Map([['folder:' + '0'.repeat(64), source.sourceId]]) })).preview.sources[0]!;
-    const hash = folderInventoryHash(normalized);
-    await this.insertPlan(hash, 'folder', normalized);
+    const canonical = canonicalFolderSource(normalizeSource(source));
+    const hash = folderInventoryHash(canonical);
+    await this.insertPlan(hash, 'folder', canonical);
     return hash;
   }
   /** A planned folder job's normalized source, or null if hash is not a folder job. */

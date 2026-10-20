@@ -1,6 +1,6 @@
 import { decodePreview, encodePreview, MAX_PREVIEW_CHARS, type SavedPreview } from '../storage/previewCodec.ts';
 import { BACKUP_FORMAT_VERSION, MAX_BACKUP_BYTES, MAX_BACKUP_OBJECTS, MAX_MANIFEST_BYTES } from './snapshot.ts';
-import { folderInventoryHash } from '../import/sourceEvidence.ts';
+import { listedFolderHash } from '../import/sourceEvidence.ts';
 
 /** Limits derived from the exporter (snapshot.ts) and the saved-preview codec, never tighter than what it writes. */
 export const MAX_MANIFEST_RECORDS = 1_000_000;
@@ -178,7 +178,7 @@ export class BackupManifestValidator {
   }
 
   /** Version 2: an extracted folder, after every ZIP source, in hash order. Its key must be the hash of its inventory,
-   * recomputed here, so a record can never claim another folder's identity. */
+   * recomputed here over the inventory as written, so a record can never claim another folder's identity. */
   private folder(record: Record<string, unknown>) {
     check(this.version === 2 && (this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders'));
     const hash = record.inventorySha256;
@@ -189,7 +189,9 @@ export class BackupManifestValidator {
     let saved: ReturnType<typeof decodePreview>;
     try { saved = decodePreview(text); check(encodePreview(saved) === text); } catch { throw new BackupManifestError('backup-invalid'); }
     check(saved.sourceIds.size === 1 && saved.sourceIds.has(`folder:${hash}`) && saved.preview.sources.length === 1);
-    check(folderInventoryHash(saved.preview.sources[0]!) === hash);
+    // The key must hash the inventory exactly as written. Current writers write canonical order, where this equals
+    // folderInventoryHash; records written in listing order (commit 307eda2) also verify, and restore re-keys them.
+    check(listedFolderHash(saved.preview.sources[0]!) === hash);
     const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
     this.current = { kind: 'folder', hash, files, lastOrdinal: -1, preserved: 0 };
     this.lastFolder = hash; this.sources++; this.folders++; this.phase = 'folders';
