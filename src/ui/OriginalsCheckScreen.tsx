@@ -18,7 +18,7 @@ type State =
   | ({ kind: 'checked' } & Found)
   | ({ kind: 'repairing'; source: 'backup' | 'zip' | 'folder'; progress: RepairProgress | null; cancelling: boolean } & Found)
   | ({ kind: 'repaired'; report: RepairReport } & Found)
-  | ({ kind: 'repair-failed'; code: string; cleanupFailed: boolean; storeCleanupFailed: boolean } & Found)
+  | ({ kind: 'repair-failed'; source: 'backup' | 'zip' | 'folder'; code: string; cleanupFailed: boolean; storeCleanupFailed: boolean } & Found)
   | ({ kind: 'picker-closed' } & Found);
 
 function size(bytes: number): string {
@@ -103,7 +103,7 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
       const code = error instanceof Error ? error.message : '';
       const cleanupFailed = error instanceof RepairFailure && error.cleanupFailed;
       const storeCleanupFailed = error instanceof RepairFailure && error.storeCleanupFailed;
-      if (mounted.current) setState({ kind: 'repair-failed', code: stopped.current ? 'cancelled' : code, cleanupFailed, storeCleanupFailed, ...base });
+      if (mounted.current) setState({ kind: 'repair-failed', source, code: stopped.current ? 'cancelled' : code, cleanupFailed, storeCleanupFailed, ...base });
     } finally { running.current = null; }
   }
 
@@ -132,11 +132,12 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
       {state.kind === 'failed' && <Notice tone="warning" message={state.code === 'busy' ? en.originalsBusy : en.originalsFailed} />}
       {state.kind === 'picker-closed' && <Notice tone="info" message={en.originalsPickerClosed} />}
       {state.kind === 'repair-failed' && <>
-        <Notice tone={state.code === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairFailed(state.code)} />
+        <Notice tone={state.code === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairFailed(state.code, state.source)} />
         {state.cleanupFailed && <Notice tone="warning" message={en.originalsSourceCleanup} />}
         {state.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
       </>}
       {report && <>
+        {report.sourceNotice === 'zip-not-recorded' && <Notice tone="warning" message={en.originalsZipNotRecorded} />}
         {report.stopped && <Notice tone={report.stopped === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairStopped(report.stopped)} />}
         {report.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
         {repairWarnings(report).map(([code, count]) => <Notice key={code} tone="warning" message={en.originalsRepairWarning(code, count)} />)}

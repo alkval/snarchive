@@ -150,7 +150,8 @@ export const en = {
   originalsRepairZip: 'Repair from an export ZIP', originalsRepairFolder: 'Repair from an extracted folder',
   originalsBackupDetail: 'A Snarchive backup containing the exact original',
   originalsZipDetail: 'Choose one original ZIP part; repeat with other parts as needed',
-  originalsFolderDetail: 'Choose a folder containing recorded original paths; other contents may have changed',
+  originalsFolderDetail: 'Choose the folder where recorded relative paths begin. If extraction added an outer folder, open it first.',
+  originalsZipNotRecorded: 'This ZIP is not one of the exports recorded in your library. Choose the original ZIP part or another repair source. Nothing was changed.',
   originalsExportValidating: 'Opening and checking the export…',
   originalsPickerClosed: 'No repair source was chosen.',
   originalsSourceCleanup: 'The selected source could not be fully closed or its temporary files could not be cleared. Reopen the app before trying again. Snarchive retries temporary-copy cleanup at startup or when opening another ZIP.',
@@ -176,7 +177,7 @@ export const en = {
   originalsRepairRows: {
     repaired: ['Repaired', 'Replaced with verified original bytes.'],
     alreadyValid: ['Already valid', 'Verified when repair began; nothing was written.'],
-    unavailable: ['Not available in this source', 'No usable recorded path or object was found here. Try another source.'],
+    unavailable: ['Not available in this source', 'No usable recorded path or object was found here. Try another source, or Check again to refresh the original’s health.'],
     mismatch: ['Source copy did not match', 'The source’s copy failed its length or checksum check; nothing was changed.'],
     failed: ['Could not be repaired', 'The original was left as it was.'],
     notAttempted: ['Not attempted', 'The repair stopped before these.'],
@@ -185,12 +186,17 @@ export const en = {
   originalsRepairStopped: (code: string) => code === 'cancelled' ? 'Repair cancelled. Originals already repaired stay repaired; the others were not changed.'
     : code === 'insufficient-storage' ? 'Not enough free storage to continue repairing. Free some space, then try again.'
     : 'Repair stopped. Originals already repaired stay repaired; the others were not changed.',
-  originalsRepairFailed: (code: string) => code === 'cancelled' ? 'Repair cancelled. Nothing was changed.'
+  originalsRepairFailed: (code: string, source: 'backup' | 'zip' | 'folder' = 'backup') => code === 'cancelled' ? 'Repair cancelled. Nothing was changed.'
     : code === 'busy' ? 'Another Snarchive task is running. Wait for it to finish, then try again.'
     : code === 'store-staging-cleanup-failed' ? 'A partly written original could not be cleared, so repair did not start. Your originals were not changed.'
     : code === 'choose-one-zip' ? 'Choose one export ZIP for this repair. You can repeat with another part afterwards. Nothing was changed.'
     : code === 'native-build-required' ? 'Install the latest Snarchive Android development build to use this repair source.'
     : code === 'export-unreadable' || code === 'source-changed' ? 'The export could not be read or changed while opening. Choose it again to retry. Nothing was changed.'
+    : source !== 'backup' && code === 'insufficient-storage' ? (source === 'zip'
+      ? 'Not enough free space to open this export ZIP. A ZIP that cannot be read in place needs a temporary copy: free its size plus 64 MiB, or move it to this device. Your export and library were not changed.'
+      : 'Not enough free space to open this export folder. Free some space and try again. Your export and library were not changed.')
+    : source !== 'backup' && code === 'staging-cleanup-failed' ? 'A temporary ZIP copy left by an earlier operation could not be removed, so this export was not opened. Your export and library were not changed. Reopen Snarchive and try again.'
+    : source !== 'backup' ? 'The export could not be opened for repair. Access may have expired or the storage provider failed. Choose it again to retry. Your export and library were not changed.'
     : `${en.inspectErrors[code] ?? en.inspectUnreadable} Nothing was changed.`,
   originalsAfterRepair: 'Check again to confirm the result.',
   originalsRepairWarning: (code: string, count: number) => code === 'thumbnail-eviction-failed'

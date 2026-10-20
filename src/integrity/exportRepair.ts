@@ -4,7 +4,8 @@ import { RepairFailure, type Problem, type RepairProgress, type RepairReport } f
 export type ExportKind = 'zip' | 'folder';
 type Result = { ok: boolean; code?: string; cleanupFailed?: boolean; storeCleanupFailed?: boolean };
 export interface ExportRepairBridge {
-  beginExportRepair(uri: string, kind: ExportKind): Promise<Result & { archiveSha256?: string }>;
+  /** sessionOpened also covers a failure after opening, while fetching the archive identity. */
+  beginExportRepair(uri: string, kind: ExportKind): Promise<Result & { archiveSha256?: string; sessionOpened?: boolean }>;
   prepareExportRepair(): Promise<Result>;
   repairExportObject(hash: string, bytes: number, path: string): Promise<Result & {
     outcome?: 'repaired' | 'already_valid' | 'mismatch'; warnings?: string[];
@@ -33,7 +34,13 @@ export async function runExportRepair(db: SqlDatabase, bridge: ExportRepairBridg
   if (cancelled()) throw new RepairFailure('cancelled', false);
   progress({ stage: 'validating' });
   const opened = await bridge.beginExportRepair(uri, kind);
-  if (!opened.ok) throw new RepairFailure(cancelled() ? 'cancelled' : opened.code ?? 'export-unreadable', !!opened.cleanupFailed, !!opened.storeCleanupFailed);
+  if (!opened.ok) {
+    // An early busy/open failure owns no session. A failure after opening still needs to release its gate.
+    const ended = opened.sessionOpened ? await bridge.endExportRepair().catch(() => ({ ok: false } as Result)) : null;
+    throw new RepairFailure(cancelled() ? 'cancelled' : opened.code ?? 'export-unreadable',
+      !!opened.cleanupFailed || !!ended && (!ended.ok || !!ended.cleanupFailed),
+      !!opened.storeCleanupFailed || !!ended?.storeCleanupFailed);
+  }
   const report: RepairReport = { repaired: [], alreadyValid: [], unavailable: [], mismatch: [], failed: [], notAttempted: [],
     stopped: null, storeCleanupFailed: false, cleanupFailed: false, warnings: [] };
   let closed = false;
@@ -48,6 +55,16 @@ export async function runExportRepair(db: SqlDatabase, bridge: ExportRepairBridg
   try {
     try {
       if (kind === 'zip' && !/^[a-f0-9]{64}$/.test(opened.archiveSha256 ?? '')) throw new Error('export-unreadable');
+      if (kind === 'zip') {
+        const recorded = await db.getFirstAsync<{ hash: string }>("SELECT hash FROM import_jobs WHERE kind='zip' AND hash=?", opened.archiveSha256!);
+        if (cancelled()) throw new Error('cancelled');
+        if (!recorded) {
+          report.sourceNotice = 'zip-not-recorded';
+          report.unavailable.push(...problems.map(problem => problem.hash));
+          progress({ stage: 'repairing', done: problems.length, total: problems.length });
+          return report; // No candidates can belong to this ZIP; do not prepare or attempt any originals.
+        }
+      }
       const prepared = await bridge.prepareExportRepair();
       report.storeCleanupFailed ||= !!prepared.storeCleanupFailed;
       report.cleanupFailed ||= !!prepared.cleanupFailed;

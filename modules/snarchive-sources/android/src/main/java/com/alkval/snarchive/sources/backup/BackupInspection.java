@@ -124,7 +124,7 @@ public final class BackupInspection implements Closeable {
 
   /** Counts every byte, fails past the declared size, and requires exactly that size at the end. */
   private static final class Bounded extends FilterInputStream {
-    final long size; long count;
+    final long size; long count; private boolean closed;
     Bounded(InputStream input, long size) { super(input); this.size = size; }
     @Override public int read() throws IOException { byte[] one = new byte[1]; return read(one, 0, 1) == -1 ? -1 : one[0] & 255; }
     @Override public int read(byte[] b, int off, int len) throws IOException {
@@ -133,6 +133,7 @@ public final class BackupInspection implements Closeable {
       if (n == -1) require(count == size, "backup-damaged");
       return n;
     }
+    @Override public void close() throws IOException { if (!closed) { closed = true; super.close(); } }
   }
 
   /** Strict UTF-8 text in bounded chunks, never split inside a surrogate pair. */
@@ -336,10 +337,10 @@ public final class BackupInspection implements Closeable {
     FileHeader header = objects.get(hash);
     if (header == null) return new Repaired(RepairOutcome.UNAVAILABLE, false);
     if (header.getUncompressedSize() != bytes) return new Repaired(RepairOutcome.MISMATCH, false);
-    try {
+    try (Bounded input = new Bounded(ZipInventory.open(source, header), bytes)) {
       // The backup must not have moved while its copy was read; checked before anything is replaced, so a changed
       // backup stops the repair instead of being reported after a replacement.
-      OriginalStore.RepairResult result = store.repair(new Bounded(ZipInventory.open(source, header), bytes), hash, bytes, header.getCrc(), stop,
+      OriginalStore.RepairResult result = store.repair(input, hash, bytes, header.getCrc(), stop,
         () -> { source.checkUnchanged(); beforeReplace.run(); });
       if (result.outcome != OriginalStore.Repair.REPAIRED) return new Repaired(RepairOutcome.ALREADY_VALID, false);
       List<String> warnings = new ArrayList<>();

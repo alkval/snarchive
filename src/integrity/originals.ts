@@ -89,6 +89,8 @@ export type RepairProgress = { stage: 'validating' } | { stage: 'repairing'; don
 export type RepairReport = {
   repaired: string[]; alreadyValid: string[]; unavailable: string[]; mismatch: string[]; failed: { hash: string; code: string }[];
   notAttempted: string[]; stopped: string | null; storeCleanupFailed: boolean; cleanupFailed: boolean;
+  /** A source-wide explanation in addition to the per-original buckets. */
+  sourceNotice?: 'zip-not-recorded';
   /** Repaired originals with a problem after their replacement: "thumbnail-eviction-failed" or "sync-failed". */
   warnings: { hash: string; code: string }[];
 };

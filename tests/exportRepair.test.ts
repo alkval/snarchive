@@ -7,6 +7,7 @@ import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts'
 import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
 import { exportCandidates, runExportRepair, type ExportRepairBridge } from '../src/integrity/exportRepair.ts';
 import { RepairFailure, repairWarnings, type Problem } from '../src/integrity/originals.ts';
+import { en } from '../src/i18n/en.ts';
 
 class DB implements SqlDatabase {
   raw = new DatabaseSync(':memory:');
@@ -43,8 +44,9 @@ function dump(db: DB) {
 type Reply = Awaited<ReturnType<ExportRepairBridge['repairExportObject']>>;
 class Bridge implements ExportRepairBridge {
   calls: string[] = []; paths: string[] = [];
-  opened = { ok: true, archiveSha256: A, code: '', cleanupFailed: false };
+  opened: Awaited<ReturnType<ExportRepairBridge['beginExportRepair']>> = { ok: true, archiveSha256: A, code: '', cleanupFailed: false };
   prepared = { ok: true, code: '', storeCleanupFailed: false }; endOk = true;
+  endReply: Awaited<ReturnType<ExportRepairBridge['endExportRepair']>> | null = null; rejectEnd = false;
   outcomes = new Map<string, Reply>(); rejectPath = ''; onRepair: (() => void) | null = null; onPrepare: (() => void) | null = null;
   constructor() { this.outcomes.set('foreign/2026-02-05_one-main.jpg', { ok: false, code: 'source-missing' }); }
   async beginExportRepair() { this.calls.push('begin'); return this.opened; }
@@ -54,7 +56,7 @@ class Bridge implements ExportRepairBridge {
     if (path === this.rejectPath) throw new Error('native-rejected');
     return this.outcomes.get(path) ?? { ok: true, outcome: 'repaired' };
   }
-  async endExportRepair() { this.calls.push('end'); return { ok: this.endOk }; }
+  async endExportRepair() { this.calls.push('end'); if (this.rejectEnd) throw new Error('close-rejected'); return this.endReply ?? { ok: this.endOk }; }
 }
 test('ZIP candidates use exact archive identity; extracted folders can use either provenance kind as path hints', async t => {
   const { db } = await library(t);
@@ -88,10 +90,23 @@ test('missing candidates are unavailable, stable bad bytes are mismatch, unreada
     assert.equal(result[bucket].length, 1); assert.equal(result.stopped, null); assert.equal(bridge.paths.length, 3);
   }
 });
-test('a different ZIP or an unreferenced object has no recorded candidates and is not read', async t => {
+test('an unrecognized ZIP reports one source notice with accurate unavailable buckets and no repair calls', async t => {
   const { db } = await library(t); const bridge = new Bridge(); bridge.opened.archiveSha256 = 'c'.repeat(64);
+  const before = dump(db);
   const result = await runExportRepair(db, bridge, 'zip', 'u', problems, () => false, () => {});
   assert.deepEqual(result.unavailable, problems.map(p => p.hash)); assert.equal(bridge.paths.length, 0);
+  assert.equal(result.sourceNotice, 'zip-not-recorded'); assert.equal(result.stopped, null);
+  for (const bucket of ['repaired', 'alreadyValid', 'failed', 'mismatch', 'notAttempted'] as const) assert.deepEqual(result[bucket], []);
+  assert.deepEqual(bridge.calls, ['begin', 'end']); assert.equal(dump(db), before);
+  assert.match(en.originalsZipNotRecorded, /not one of the exports recorded in your library/);
+  assert.match(en.originalsZipNotRecorded, /original ZIP part or another repair source/);
+});
+test('a recognized ZIP with no path for an object is unavailable without the unrecognized-ZIP notice', async t => {
+  const { db } = await library(t); const bridge = new Bridge();
+  const result = await runExportRepair(db, bridge, 'zip', 'u', [{ ...problems[0]!, hash: 'd'.repeat(64) }], () => false, () => {});
+  assert.deepEqual(result.unavailable, ['d'.repeat(64)]); assert.deepEqual(result.alreadyValid, []);
+  assert.equal(result.sourceNotice, undefined); assert.deepEqual(bridge.calls, ['begin', 'prepare', 'end']);
+  assert.match(en.originalsRepairRows.unavailable[1], /Check again to refresh the original’s health/);
 });
 test('candidate pagination handles more than 200 paths without sending media or all paths in one call', async t => {
   const db = new DB(); t.after(() => db.raw.close()); const store = new ImportStore(db); await store.initialize();
@@ -126,6 +141,36 @@ test('open and preparation failures retain cleanup flags, including cancellation
   await assert.rejects(runExportRepair(db, prep, 'zip', 'u', problems, () => stop, () => {}), (e: Error) => e instanceof RepairFailure && e.message === 'cancelled' && e.storeCleanupFailed && e.cleanupFailed);
   assert.deepEqual(prep.calls, ['begin', 'prepare', 'end']);
 });
+test('a failure after begin opened the session closes once and keeps the original code and all cleanup flags', async t => {
+  const { db } = await library(t);
+  for (const scenario of [
+    { initial: { cleanupFailed: true, storeCleanupFailed: false }, end: { ok: true }, cleanup: true, store: false },
+    { initial: { cleanupFailed: false, storeCleanupFailed: true }, end: { ok: true }, cleanup: false, store: true },
+    { initial: { cleanupFailed: false, storeCleanupFailed: false }, end: { ok: false, cleanupFailed: true, storeCleanupFailed: true }, cleanup: true, store: true },
+  ]) {
+    const bridge = new Bridge();
+    bridge.opened = { ok: false, code: 'export-unreadable', sessionOpened: true, ...scenario.initial };
+    bridge.endReply = scenario.end;
+    await assert.rejects(runExportRepair(db, bridge, 'zip', 'u', problems, () => false, () => {}),
+      (e: Error) => e instanceof RepairFailure && e.message === 'export-unreadable'
+        && e.cleanupFailed === scenario.cleanup && e.storeCleanupFailed === scenario.store);
+    assert.deepEqual(bridge.calls, ['begin', 'end']);
+  }
+  const busy = new Bridge(); busy.opened = { ok: false, code: 'busy' };
+  await assert.rejects(runExportRepair(db, busy, 'zip', 'u', problems, () => false, () => {}), /busy/);
+  assert.deepEqual(busy.calls, ['begin'], 'busy rejection must not close an existing session');
+});
+test('failed-begin cleanup rejection retains cancellation and the original store cleanup flag', async t => {
+  const { db } = await library(t); const bridge = new Bridge(); let stopped = false;
+  bridge.beginExportRepair = async () => {
+    bridge.calls.push('begin'); stopped = true;
+    return { ok: false, code: 'export-unreadable', sessionOpened: true, storeCleanupFailed: true };
+  };
+  bridge.rejectEnd = true;
+  await assert.rejects(runExportRepair(db, bridge, 'zip', 'u', problems, () => stopped, () => {}),
+    (e: Error) => e instanceof RepairFailure && e.message === 'cancelled' && e.cleanupFailed && e.storeCleanupFailed);
+  assert.deepEqual(bridge.calls, ['begin', 'end']);
+});
 test('a bridge rejection after a repair retains partial results and cleanup warnings', async t => {
   const { db } = await library(t); const bridge = new Bridge(); bridge.rejectPath = other; bridge.endOk = false;
   const report = await runExportRepair(db, bridge, 'zip', 'u', problems, () => false, () => {});
@@ -139,4 +184,18 @@ test('an already-valid original is counted once, and an invalid ZIP identity clo
   const invalid = new Bridge(); invalid.opened.archiveSha256 = '';
   await assert.rejects(runExportRepair(db, invalid, 'zip', 'u', problems, () => false, () => {}), (e: Error) => e.message === 'export-unreadable');
   assert.deepEqual(invalid.calls, ['begin', 'end']);
+});
+test('export open failures use export wording for ZIPs and folders, while backup wording stays scoped to backups', () => {
+  for (const source of ['zip', 'folder'] as const) {
+    for (const code of ['insufficient-storage', 'staging-cleanup-failed', 'unknown-code']) {
+      const message = en.originalsRepairFailed(code, source);
+      assert.doesNotMatch(message, /backup/i); assert.match(message, /export and library were not changed/);
+    }
+    assert.match(en.originalsRepairFailed('staging-cleanup-failed', source), /export was not opened/);
+  }
+  assert.match(en.originalsRepairFailed('insufficient-storage', 'zip'), /ZIP.*temporary copy: free its size plus 64 MiB/);
+  assert.doesNotMatch(en.originalsRepairFailed('insufficient-storage', 'folder'), /copy|64 MiB/);
+  assert.match(en.originalsRepairFailed('insufficient-storage', 'backup'), /backup’s size/);
+  assert.match(en.originalsRepairFailed('staging-cleanup-failed', 'backup'), /this backup was not opened/);
+  assert.match(en.originalsFolderDetail, /relative paths begin/); assert.match(en.originalsFolderDetail, /outer folder/);
 });

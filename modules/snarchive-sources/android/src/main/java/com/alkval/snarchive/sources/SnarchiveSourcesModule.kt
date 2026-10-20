@@ -402,7 +402,7 @@ class SnarchiveSourcesModule : Module() {
       }
       if (opened.code != null) return@AsyncFunction mapOf("ok" to false, "code" to opened.code, "cleanupFailed" to opened.cleanupFailed)
       val result = exportRepairs.run { it.archiveSha256() ?: "" }
-      result.value?.let { mapOf("ok" to true, "archiveSha256" to it) } ?: runFailure(result)
+      result.value?.let { mapOf("ok" to true, "archiveSha256" to it) } ?: (runFailure(result) + ("sessionOpened" to true))
     }
     AsyncFunction("prepareExportRepair") {
       val result = exportRepairs.run { originals().recoverStaging(); true }

@@ -168,6 +168,23 @@ public class BackupRepairTest {
         check(clean.outcome == RepairOutcome.REPAIRED && clean.warnings.isEmpty() && after.get() == 1, "a clean repair has no warnings");
       }
     });
+    test("repair rejects an unsafe target before reading, and the same backup session can still repair a safe store", () -> {
+      File dir = library(backup, null, a); OriginalStore store = new OriginalStore(dir);
+      Path prefix = file(dir, a).toPath().getParent();
+      // Move the existing prefix aside, then replace it with a link after the store was opened.
+      Path outside = prefix.resolveSibling(prefix.getFileName() + "-kept"); Files.move(prefix, outside);
+      Files.createSymbolicLink(prefix, outside);
+      try (BackupInspection session = sealed(backup.file, backup)) {
+        try {
+          session.repair(store, a, backup.objects.get(a).length, () -> false, () -> {});
+          throw new AssertionError("unsafe target accepted");
+        } catch (IOException error) { check("unsafe-storage-path".equals(error.getMessage()), "raw unsafe-path failure"); }
+        check(!Files.exists(file(dir, a).toPath()), "unsafe target unchanged");
+        Files.delete(prefix); Files.move(outside, prefix);
+        check(session.repair(store, a, backup.objects.get(a).length, () -> false, () -> {}).outcome == RepairOutcome.REPAIRED, "session remains usable");
+        check(Arrays.equals(backup.objects.get(a), read(file(dir, a))), "exact repaired bytes");
+      }
+    });
     System.out.println(passed + " backup repair host tests passed. No device claim.");
   }
   static int indexOf(byte[] haystack, byte[] needle) {
