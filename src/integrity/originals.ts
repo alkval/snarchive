@@ -78,8 +78,8 @@ export interface RepairBridge {
   sealBackupInspection(): Promise<Result>;
   /** Removes partly written originals left in store staging by an earlier operation. */
   prepareBackupRepair(): Promise<Result>;
-  /** warning: on a completed repair, a problem after the replacement (the repaired file is already in place). */
-  repairBackupObject(hash: string, bytes: number): Promise<Result & { outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; warning?: string | null }>;
+  /** warnings: on a completed repair, every problem after the replacement (the repaired file is already in place). */
+  repairBackupObject(hash: string, bytes: number): Promise<Result & { outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; warnings?: string[] }>;
   endBackupInspection(): Promise<Result>;
 }
 export type RepairProgress = { stage: 'validating' } | { stage: 'repairing'; done: number; total: number };
@@ -137,7 +137,7 @@ export async function runBackupRepair(bridge: RepairBridge, uri: string, problem
       if (result.ok && result.outcome) {
         // A repair that finished is reported as repaired even if cancellation arrived just after it.
         ({ repaired: report.repaired, already_valid: report.alreadyValid, unavailable: report.unavailable, mismatch: report.mismatch })[result.outcome].push(problem.hash);
-        if (result.outcome === 'repaired' && result.warning) report.warnings.push({ hash: problem.hash, code: result.warning });
+        if (result.outcome === 'repaired') for (const code of result.warnings ?? []) report.warnings.push({ hash: problem.hash, code });
         continue;
       }
       if (result.cleanupFailed) report.cleanupFailed = true;

@@ -144,9 +144,29 @@ public class BackupRepairTest {
       OriginalStore store = new OriginalStore(dir, File::getUsableSpace, p -> { if (p.equals("sync-object-directory")) throw new IOException("injected"); });
       try (BackupInspection session = sealed(backup.file, backup)) {
         BackupInspection.Repaired result = session.repair(store, a, backup.objects.get(a).length, () -> false, () -> {});
-        check(result.outcome == RepairOutcome.REPAIRED && "sync-failed".equals(result.warning), "repaired with a warning");
+        check(result.outcome == RepairOutcome.REPAIRED && result.warnings.equals(Collections.singletonList("sync-failed")), "repaired with a warning");
       }
       check(Arrays.equals(backup.objects.get(a), read(file(dir, a))), "repaired bytes in place");
+    });
+    test("the second eviction runs after every completed repair, even with a sync warning, and both warnings are kept", () -> {
+      for (boolean evictionFails : new boolean[] { false, true }) {
+        File dir = library(backup, a, null); AtomicInteger after = new AtomicInteger();
+        OriginalStore store = new OriginalStore(dir, File::getUsableSpace, p -> { if (p.equals("sync-object-directory")) throw new IOException("injected"); });
+        try (BackupInspection session = sealed(backup.file, backup)) {
+          BackupInspection.Repaired result = session.repair(store, a, backup.objects.get(a).length, () -> false, () -> {},
+            () -> { after.incrementAndGet(); if (evictionFails) throw new IOException("thumbnail-eviction-failed"); });
+          check(after.get() == 1, "eviction ran despite the sync warning");
+          check(result.outcome == RepairOutcome.REPAIRED && result.warnings.equals(evictionFails ? Arrays.asList("sync-failed", "thumbnail-eviction-failed") : Collections.singletonList("sync-failed")),
+            "repaired with " + result.warnings);
+        }
+        check(Arrays.equals(backup.objects.get(a), read(file(dir, a))), "repaired bytes in place");
+      }
+      File dir = library(backup, a, null); AtomicInteger after = new AtomicInteger();
+      try (BackupInspection session = sealed(backup.file, backup)) {
+        check(session.repair(new OriginalStore(dir), c, backup.objects.get(c).length, () -> false, () -> {}, after::incrementAndGet).outcome == RepairOutcome.ALREADY_VALID && after.get() == 0, "not after an already-valid file");
+        BackupInspection.Repaired clean = session.repair(new OriginalStore(dir), a, backup.objects.get(a).length, () -> false, () -> {}, after::incrementAndGet);
+        check(clean.outcome == RepairOutcome.REPAIRED && clean.warnings.isEmpty() && after.get() == 1, "a clean repair has no warnings");
+      }
     });
     System.out.println(passed + " backup repair host tests passed. No device claim.");
   }

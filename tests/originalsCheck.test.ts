@@ -101,7 +101,7 @@ async function manifestOf(db: DB) { const lines: string[] = []; await writeBacku
 /** A fake native repair session over a manifest; outcomes per hash (or a failure code), recording the call order. */
 class Repairer implements RepairBridge {
   calls: string[] = []; declared: string[] = []; text: string; offset = 0;
-  outcomes = new Map<string, { ok: boolean; outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; code?: string; storeCleanupFailed?: boolean; warning?: string | null }>();
+  outcomes = new Map<string, { ok: boolean; outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; code?: string; storeCleanupFailed?: boolean; warnings?: string[] }>();
   prepareResult: { ok: boolean; code?: string; storeCleanupFailed?: boolean } = { ok: true }; onPrepare: (() => void) | null = null;
   beginResult: { ok: boolean; code?: string; cleanupFailed?: boolean } = { ok: true }; endOk = true; onRepair: ((hash: string) => void) | null = null;
   constructor(text: string) { this.text = text; }
@@ -203,13 +203,16 @@ test('a completed repair with a later problem stays repaired, with a warning, an
   const { db } = await library(t); const text = await manifestOf(db);
   const problems = [problem('shared'), problem('four'), problem('three')];
   const bridge = new Repairer(text);
-  bridge.outcomes.set(problems[0]!.hash, { ok: true, outcome: 'repaired', warning: 'thumbnail-eviction-failed' });
-  bridge.outcomes.set(problems[1]!.hash, { ok: true, outcome: 'repaired', warning: 'sync-failed' });
-  bridge.outcomes.set(problems[2]!.hash, { ok: true, outcome: 'repaired', warning: null });
+  bridge.outcomes.set(problems[0]!.hash, { ok: true, outcome: 'repaired', warnings: ['thumbnail-eviction-failed'] });
+  bridge.outcomes.set(problems[1]!.hash, { ok: true, outcome: 'repaired', warnings: ['sync-failed', 'thumbnail-eviction-failed'] });
+  bridge.outcomes.set(problems[2]!.hash, { ok: true, outcome: 'repaired', warnings: [] });
   const report = await runBackupRepair(bridge, 'u', problems, () => false, () => {});
   assert.deepEqual(report.repaired, problems.map(p => p.hash)); assert.deepEqual(report.failed, []);
-  assert.deepEqual(report.warnings, [{ hash: problems[0]!.hash, code: 'thumbnail-eviction-failed' }, { hash: problems[1]!.hash, code: 'sync-failed' }]);
-  assert.deepEqual(repairWarnings(report), [['thumbnail-eviction-failed', 1], ['sync-failed', 1]]);
+  // Both warnings of one repair are kept, and it stays repaired.
+  assert.deepEqual(report.warnings, [{ hash: problems[0]!.hash, code: 'thumbnail-eviction-failed' },
+    { hash: problems[1]!.hash, code: 'sync-failed' }, { hash: problems[1]!.hash, code: 'thumbnail-eviction-failed' }]);
+  assert.deepEqual(repairWarnings(report), [['thumbnail-eviction-failed', 2], ['sync-failed', 1]]);
+  assert.match(en.originalsRepairWarning('thumbnail-eviction-failed', 2), /^2 repaired originals /);
   assert.match(en.originalsRepairWarning('thumbnail-eviction-failed', 1), /^1 repaired original .*The original itself is repaired\.$/);
   assert.match(en.originalsRepairWarning('sync-failed', 2), /^2 repaired originals are in place/);
   for (const code of ['thumbnail-eviction-failed', 'sync-failed']) assert.doesNotMatch(en.originalsRepairWarning(code, 1), /left as it was|unchanged|not changed/);

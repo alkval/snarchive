@@ -367,14 +367,10 @@ class SnarchiveSourcesModule : Module() {
       val result = inspections.run { session ->
         require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
         // Thumbnails are discarded before the replacement and again after it, so none made from damaged bytes survives.
-        val repaired = session.repair(originals(), hash, bytes.toLong(), { cancelled.get() }) { ThumbnailFiles.evict(cacheDir, hash) }
-        // The repair is complete at this point: a failed second eviction is a warning on it, never a failure.
-        val warning = repaired.warning ?: if (repaired.outcome == BackupInspection.RepairOutcome.REPAIRED)
-          runCatching { ThumbnailFiles.evict(cacheDir, hash) }.exceptionOrNull()?.let { "thumbnail-eviction-failed" } else null
-        repaired to warning
+        // After every completed replacement the second eviction runs (inside repair), whatever else was reported.
+        session.repair(originals(), hash, bytes.toLong(), { cancelled.get() }, { ThumbnailFiles.evict(cacheDir, hash) }, { ThumbnailFiles.evict(cacheDir, hash) })
       }
-      result.value?.let { (repaired, warning) -> mapOf("ok" to true, "outcome" to repaired.outcome.name.lowercase(),
-        "storeCleanupFailed" to repaired.storeCleanupFailed, "warning" to warning) }
+      result.value?.let { mapOf("ok" to true, "outcome" to it.outcome.name.lowercase(), "storeCleanupFailed" to it.storeCleanupFailed, "warnings" to it.warnings) }
         ?: runFailure(result)
     }
     AsyncFunction("scanDirectory") { uriString: String ->

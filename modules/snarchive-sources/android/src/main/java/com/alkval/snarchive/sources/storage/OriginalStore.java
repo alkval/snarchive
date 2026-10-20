@@ -242,8 +242,9 @@ public final class OriginalStore {
    *     "quarantine-failed" (cancellation stays "cancelled"); a partial copy is removed and the target is unchanged.
    *  5. The staged file is renamed over the target (atomically), or into a missing target's place without replacing a
    *     file that appeared ("repair-target-appeared").
-   *  6. The object's directory and the staging directory are synced (and any directory created on the way, with its
-   *     parent). From step 5 on, the target has been replaced: a later failure is a warning on REPAIRED, never an error.
+   *  6. The object's directory and the staging directory are synced. (Before step 4, the parents of the object's prefix
+   *     directory and of quarantine/ are synced on every repair, so a directory created by an earlier, failed attempt
+   *     cannot skip that.) From step 5 on, the target has been replaced: a later failure is a warning on REPAIRED.
    * Interruption: until step 5 the original path is untouched; the rename leaves the old file or the new one, never
    * neither (tested by killing processes). Power loss depends on the filesystem honouring fsync of files and
    * directories, which is not tested. */
@@ -259,9 +260,9 @@ public final class OriginalStore {
       cancel(stop);
       faults.at("before-replace");
       beforeReplace.run();
-      File parent = directorySynced("objects/" + hash.substring(0, 2));
+      File parent = directorySynced("objects/" + hash.substring(0, 2), "sync-prefix-parent");
       if (presence(target) != null) {
-        File quarantine = directorySynced("quarantine");
+        File quarantine = directorySynced("quarantine", "sync-quarantine-parent");
         File kept = checked("quarantine/" + hash + "-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8) + ".damaged");
         try { keep(target, kept, stop); } catch (IOException | RuntimeException error) {
           if (Files.exists(kept.toPath(), LinkOption.NOFOLLOW_LINKS) && !kept.delete()) error.addSuppressed(new IOException("quarantine-cleanup-failed"));
@@ -292,14 +293,14 @@ public final class OriginalStore {
     try { return stat(target.toPath()); } catch (IOException unknown) { throw new IOException("repair-target-inaccessible", unknown); }
   }
 
-  /** As directory(), and when it had to create the directory, syncs its parent so the new entry is recorded too. */
-  private File directorySynced(String relative) throws IOException {
-    File file = checked(relative);
-    if (file.isDirectory()) return file;
-    File created = directory(relative);
-    syncDirectory(created.getParentFile(), "sync-new-directory");
-    syncDirectory(created, "sync-new-directory");
-    return created;
+  /** As directory(), and then syncs its parent so the directory's own entry is recorded. The parent is synced on every
+   * call, not only when the directory is created: an earlier operation may have created it and then failed or been
+   * interrupted before its sync, and nothing records that. (The directory itself is synced later, after its entry for
+   * the repair is written.) put() does not use this; its behaviour is unchanged. */
+  private File directorySynced(String relative, String point) throws IOException {
+    File directory = directory(relative);
+    syncDirectory(directory.getParentFile(), point);
+    return directory;
   }
 
   /** Keeps the damaged file's bytes under quarantine: a hard link where allowed, else a synced copy. Android denies apps

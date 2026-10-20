@@ -308,11 +308,14 @@ public final class BackupInspection implements Closeable {
 
   /** What repairing one recorded original from this backup did. */
   public enum RepairOutcome { REPAIRED, ALREADY_VALID, UNAVAILABLE, MISMATCH }
-  /** warning: set on REPAIRED for a problem after the replacement (the repaired file is in place). */
+  /** warnings: on REPAIRED, every problem after the replacement ("sync-failed", "thumbnail-eviction-failed"); the
+   * repaired file is in place in each case. Empty otherwise. */
   public static final class Repaired {
-    public final RepairOutcome outcome; public final boolean storeCleanupFailed; public final String warning;
-    Repaired(RepairOutcome outcome, boolean storeCleanupFailed) { this(outcome, storeCleanupFailed, null); }
-    Repaired(RepairOutcome outcome, boolean storeCleanupFailed, String warning) { this.outcome = outcome; this.storeCleanupFailed = storeCleanupFailed; this.warning = warning; }
+    public final RepairOutcome outcome; public final boolean storeCleanupFailed; public final List<String> warnings;
+    Repaired(RepairOutcome outcome, boolean storeCleanupFailed) { this(outcome, storeCleanupFailed, Collections.emptyList()); }
+    Repaired(RepairOutcome outcome, boolean storeCleanupFailed, List<String> warnings) {
+      this.outcome = outcome; this.storeCleanupFailed = storeCleanupFailed; this.warnings = Collections.unmodifiableList(new ArrayList<>(warnings));
+    }
   }
 
   /** Repair (section 22), after the manifest was validated, every object declared and the session sealed: replaces the
@@ -321,6 +324,13 @@ public final class BackupInspection implements Closeable {
    * or its bytes failed the length, ZIP CRC or SHA-256 check (nothing was replaced). ALREADY_VALID: the local file
    * verified, so the backup's copy was not read. Only the requested object is read; other media are not re-hashed. */
   public Repaired repair(OriginalStore store, String hash, long bytes, BooleanSupplier stop, OriginalStore.Check beforeReplace) throws IOException {
+    return repair(store, hash, bytes, stop, beforeReplace, () -> {});
+  }
+
+  /** As repair, with afterReplace (the second thumbnail eviction) run after every completed replacement, whatever the
+   * store reported. Its failure is the "thumbnail-eviction-failed" warning, added to any warning the store gave. */
+  public Repaired repair(OriginalStore store, String hash, long bytes, BooleanSupplier stop, OriginalStore.Check beforeReplace,
+      OriginalStore.Check afterReplace) throws IOException {
     require(!closed && sealed && stagedManifest == null, "backup-invalid");
     require(hash != null && hash.matches("[a-f0-9]{64}") && bytes >= 0, "backup-invalid");
     FileHeader header = objects.get(hash);
@@ -331,7 +341,11 @@ public final class BackupInspection implements Closeable {
       // backup stops the repair instead of being reported after a replacement.
       OriginalStore.RepairResult result = store.repair(new Bounded(ZipInventory.open(source, header), bytes), hash, bytes, header.getCrc(), stop,
         () -> { source.checkUnchanged(); beforeReplace.run(); });
-      return new Repaired(result.outcome == OriginalStore.Repair.REPAIRED ? RepairOutcome.REPAIRED : RepairOutcome.ALREADY_VALID, false, result.warning);
+      if (result.outcome != OriginalStore.Repair.REPAIRED) return new Repaired(RepairOutcome.ALREADY_VALID, false);
+      List<String> warnings = new ArrayList<>();
+      if (result.warning != null) warnings.add(result.warning);
+      try { afterReplace.run(); } catch (IOException | RuntimeException evictionFailed) { warnings.add("thumbnail-eviction-failed"); }
+      return new Repaired(RepairOutcome.REPAIRED, false, warnings);
     } catch (IOException error) {
       String message = error.getMessage();
       boolean mismatch = "content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)

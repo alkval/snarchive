@@ -246,9 +246,9 @@ public class OriginalRepairTest {
       check(new OriginalStore(noPrefix).inspect(HASH, GOOD.length, () -> false) == OriginalStore.Health.MISSING, "a missing prefix directory is absence too");
     });
     test("directory syncs: a failure before the replacement changes nothing; after it the repair stands with a warning", () -> {
-      for (String point : new String[] { "sync-quarantine", "sync-new-directory" }) {
-        File root = damaged(point.equals("sync-new-directory") ? "missing" : "same-length");
-        if (point.equals("sync-new-directory")) Files.delete(object(root).getParentFile().toPath()); // The prefix directory must be created.
+      for (String point : new String[] { "sync-quarantine", "sync-quarantine-parent", "sync-prefix-parent" }) {
+        File root = damaged(point.equals("sync-prefix-parent") ? "missing" : "same-length");
+        if (point.equals("sync-prefix-parent")) Files.delete(object(root).getParentFile().toPath()); // The prefix directory must be created.
         boolean existed = object(root).exists(); byte[] before = existed ? read(object(root)) : null;
         OriginalStore store = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals(point)) throw new IOException("injected"); });
         fails("injected", () -> repair(store, GOOD, () -> false, () -> {}));
@@ -261,9 +261,32 @@ public class OriginalRepairTest {
         OriginalStore.RepairResult result = full(store, GOOD, () -> false, () -> {});
         check(result.outcome == OriginalStore.Repair.REPAIRED && "sync-failed".equals(result.warning) && Arrays.equals(GOOD, read(object(root))), point + ": repaired with a warning");
       }
-      File root = damaged("missing"); Files.delete(object(root).getParentFile().toPath()); AtomicInteger syncs = new AtomicInteger();
-      OriginalStore counting = new OriginalStore(root, File::getUsableSpace, p -> { if (p.startsWith("sync-")) syncs.incrementAndGet(); });
-      check(repair(counting, GOOD, () -> false, () -> {}) == OriginalStore.Repair.REPAIRED && syncs.get() == 4, "new directory, its parent, the object directory and staging synced: " + syncs.get());
+      // The calls a repair makes (fault points; these tests check the calls and their failures, not power loss).
+      File root = damaged("missing"); Files.delete(object(root).getParentFile().toPath()); List<String> calls = new ArrayList<>();
+      OriginalStore recording = new OriginalStore(root, File::getUsableSpace, p -> { if (p.startsWith("sync-")) calls.add(p); });
+      check(repair(recording, GOOD, () -> false, () -> {}) == OriginalStore.Repair.REPAIRED, "repaired");
+      check(calls.equals(Arrays.asList("sync-prefix-parent", "sync-object-directory", "sync-staging-directory")), "missing target: " + calls);
+      File damagedRoot = damaged("same-length"); List<String> replacing = new ArrayList<>();
+      check(repair(new OriginalStore(damagedRoot, File::getUsableSpace, p -> { if (p.startsWith("sync-")) replacing.add(p); }), GOOD, () -> false, () -> {}) == OriginalStore.Repair.REPAIRED, "repaired");
+      check(replacing.equals(Arrays.asList("sync-prefix-parent", "sync-quarantine-parent", "sync-quarantine", "sync-object-directory", "sync-staging-directory")), "existing target: " + replacing);
+    });
+    test("a directory left by an attempt whose parent sync failed is synced again by the next repair", () -> {
+      // quarantine/: created by the first attempt, whose parent sync then failed.
+      File root = damaged("same-length"); byte[] before = read(object(root)); AtomicBoolean failOnce = new AtomicBoolean(true);
+      OriginalStore first = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals("sync-quarantine-parent") && failOnce.getAndSet(false)) throw new IOException("injected"); });
+      fails("injected", () -> repair(first, GOOD, () -> false, () -> {}));
+      check(new File(root, "quarantine").isDirectory() && Arrays.equals(before, read(object(root))) && staged(root) == 0, "directory left, target unchanged");
+      List<String> calls = new ArrayList<>();
+      OriginalStore.RepairResult retry = full(new OriginalStore(root, File::getUsableSpace, p -> { if (p.startsWith("sync-")) calls.add(p); }), GOOD, () -> false, () -> {});
+      check(retry.outcome == OriginalStore.Repair.REPAIRED && retry.warning == null && calls.contains("sync-quarantine-parent"), "retry syncs its parent: " + calls);
+      // The object's prefix directory: created by the first attempt, whose parent sync then failed.
+      File missing = damaged("missing"); Files.delete(object(missing).getParentFile().toPath()); AtomicBoolean prefixOnce = new AtomicBoolean(true);
+      OriginalStore firstFill = new OriginalStore(missing, File::getUsableSpace, p -> { if (p.equals("sync-prefix-parent") && prefixOnce.getAndSet(false)) throw new IOException("injected"); });
+      fails("injected", () -> repair(firstFill, GOOD, () -> false, () -> {}));
+      check(object(missing).getParentFile().isDirectory() && !object(missing).exists() && staged(missing) == 0, "prefix left, target still missing");
+      List<String> fill = new ArrayList<>();
+      OriginalStore.RepairResult filled = full(new OriginalStore(missing, File::getUsableSpace, p -> { if (p.startsWith("sync-")) fill.add(p); }), GOOD, () -> false, () -> {});
+      check(filled.outcome == OriginalStore.Repair.REPAIRED && fill.contains("sync-prefix-parent") && Arrays.equals(GOOD, read(object(missing))), "retry syncs the prefix's parent: " + fill);
     });
     test("thumbnail eviction removes only that original's derivatives and reports a file it cannot delete", () -> {
       File cache = Files.createTempDirectory(base.toPath(), "cache-").toFile(); File thumbs = new File(cache, ThumbnailFiles.DIRECTORY); thumbs.mkdirs();
