@@ -1,10 +1,9 @@
 import type { SqlConnection } from '../storage/previewStore.ts';
-import { indexDates, LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
-import { decodePreview, encodePreview } from '../storage/previewCodec.ts';
-import { mergeSourceInventories } from '../import/sourceInventory.ts';
+import { canonicalizeFolderJobs, indexDates, LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
+import { decodePreview } from '../storage/previewCodec.ts';
 import type { SourceInventory } from '../import/sourceInventory.ts';
 import type { ValidRecord } from './manifest.ts';
-import { canonicalFolderSource, folderInventoryHash, sourceEvidence } from '../import/sourceEvidence.ts';
+import { canonicalFolderSource, sourceEvidence } from '../import/sourceEvidence.ts';
 
 /** What a restore changed in the library, as opposed to what the backup contains. */
 export type RestoreChanges = {
@@ -28,9 +27,7 @@ const BATCH = 100;
 export { sourceEvidence };
 
 type Item = { relativePath: string; memoryId: string; role: string; dateJson: string; state: 'pending' | 'done'; objectHash: string | null };
-/** hash: the job key in this library; written: the key in the backup (they differ only for a folder record written in
- * listing order by 307eda2). ordinals maps the backup's file ordinals to the job's, for folders; null for archives. */
-type SourceRecord = { kind: 'zip' | 'folder'; hash: string; written: string; saved: Extract<ValidRecord, { type: 'source' }>['saved']; inventory: string; ordinals: number[] | null };
+type SourceRecord = { kind: 'zip' | 'folder'; hash: string; saved: Extract<ValidRecord, { type: 'source' }>['saved']; inventory: string };
 type Source = { kind: 'zip' | 'folder'; hash: string; isNew: boolean; state: string; items: Item[]; plan: string; source: SourceRecord; completed: number };
 type Counts = { base: number; associations: number; objects: number; favorites: number; jobs: number; done: number };
 
@@ -41,8 +38,8 @@ export class RestoreMerge {
   private readonly tx: SqlConnection;
   private before: Counts | null = null;
   private current: Source | null = null;
-  private sourcesUpdated = 0;
-  private filesPreserved = 0;
+  /** Completed files per existing job before the restore, to report which jobs gained work (including by a merge). */
+  private doneBefore = new Map<string, number>();
   private objectRows: [string, number][] = [];
   private associations: [string, string, string][] = [];
   private favorites: string[] = [];
@@ -64,6 +61,7 @@ export class RestoreMerge {
     const version = await this.tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
     check(version?.user_version === LIBRARY_SCHEMA_VERSION, 'restore-schema-unsupported');
     this.before = await this.counts();
+    this.doneBefore = await this.donePerJob();
   }
 
   async apply(record: ValidRecord): Promise<void> {
@@ -75,15 +73,12 @@ export class RestoreMerge {
         return;
       case 'source':
         await this.flushObjects(); await this.closeSource();
-        return this.openSource({ kind: 'zip', hash: record.archiveSha256, written: record.archiveSha256, saved: record.saved, inventory: record.inventory, ordinals: null });
+        return this.openSource({ kind: 'zip', hash: record.archiveSha256, saved: record.saved, inventory: record.inventory });
       case 'folder': {
         await this.flushObjects(); await this.closeSource();
-        // Folder jobs are stored in canonical order under their canonical key, whatever order the backup listed them in.
-        const listed = record.saved.preview.sources[0]!, canonical = canonicalFolderSource(listed), key = folderInventoryHash(listed);
-        const position = new Map(canonical.files.map((file, ordinal) => [file.relativePath, ordinal]));
-        const inventory = encodePreview({ preview: mergeSourceInventories([], canonical), sourceIds: new Map([[`folder:${key}`, canonical.sourceId]]) });
-        return this.openSource({ kind: 'folder', hash: key, written: record.inventorySha256, saved: decodePreview(inventory), inventory,
-          ordinals: listed.files.map(file => position.get(file.relativePath)!) });
+        // Restored exactly as written, under the written key. A record written in listing order (307eda2, or a job the
+        // schema 5 migration kept apart) is canonicalized in finish(), by the same rules as the migration.
+        return this.openSource({ kind: 'folder', hash: record.inventorySha256, saved: record.saved, inventory: record.inventory });
       }
       case 'preserved': return this.observe(record.archiveSha256, record);
       case 'folder-preserved': return this.observe(record.inventorySha256, record);
@@ -136,17 +131,15 @@ export class RestoreMerge {
 
   private async observe(hash: string, record: Extract<ValidRecord, { type: 'preserved' | 'folder-preserved' }>) {
     const source = this.current;
-    check(source && source.source.written === hash && source.kind === (record.type === 'preserved' ? 'zip' : 'folder'), 'restore-failed');
-    const ordinal = source.source.ordinals ? source.source.ordinals[record.ordinal] : record.ordinal;
-    check(ordinal !== undefined, 'restore-failed');
-    const item = source.items[ordinal];
+    check(source && source.hash === hash && source.kind === (record.type === 'preserved' ? 'zip' : 'folder'), 'restore-failed');
+    const item = source.items[record.ordinal];
     check(item && item.memoryId === record.memoryId && item.role === record.role, 'restore-failed');
     if (item.state === 'done') {
       // Completed work never changes: the same file must already be preserved with the same bytes.
       check(item.objectHash === record.sha256);
     } else {
       item.state = 'done'; item.objectHash = record.sha256; source.completed++;
-      if (!source.isNew) await this.tx.runAsync("UPDATE import_items SET state='done',object_hash=? WHERE job_hash=? AND ordinal=? AND state='pending'", record.sha256, source.hash, ordinal);
+      if (!source.isNew) await this.tx.runAsync("UPDATE import_items SET state='done',object_hash=? WHERE job_hash=? AND ordinal=? AND state='pending'", record.sha256, source.hash, record.ordinal);
     }
     this.associations.push([record.memoryId, record.role, record.sha256]);
     if (this.associations.length >= BATCH) await this.flushAssociations();
@@ -167,12 +160,10 @@ export class RestoreMerge {
       }
       await indexDates(this.tx, source.source.saved.preview.sources[0]!);
     } else if (source.completed > 0) {
-      this.sourcesUpdated++;
       // Only ever forward: planned work with preserved files is paused (resumable); nothing pending is completed.
       const state = !pending ? 'completed' : source.state === 'planned' ? 'paused' : source.state;
       if (state !== source.state) await this.tx.runAsync('UPDATE import_jobs SET state=? WHERE hash=?', state, source.hash);
     }
-    this.filesPreserved += source.completed;
     await this.flushAssociations();
   }
 
@@ -190,10 +181,26 @@ export class RestoreMerge {
     await this.tx.runAsync(`INSERT OR IGNORE INTO library_favorites(memory_id) VALUES ${rows.map(() => '(?)').join(',')}`, ...rows);
   }
 
+  private async donePerJob(): Promise<Map<string, number>> {
+    const jobs = await this.tx.getAllAsync<{ hash: string; done: number }>(
+      "SELECT j.hash,(SELECT count(*) FROM import_items i WHERE i.job_hash=j.hash AND i.state='done') AS done FROM import_jobs j");
+    return new Map(jobs.map(job => [job.hash, job.done]));
+  }
+  /** Jobs that existed before the restore and now have more completed files, directly or through a merged duplicate. */
+  private async updatedJobs(): Promise<number> {
+    const now = await this.donePerJob(); let updated = 0;
+    for (const [hash, done] of this.doneBefore) if ((now.get(hash) ?? 0) > done) updated++;
+    return updated;
+  }
+
   /** Flushes everything, re-checks the library invariants the exporter relies on, and reports the changes. */
   async finish(): Promise<RestoreChanges> {
     check(this.before, 'restore-failed');
     await this.flushObjects(); await this.closeSource(); await this.flushAssociations(); await this.flushFavorites();
+    // Folder jobs restored in listing order become canonical here, inside this transaction, exactly as the schema 5
+    // migration does it: re-keyed if alone, merged into the canonical job where they agree, kept apart where they
+    // completed a file with other bytes. So a library, its backup and that backup restored all hold the same jobs.
+    await canonicalizeFolderJobs(this.tx);
     // The same consistency rules writeBackupSnapshot enforces, so a restored library can always be exported.
     check(!await this.tx.getFirstAsync(`SELECT 1 FROM memory_objects m WHERE NOT EXISTS (
       SELECT 1 FROM import_items i WHERE i.state='done' AND i.memory_id=m.memory_id AND i.role=m.role AND i.object_hash=m.object_hash) LIMIT 1`), 'restore-failed');
@@ -205,7 +212,7 @@ export class RestoreMerge {
     return {
       memoriesAdded: after.base - before.base, associationsAdded: after.associations - before.associations,
       objectsAdded: after.objects - before.objects, favoritesAdded: after.favorites - before.favorites,
-      sourcesAdded: after.jobs - before.jobs, sourcesUpdated: this.sourcesUpdated, filesPreserved: this.filesPreserved,
+      sourcesAdded: after.jobs - before.jobs, sourcesUpdated: await this.updatedJobs(), filesPreserved: after.done - before.done,
     };
   }
 }

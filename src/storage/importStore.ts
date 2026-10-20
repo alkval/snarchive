@@ -30,13 +30,15 @@ export async function indexDates(tx: SqlConnection, source: SourceInventory) {
     if (id && date.kind !== 'unknown') await tx.runAsync('INSERT OR IGNORE INTO library_dates(memory_id,kind,value,day) VALUES (?,?,?,?)', id, date.kind, date.kind === 'instant' ? date.utc : date.date, date.kind === 'instant' ? date.utc.slice(0, 10) : date.date);
   }
 }
-/** Schema 5. Folder jobs planned by schema 4 (commit 307eda2) were keyed by their evidence in the provider's listing
- * order. Each is rewritten in canonical order under its canonical key, and each item keeps its state and object,
- * found by its path (unique per job), at its new ordinal. If the canonical key already belongs to a folder job
- * (the same folder planned twice from different listings), the two are merged where they agree: a file done in
- * either becomes done. If both completed a file with different objects, the older job is left as it was, so no
- * preserved observation is lost; it stays valid, but a new scan matches only the canonical job. */
-async function canonicalizeFolderJobs(tx: SqlConnection) {
+/** Schema 5, and the end of every restore. Folder jobs planned by schema 4 (commit 307eda2) were keyed by their
+ * evidence in the provider's listing order. Jobs are visited in key order; each one not in canonical order is
+ * rewritten in canonical order under its canonical key, and each item keeps its state and object, found by its path
+ * (unique per job), at its new ordinal. If the canonical key already belongs to a folder job (the same folder planned
+ * twice from different listings), the two are merged where they agree: a file done in either becomes done. If both
+ * completed a file with different objects, the listing-order job is kept apart, unchanged, under its own key, so both
+ * observations, their objects and associations, and its pending files survive; a backup writes it as it is, and a
+ * restore keeps it apart again by this same rule. A new scan matches only the canonical job. */
+export async function canonicalizeFolderJobs(tx: SqlConnection): Promise<void> {
   const jobs = await tx.getAllAsync<{ hash: string }>("SELECT hash FROM import_jobs WHERE kind='folder' ORDER BY hash");
   for (const { hash } of jobs) {
     const job = await tx.getFirstAsync<{ plan_json: string }>('SELECT plan_json FROM import_jobs WHERE hash=?', hash);

@@ -80,6 +80,15 @@ async function dump(db: DB) {
     associations: all('SELECT * FROM memory_objects ORDER BY memory_id,role,object_hash'), dates: all('SELECT * FROM library_dates ORDER BY memory_id,kind,value') };
 }
 async function manifest(db: DB) { const lines: string[] = []; await writeBackupSnapshot(db, { async line(line) { lines.push(line); }, async object() {} }); return lines.join(''); }
+async function restoreChanges(db: DB, text: string) {
+  const validator = new BackupManifestValidator({ keepRecords: true }); let changes: Awaited<ReturnType<RestoreMerge['finish']>> | null = null;
+  await db.withExclusiveTransactionAsync(async tx => {
+    const merge = new RestoreMerge(tx); await merge.begin();
+    validator.push(text); for (const record of validator.takeRecords()) await merge.apply(record);
+    validator.finish(); changes = await merge.finish();
+  });
+  return changes!;
+}
 async function restoreInto(db: DB, text: string) {
   const validator = new BackupManifestValidator({ keepRecords: true });
   await db.withExclusiveTransactionAsync(async tx => {
@@ -395,6 +404,19 @@ test('a restored folder job resumes from a differently ordered listing under ano
   assert.equal((target.db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 1);
 });
 
+/** Export -> verify -> restore into an empty library keeps every job (key, kind, state, plan), item, object, memory
+ * and association; re-export is byte-identical, a repeated restore changes nothing, and so does a second round trip. */
+async function assertLosslessRoundTrip(t: { after(fn: () => void): void }, db: DB) {
+  const lossless = async (d: DB) => { const all = await dump(d); return { jobs: all.jobs, items: all.items, objects: all.objects, memories: all.memories, associations: all.associations }; };
+  const text = await manifest(db); validate(text);
+  const target = await library(t); await restoreInto(target.db, text);
+  assert.deepEqual(await lossless(target.db), await lossless(db), 'restore into an empty library is lossless');
+  assert.equal(await manifest(target.db), text, 're-export is identical');
+  const before = await dump(target.db); await restoreInto(target.db, text);
+  assert.deepEqual(await dump(target.db), before, 'a repeated restore is idempotent');
+  const again = await library(t); await restoreInto(again.db, await manifest(target.db));
+  assert.deepEqual(await lossless(again.db), await lossless(db), 'a second round trip is lossless');
+}
 /** A folder job as schema 4 (commit 307eda2) planned it: evidence in listing order, keyed by its listed-order hash. */
 async function legacyJob(db: DB, order: (entries: DirectorySnapshot['entries']) => DirectorySnapshot['entries'], label = 'source-1') {
   const listed = normalizeSource(scanned(NESTED, order, label));
@@ -447,17 +469,28 @@ test('schema 5 merges two listing-order jobs for the same folder where they agre
   assert.equal((await agree.store.summary()).files, 2, 'both files stay done, once');
   await manifest(agree.db); // Still exportable.
 
+  // Conflicting work is kept apart, losslessly, through migration, export, restore and re-export.
   const conflict = await library(t);
   const c = await legacyJob(conflict.db, reversed), d = await legacyJob(conflict.db, e => shuffled(e, 11));
+  const changed = 'photo one, changed later';
   await conflict.store.commit(c.key, ordinalOf(c.listed, one), receiptFor('photo one'));
-  await conflict.store.commit(d.key, ordinalOf(d.listed, one), receiptFor('photo one, changed later'));
+  await conflict.store.commit(d.key, ordinalOf(d.listed, one), receiptFor(changed));
+  await conflict.store.commit(d.key, ordinalOf(d.listed, two), receiptFor('video two'));
+  for (const key of [c.key, d.key]) await conflict.store.state(key, 'paused'); // As a run that stopped would leave them.
   conflict.db.raw.exec('PRAGMA user_version=4;'); await conflict.store.initialize();
-  assert.equal((conflict.db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 2, 'conflicting work is kept, not merged');
-  assert.equal((await conflict.store.summary()).files, 2);
-  const text = await manifest(conflict.db); validate(text); // Both remain exportable and valid.
-  const empty = await library(t); const before = await dump(empty.db);
-  await assert.rejects(restoreInto(empty.db, text), (error: Error) => error.message === 'restore-conflict', 'both map to one canonical job');
-  assert.deepEqual(await dump(empty.db), before);
+  const canonicalKey = folderInventoryHash(c.listed);
+  const kept = (conflict.db.raw.prepare('SELECT hash FROM import_jobs ORDER BY hash').all() as { hash: string }[]).map(row => row.hash);
+  assert.equal(kept.length, 2); assert.ok(kept.includes(canonicalKey), 'one of them became the canonical job');
+  assert.equal((await conflict.store.summary()).files, 3); assert.equal((await conflict.store.objects('one')).length, 2, 'both variants kept');
+  await assertLosslessRoundTrip(t, conflict.db);
+  // A new scan, in any order and under any label, finds the canonical job and resumes its pending files.
+  assert.equal(await conflict.store.planFolder(scanned(NESTED, e => shuffled(e, 4), 'source-8')), canonicalKey);
+  const copier = new Copier(NESTED); copier.order = reversed;
+  for (const content of ['photo one', changed, 'video two']) { const r = receiptFor(content); copier.stored.set(r.sha256, r.bytes); }
+  assert.equal((await run(conflict.store, copier, canonicalKey)).complete, true);
+  assert.equal((conflict.db.raw.prepare('SELECT count(*) AS n FROM import_jobs').get() as { n: number }).n, 2, 'no new job');
+  assert.equal((conflict.db.raw.prepare("SELECT count(*) AS n FROM memory_objects WHERE memory_id='one' AND role='photo'").get() as { n: number }).n, 2, 'both photo variants kept');
+  await assertLosslessRoundTrip(t, conflict.db);
 });
 
 test('a version-2 backup written in listing order (307eda2) verifies, restores under the canonical key, and maps observations by path', async t => {
@@ -486,4 +519,35 @@ test('ZIP sources keep their listing order and identity', async t => {
   const db = (store as unknown as { db: DB }).db;
   assert.deepEqual(db.raw.prepare('SELECT relative_path FROM import_items WHERE job_hash=? ORDER BY ordinal').all(zip).map(row => (row as { relative_path: string }).relative_path),
     ['2026-02-07_three-main.jpg', '2026-02-05_one-main.jpg']);
+});
+
+test('a backup with two agreeing listing-order jobs restores as one canonical job with all their work', async t => {
+  const source = await library(t); // Already schema 5: the fixture rows stay in listing order, as a 307eda2 backup holds them.
+  const a = await legacyJob(source.db, reversed), b = await legacyJob(source.db, e => shuffled(e, 11));
+  const one = 'part-a/memories/2026-02-05_one-main.jpg', two = 'part-b/memories/2026-02-06_two-main.mp4';
+  await source.store.commit(a.key, ordinalOf(a.listed, one), receiptFor('photo one'));
+  await source.store.commit(b.key, ordinalOf(b.listed, two), receiptFor('video two'));
+  const text = await manifest(source.db); assert.equal(validate(text).folders, 2);
+  const target = await library(t); const changes = await restoreChanges(target.db, text);
+  const canonicalKey = folderInventoryHash(a.listed);
+  assert.deepEqual((target.db.raw.prepare('SELECT hash,state FROM import_jobs').all() as { hash: string; state: string }[]).map(job => [job.hash, job.state]), [[canonicalKey, 'paused']]);
+  assert.deepEqual([changes.sourcesAdded, changes.filesPreserved, changes.memoriesAdded], [1, 2, 2]);
+  assert.ok(isCanonicalFolderSource((await target.store.folderPlan(canonicalKey))!));
+  // Restoring the same backup again changes nothing and reports nothing.
+  const before = await dump(target.db); const repeat = await restoreChanges(target.db, text);
+  assert.deepEqual(await dump(target.db), before); assert.deepEqual([repeat.sourcesAdded, repeat.filesPreserved, repeat.sourcesUpdated], [0, 0, 0]);
+  // Into a library that already has the canonical job with neither file done, the work is merged in and reported.
+  const other = await library(t); await other.store.planFolder(scanned(NESTED, e => e));
+  const merged = await restoreChanges(other.db, text);
+  assert.deepEqual([merged.sourcesAdded, merged.sourcesUpdated, merged.filesPreserved], [0, 1, 2]);
+});
+
+test('a genuine conflict in the same folder job is still refused, and nothing changes', async t => {
+  const first = await library(t); const hash = await plan(first.store, NESTED);
+  await first.store.commit(hash, 0, receiptFor('photo one'));
+  const second = await library(t); await plan(second.store, NESTED, 'source-4');
+  await second.store.commit(hash, 0, receiptFor('other bytes for the same file'));
+  const text = await manifest(second.db); const before = await dump(first.db);
+  await assert.rejects(restoreInto(first.db, text), (error: Error) => error.message === 'restore-conflict');
+  assert.deepEqual(await dump(first.db), before);
 });
