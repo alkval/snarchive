@@ -7,6 +7,7 @@ import { inventoryFromSnapshot, type DirectorySnapshot } from '../src/import/sou
 import { runFolderImport, FolderStepError, FolderImportFailure, type FolderCopier, type FolderScan } from '../src/import/runFolderImport.ts';
 import { canonicalFolderSource, folderInventoryHash, isCanonicalFolderSource, listedFolderHash, sourceEvidence } from '../src/import/sourceEvidence.ts';
 import { sha256Hex } from '../src/domain/sha256.ts';
+import { en } from '../src/i18n/en.ts';
 import { writeBackupSnapshot } from '../src/backup/snapshot.ts';
 import { BackupManifestValidator } from '../src/backup/manifest.ts';
 import { RestoreMerge } from '../src/backup/restoreMerge.ts';
@@ -550,4 +551,13 @@ test('a genuine conflict in the same folder job is still refused, and nothing ch
   const text = await manifest(second.db); const before = await dump(first.db);
   await assert.rejects(restoreInto(first.db, text), (error: Error) => error.message === 'restore-conflict');
   assert.deepEqual(await dump(first.db), before);
+});
+
+test('the unfinished count includes folder jobs, and its wording names folders as well as ZIPs', async t => {
+  const { store } = await library(t); const hash = await plan(store, EXPORT); const copier = new Copier(EXPORT);
+  copier.faults.set('memories/2026-02-06_two-main.mp4', { code: 'source-unreadable' });
+  await run(store, copier, hash);
+  assert.equal((await store.summary()).unfinished, 1);
+  assert.equal(en.libraryUnfinished(1), '1 unfinished import. Choose the same ZIP or folder below to resume.');
+  assert.doesNotMatch(en.libraryUnfinished(2), /ZIP imports/);
 });

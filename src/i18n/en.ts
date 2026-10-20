@@ -11,7 +11,7 @@ export const en = {
   // Home: library
   libraryHeadline: (memories: number) => memories === 1 ? 'memory preserved' : 'memories preserved',
   libraryStats: (objects: number, files: number) => `${plural(objects, 'stored original', 'stored originals')} · ${plural(files, 'file record', 'file records')}`,
-  libraryUnfinished: (jobs: number) => `${plural(jobs, 'unfinished ZIP import', 'unfinished ZIP imports')}. Choose the same ZIP below to resume.`,
+  libraryUnfinished: (jobs: number) => `${plural(jobs, 'unfinished import', 'unfinished imports')}. Choose the same ZIP or folder below to resume.`,
   libraryConflicts: (memories: number) => `${plural(memories, 'memory has', 'memories have')} competing file versions. All were kept.`,
   libraryBrowse: 'Browse library', libraryBrowseDetail: 'Photos and videos, newest first',
   backupOpen: 'Back up library', backupOpenDetail: 'Save a portable ZIP of everything preserved',
