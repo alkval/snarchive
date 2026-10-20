@@ -22,7 +22,7 @@ export function VideoPlayerView({ video, row, store }: { video: LocalVideo; row:
   const currentTime = progress?.currentTime ?? 0;
   const [muted, setMuted] = useState(false);
   const [overlay, setOverlay] = useState<string | null>(null);
-  const [showOverlay, setShowOverlay] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
   const [note, setNote] = useState('');
   useEffect(() => {
     const listener = AppState.addEventListener('change', state => { if (state !== 'active') player.pause(); });

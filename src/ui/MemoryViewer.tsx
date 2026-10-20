@@ -50,12 +50,12 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: Lib
   const [video, setVideo] = useState<LocalVideo | null>(null);
   const [base, setBase] = useState<Photo | null>(null);
   const [overlay, setOverlay] = useState<Photo | null>(null);
-  const [showOverlay, setShowOverlay] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
   const [overlayStatus, setOverlayStatus] = useState('');
   const [favoriteError, setFavoriteError] = useState('');
-  const overlayOpacity = useRef(new Animated.Value(0)).current;
+  const overlayOpacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     Animated.timing(overlayOpacity, { toValue: showOverlay ? 1 : 0, duration: 150, easing: Easing.bezier(0.23, 1, 0.32, 1), useNativeDriver: true }).start();
   }, [showOverlay, overlayOpacity]);
