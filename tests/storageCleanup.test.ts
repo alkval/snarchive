@@ -9,6 +9,7 @@ import { ImportStore, type Receipt } from '../src/storage/importStore.ts';
 import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
 import { reviewStorage, removeSelected, StorageReviewFailure, type StorageBridge, type StorageEntry, type StorageKind } from '../src/integrity/storageCleanup.ts';
 import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts';
+import { quarantineCopyId, storageEntryLabel } from '../src/ui/storageLabels.ts';
 
 /** A file database, so a second connection can compete with the exclusive transaction as another writer would. */
 class DB implements SqlDatabase {
@@ -268,4 +269,22 @@ test('a rescan after an interrupted removal shows what is still there and never 
   const again = await reviewStorage(db, fake, never, () => {});
   assert.deepEqual(again.uncatalogued.map(e => e.path), first.slice(1).map(e => e.path));
   assert.deepEqual(fake.sessions, ['scan', 'cleanup', 'scan'], 'nothing removed without a new selection');
+});
+
+test('copies of one original with the same size and date get distinct, stable labels from their file names', () => {
+  const hash = hashOf('damaged-original'), modified = new Date(2026, 9, 20, 12).getTime();
+  const copy = (millis: string, random: string): StorageEntry =>
+    ({ kind: 'quarantine', path: `quarantine/${hash}-${millis}-${random}.damaged`, hash, bytes: 15_000, modified, identity: `q-${random}` });
+  const first = copy('1760000000000', '00000000'), second = copy('1760000000001', '00000001');
+  const a = storageEntryLabel(first), b = storageEntryLabel(second);
+  assert.equal(a.detail, b.detail, 'same rounded size and calendar date');
+  assert.notEqual(a.title, b.title); assert.notEqual(a.accessibilityLabel, b.accessibilityLabel);
+  assert.equal(quarantineCopyId(first.path), '1760000000000-00000000');
+  for (const [entry, label] of [[first, a], [second, b]] as const) {
+    assert.ok(label.title.includes(quarantineCopyId(entry.path)) && label.title.includes(hash.slice(0, 12)), 'copy and original identifiers shown');
+    assert.ok(label.accessibilityLabel.includes(label.title) && label.accessibilityLabel.includes(label.detail), 'spoken label carries both');
+  }
+  assert.deepEqual(storageEntryLabel({ ...first }), a, 'stable: derived only from the entry');
+  const original = storageEntryLabel({ kind: 'object', path: `objects/${hash.slice(0, 2)}/${hash}`, hash, bytes: 15_000, modified, identity: 'o' });
+  assert.equal(original.title, `Original ${hash.slice(0, 12)}`);
 });

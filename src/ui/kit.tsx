@@ -57,9 +57,10 @@ export function Group({ header, footer, children, inset = 16 }: { header?: strin
   </View>;
 }
 
-/** checked: a selectable row (a checkbox to assistive technology); undefined for ordinary rows. */
-export function Row({ icon, title, detail, value, onPress, disabled = false, accessory, tone, checked }: {
-  icon?: IconName; title: string; detail?: string; value?: string | number; onPress?: () => void; disabled?: boolean; accessory?: ReactNode; tone?: 'warning'; checked?: boolean;
+/** checked: a selectable row (a checkbox to assistive technology); undefined for ordinary rows. label: replaces the
+ * spoken label built from title and detail. */
+export function Row({ icon, title, detail, value, onPress, disabled = false, accessory, tone, checked, label }: {
+  icon?: IconName; title: string; detail?: string; value?: string | number; onPress?: () => void; disabled?: boolean; accessory?: ReactNode; tone?: 'warning'; checked?: boolean; label?: string;
 }) {
   const t = useTheme();
   const content = <View style={styles.row}>
@@ -71,8 +72,8 @@ export function Row({ icon, title, detail, value, onPress, disabled = false, acc
     {value !== undefined && <Text style={[type.body, styles.value, { color: t.secondary }]}>{value}</Text>}
     {accessory ?? (onPress ? <Ionicons name="chevron-forward" size={18} color={t.secondary} /> : null)}
   </View>;
-  if (!onPress) return <View accessible accessibilityLabel={[title, detail, value].filter(item => item !== undefined && item !== '').join(', ')}>{content}</View>;
-  return <Pressable accessibilityRole={checked === undefined ? 'button' : 'checkbox'} accessibilityLabel={detail ? `${title}, ${detail}` : title}
+  if (!onPress) return <View accessible accessibilityLabel={label ?? [title, detail, value].filter(item => item !== undefined && item !== '').join(', ')}>{content}</View>;
+  return <Pressable accessibilityRole={checked === undefined ? 'button' : 'checkbox'} accessibilityLabel={label ?? (detail ? `${title}, ${detail}` : title)}
     accessibilityState={checked === undefined ? { disabled } : { disabled, checked }} disabled={disabled} onPress={onPress}
     style={({ pressed }) => ({ backgroundColor: pressed ? t.pressed : 'transparent', opacity: disabled ? 0.4 : 1 })}>{content}</Pressable>;
 }

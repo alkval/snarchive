@@ -7,6 +7,7 @@ import { StorageReviewFailure, type CleanupReport, type StorageEntry, type Stora
 import { cancelStorageWork, removeStorageSelection, reviewLibraryStorage } from '../platform/storageCleanup';
 import { en } from '../i18n/en';
 import { BackButton, Button, Group, LargeTitle, Notice, Row } from './kit';
+import { storageEntryLabel, storageSize as size } from './storageLabels';
 import { space, useTheme } from './theme';
 
 const PAGE = 50;
@@ -20,16 +21,8 @@ type State =
   | { kind: 'removed'; target: StorageKind; report: CleanupReport }
   | { kind: 'remove-failed'; code: string; cleanupFailed: boolean };
 
-function size(bytes: number): string {
-  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
-  let value = bytes, unit = 0;
-  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit++; }
-  return unit === 0 ? `${bytes} bytes` : `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
-}
-const day = (millis: number) => {
-  const date = new Date(millis), pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; // Local date.
-};
+/** The same title, detail and spoken label wherever a file is shown. */
+const labelled = (entry: StorageEntry) => { const { title, detail, accessibilityLabel } = storageEntryLabel(entry); return { title, detail, label: accessibilityLabel }; };
 const list = (review: Review, kind: StorageKind) => kind === 'object' ? review.result.uncatalogued : review.result.quarantine;
 
 /** Reviews removable files (read-only), then removes only what the user selected and confirmed. A new review is needed
@@ -108,9 +101,7 @@ export function ManageStorageScreen({ onClose }: { onClose(): void }) {
     return <View key={target} style={styles.block}>
       <Group header={header} footer={target === 'object' ? en.storageUncataloguedFooter : en.storageQuarantineFooter}>
         {entries.length === 0 ? <Row title={en.storageNone} /> : entries.slice(0, review.shown[target]).map(entry => (
-          <Row key={entry.path} checked={selected.has(entry.path)} onPress={() => toggle(target, entry.path)}
-            title={target === 'object' ? en.storageObjectTitle(entry.hash) : en.storageQuarantineTitle(entry.hash)}
-            detail={en.storageDetail(size(entry.bytes), day(entry.modified))}
+          <Row key={entry.path} checked={selected.has(entry.path)} onPress={() => toggle(target, entry.path)} {...labelled(entry)}
             accessory={<Ionicons name={selected.has(entry.path) ? 'checkmark-circle' : 'ellipse-outline'} size={22} color={selected.has(entry.path) ? t.accent : t.secondary} />} />
         ))}
       </Group>
@@ -147,9 +138,7 @@ export function ManageStorageScreen({ onClose }: { onClose(): void }) {
       {confirming && <Notice tone="warning" title={en.storageConfirmTitle(confirmSelection.length, size(confirmSelection.reduce((n, e) => n + e.bytes, 0)))}
         message={confirming.target === 'quarantine' ? en.storageConfirmQuarantine : en.storageConfirmObjects} />}
       {confirming && <Group header={en.storageSelection}>
-        {confirmSelection.map(entry => <Row key={entry.path}
-          title={entry.kind === 'object' ? en.storageObjectTitle(entry.hash) : en.storageQuarantineTitle(entry.hash)}
-          detail={en.storageDetail(size(entry.bytes), day(entry.modified))} />)}
+        {confirmSelection.map(entry => <Row key={entry.path} {...labelled(entry)} />)}
       </Group>}
       {report && <>
         {report.stopped && <Notice tone={report.stopped === 'cancelled' ? 'info' : 'warning'} message={en.storageStopped(report.stopped)} />}

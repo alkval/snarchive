@@ -154,7 +154,7 @@ export const en = {
   storageNone: 'Nothing to review here.',
   storageCount: (count: number, bytes: string) => `${count.toLocaleString()} · ${bytes}`,
   storageObjectTitle: (hash: string) => `Original ${hash.slice(0, 12)}`,
-  storageQuarantineTitle: (hash: string) => `Copy of ${hash.slice(0, 12)}`,
+  storageQuarantineTitle: (copy: string, hash: string) => `Copy ${copy} of original ${hash.slice(0, 12)}`,
   storageDetail: (bytes: string, date: string) => `${bytes} · ${date}`,
   storageSelectAll: (count: number) => `Select all ${count.toLocaleString()}`, storageClear: 'Clear selection',
   storageMore: (shown: number, total: number) => `Show more (${shown.toLocaleString()} of ${total.toLocaleString()})`,
