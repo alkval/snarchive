@@ -39,7 +39,7 @@ public final class BackupInspection implements Closeable {
     OriginalStore.STAGING_CLEANUP_FAILED,
     // Repair (section 22): a damaged original could not be kept in quarantine, a missing one reappeared before the
     // repair finished, or a cached thumbnail could not be discarded. The original is unchanged in each case.
-    "quarantine-failed", "repair-target-appeared", "thumbnail-eviction-failed", "storage-busy"));
+    "quarantine-failed", "repair-target-appeared", "repair-target-inaccessible", "thumbnail-eviction-failed", "storage-busy"));
 
   public static final class Chunk {
     public final String text; public final boolean done;
@@ -308,9 +308,11 @@ public final class BackupInspection implements Closeable {
 
   /** What repairing one recorded original from this backup did. */
   public enum RepairOutcome { REPAIRED, ALREADY_VALID, UNAVAILABLE, MISMATCH }
+  /** warning: set on REPAIRED for a problem after the replacement (the repaired file is in place). */
   public static final class Repaired {
-    public final RepairOutcome outcome; public final boolean storeCleanupFailed;
-    Repaired(RepairOutcome outcome, boolean storeCleanupFailed) { this.outcome = outcome; this.storeCleanupFailed = storeCleanupFailed; }
+    public final RepairOutcome outcome; public final boolean storeCleanupFailed; public final String warning;
+    Repaired(RepairOutcome outcome, boolean storeCleanupFailed) { this(outcome, storeCleanupFailed, null); }
+    Repaired(RepairOutcome outcome, boolean storeCleanupFailed, String warning) { this.outcome = outcome; this.storeCleanupFailed = storeCleanupFailed; this.warning = warning; }
   }
 
   /** Repair (section 22), after the manifest was validated, every object declared and the session sealed: replaces the
@@ -327,15 +329,18 @@ public final class BackupInspection implements Closeable {
     try {
       // The backup must not have moved while its copy was read; checked before anything is replaced, so a changed
       // backup stops the repair instead of being reported after a replacement.
-      OriginalStore.Repair result = store.repair(new Bounded(ZipInventory.open(source, header), bytes), hash, bytes, header.getCrc(), stop,
+      OriginalStore.RepairResult result = store.repair(new Bounded(ZipInventory.open(source, header), bytes), hash, bytes, header.getCrc(), stop,
         () -> { source.checkUnchanged(); beforeReplace.run(); });
-      return new Repaired(result == OriginalStore.Repair.REPAIRED ? RepairOutcome.REPAIRED : RepairOutcome.ALREADY_VALID, false);
+      return new Repaired(result.outcome == OriginalStore.Repair.REPAIRED ? RepairOutcome.REPAIRED : RepairOutcome.ALREADY_VALID, false, result.warning);
     } catch (IOException error) {
       String message = error.getMessage();
       boolean mismatch = "content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)
         || "backup-damaged".equals(message) || (error instanceof ZipException && ((ZipException) error).getType() == ZipException.Type.CHECKSUM_MISMATCH);
       if (!mismatch) throw error;
-      source.checkUnchanged(); // A backup that changed while being read is source-changed, not a bad copy.
+      // A backup that changed while being read is source-changed, not a bad copy. The mismatch's store leftover stays
+      // attached to whichever error is reported.
+      try { source.checkUnchanged(); }
+      catch (IOException changed) { for (Throwable suppressed : error.getSuppressed()) changed.addSuppressed(suppressed); throw changed; }
       boolean leftover = false;
       for (Throwable suppressed : error.getSuppressed()) leftover |= OriginalStore.STAGING_CLEANUP_FAILED.equals(suppressed.getMessage());
       return new Repaired(RepairOutcome.MISMATCH, leftover);

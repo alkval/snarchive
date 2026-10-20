@@ -3,7 +3,7 @@ import { BackHandler, ScrollView, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Affected, CheckProgress, CheckResult, Problem, RepairProgress, RepairReport } from '../integrity/originals';
-import { RepairFailure } from '../integrity/originals';
+import { RepairFailure, repairWarnings } from '../integrity/originals';
 import { cancelOriginalsWork, checkLibraryOriginals, describeProblems, repairFromBackup } from '../platform/originalsCheck';
 import { sourcePicker } from '../platform/sourcePicker';
 import { en } from '../i18n/en';
@@ -18,7 +18,7 @@ type State =
   | ({ kind: 'checked' } & Found)
   | ({ kind: 'repairing'; progress: RepairProgress | null; cancelling: boolean } & Found)
   | ({ kind: 'repaired'; report: RepairReport } & Found)
-  | ({ kind: 'repair-failed'; code: string; cleanupFailed: boolean } & Found)
+  | ({ kind: 'repair-failed'; code: string; cleanupFailed: boolean; storeCleanupFailed: boolean } & Found)
   | ({ kind: 'picker-closed' } & Found);
 
 function size(bytes: number): string {
@@ -86,7 +86,8 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
       const cleanupFailed = error instanceof RepairFailure && error.cleanupFailed;
-      if (mounted.current) setState({ kind: 'repair-failed', code: stopped.current ? 'cancelled' : code, cleanupFailed, ...base });
+      const storeCleanupFailed = error instanceof RepairFailure && error.storeCleanupFailed;
+      if (mounted.current) setState({ kind: 'repair-failed', code: stopped.current ? 'cancelled' : code, cleanupFailed, storeCleanupFailed, ...base });
     } finally { running.current = null; }
   }
 
@@ -117,10 +118,12 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
       {state.kind === 'repair-failed' && <>
         <Notice tone={state.code === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairFailed(state.code)} />
         {state.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
+        {state.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
       </>}
       {report && <>
         {report.stopped && <Notice tone={report.stopped === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairStopped(report.stopped)} />}
         {report.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
+        {repairWarnings(report).map(([code, count]) => <Notice key={code} tone="warning" message={en.originalsRepairWarning(code, count)} />)}
         {report.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
         <Group header={en.originalsRepairTitle} footer={report.repaired.length > 0 ? `${en.originalsQuarantine} ${en.originalsAfterRepair}` : en.originalsAfterRepair}>
           {([['repaired', report.repaired.length], ['alreadyValid', report.alreadyValid.length], ['unavailable', report.unavailable.length],

@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { ImportStore, type Receipt } from '../src/storage/importStore.ts';
 import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
 import { writeBackupSnapshot } from '../src/backup/snapshot.ts';
-import { runOriginalsCheck, affectedMemories, runBackupRepair, CheckFailure, RepairFailure, type CheckBridge, type Health, type RepairBridge, type Problem } from '../src/integrity/originals.ts';
+import { runOriginalsCheck, affectedMemories, runBackupRepair, repairWarnings, CheckFailure, RepairFailure, type CheckBridge, type Health, type RepairBridge, type Problem } from '../src/integrity/originals.ts';
 import { en } from '../src/i18n/en.ts';
 import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts';
 
@@ -101,14 +101,15 @@ async function manifestOf(db: DB) { const lines: string[] = []; await writeBacku
 /** A fake native repair session over a manifest; outcomes per hash (or a failure code), recording the call order. */
 class Repairer implements RepairBridge {
   calls: string[] = []; declared: string[] = []; text: string; offset = 0;
-  outcomes = new Map<string, { ok: boolean; outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; code?: string; storeCleanupFailed?: boolean }>();
+  outcomes = new Map<string, { ok: boolean; outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; code?: string; storeCleanupFailed?: boolean; warning?: string | null }>();
+  prepareResult: { ok: boolean; code?: string; storeCleanupFailed?: boolean } = { ok: true }; onPrepare: (() => void) | null = null;
   beginResult: { ok: boolean; code?: string; cleanupFailed?: boolean } = { ok: true }; endOk = true; onRepair: ((hash: string) => void) | null = null;
   constructor(text: string) { this.text = text; }
   async beginBackupInspection() { this.calls.push('begin'); return this.beginResult; }
   async readBackupManifest() { this.calls.push('read'); const chunk = this.text.slice(this.offset, this.offset + 300); this.offset += 300; return { ok: true, text: chunk, done: this.offset >= this.text.length }; }
   async declareBackupObjects(hashes: string[]) { this.calls.push('declare'); this.declared.push(...hashes); return { ok: true }; }
   async sealBackupInspection() { this.calls.push('seal'); return { ok: true }; }
-  async prepareBackupRepair() { this.calls.push('prepare'); return { ok: true }; }
+  async prepareBackupRepair() { this.calls.push('prepare'); this.onPrepare?.(); return this.prepareResult; }
   async repairBackupObject(hash: string) { this.calls.push(`repair:${hash.slice(0, 4)}`); this.onRepair?.(hash); return this.outcomes.get(hash) ?? { ok: true, outcome: 'repaired' as const }; }
   async endBackupInspection() { this.calls.push('end'); return { ok: this.endOk }; }
 }
@@ -125,7 +126,7 @@ test('repair from a version-1 backup: the manifest is validated first, each prob
   const before = dump(db);
   const report = await runBackupRepair(bridge, 'content://backup', problems, () => false, () => {});
   assert.deepEqual(report, { repaired: [problems[0]!.hash, problems[1]!.hash], alreadyValid: [problems[2]!.hash], unavailable: [], mismatch: [problems[3]!.hash],
-    failed: [{ hash: problems[4]!.hash, code: 'quarantine-failed' }], notAttempted: [], stopped: null, storeCleanupFailed: true, cleanupFailed: false });
+    failed: [{ hash: problems[4]!.hash, code: 'quarantine-failed' }], notAttempted: [], stopped: null, storeCleanupFailed: true, cleanupFailed: false, warnings: [] });
   assert.deepEqual(bridge.calls.filter(c => !c.startsWith('read') && !c.startsWith('declare')).slice(0, 3), ['begin', 'seal', 'prepare']);
   assert.equal(bridge.calls.at(-1), 'end'); assert.equal(bridge.calls.filter(c => c === 'end').length, 1);
   assert.equal(new Set(bridge.declared).size, 5, 'every catalog object declared');
@@ -188,4 +189,40 @@ test('wording: repair points to Check originals, keeps the advice to keep export
   assert.match(en.originalsQuarantine, /still use space/);
   assert.equal(en.originalsUsedBy(0, ''), 'Not used by any memory');
   assert.equal(en.originalsUsedBy(3, '2026-02-05 · photo'), '2026-02-05 · photo and 2 other memories');
+});
+
+test('check cancellation wins over results: during the last batch, or with missing and wrong-length verdicts', async t => {
+  const { db } = await library(t);
+  let stop = false; const last = new Checker(); last.cancel = () => { stop = true; }; last.cancelAfter = 0; // Only one batch: it is the last.
+  last.health.set(receipt('four').sha256, 'missing'); last.health.set(receipt('three').sha256, 'damaged');
+  await assert.rejects(runOriginalsCheck(db, last, () => stop, () => {}), (e: Error) => e instanceof CheckFailure && e.message === 'cancelled');
+  assert.equal(last.batches.length, 1); assert.equal(last.ended, 1);
+});
+
+test('a completed repair with a later problem stays repaired, with a warning, and the wording says it is repaired', async t => {
+  const { db } = await library(t); const text = await manifestOf(db);
+  const problems = [problem('shared'), problem('four'), problem('three')];
+  const bridge = new Repairer(text);
+  bridge.outcomes.set(problems[0]!.hash, { ok: true, outcome: 'repaired', warning: 'thumbnail-eviction-failed' });
+  bridge.outcomes.set(problems[1]!.hash, { ok: true, outcome: 'repaired', warning: 'sync-failed' });
+  bridge.outcomes.set(problems[2]!.hash, { ok: true, outcome: 'repaired', warning: null });
+  const report = await runBackupRepair(bridge, 'u', problems, () => false, () => {});
+  assert.deepEqual(report.repaired, problems.map(p => p.hash)); assert.deepEqual(report.failed, []);
+  assert.deepEqual(report.warnings, [{ hash: problems[0]!.hash, code: 'thumbnail-eviction-failed' }, { hash: problems[1]!.hash, code: 'sync-failed' }]);
+  assert.deepEqual(repairWarnings(report), [['thumbnail-eviction-failed', 1], ['sync-failed', 1]]);
+  assert.match(en.originalsRepairWarning('thumbnail-eviction-failed', 1), /^1 repaired original .*The original itself is repaired\.$/);
+  assert.match(en.originalsRepairWarning('sync-failed', 2), /^2 repaired originals are in place/);
+  for (const code of ['thumbnail-eviction-failed', 'sync-failed']) assert.doesNotMatch(en.originalsRepairWarning(code, 1), /left as it was|unchanged|not changed/);
+});
+
+test('a preparation failure carries the store leftover flag into RepairFailure, also when cancelled', async t => {
+  const { db } = await library(t); const text = await manifestOf(db);
+  const failing = new Repairer(text); failing.prepareResult = { ok: false, code: 'store-staging-cleanup-failed', storeCleanupFailed: true };
+  await assert.rejects(runBackupRepair(failing, 'u', [problem('shared')], () => false, () => {}),
+    (e: Error) => e instanceof RepairFailure && e.message === 'store-staging-cleanup-failed' && e.storeCleanupFailed && !e.cleanupFailed);
+  assert.ok(!failing.calls.some(c => c.startsWith('repair'))); assert.equal(failing.calls.at(-1), 'end');
+  let stop = false; const cancelled = new Repairer(text); cancelled.onPrepare = () => { stop = true; };
+  cancelled.prepareResult = { ok: false, code: 'cancelled', storeCleanupFailed: true };
+  await assert.rejects(runBackupRepair(cancelled, 'u', [problem('shared')], () => stop, () => {}),
+    (e: Error) => e instanceof RepairFailure && e.message === 'cancelled' && e.storeCleanupFailed);
 });

@@ -41,6 +41,8 @@ export async function runOriginalsCheck(db: SqlDatabase, bridge: CheckBridge, ca
         const batch = rows.slice(start, end);
         const result = await bridge.checkOriginals(batch.map(row => row.hash), batch.map(row => row.bytes));
         if (!result.ok || result.health?.length !== batch.length) throw new CheckFailure(cancelled() ? 'cancelled' : result.code ?? 'check-failed');
+        // A cancellation that arrived during the batch wins over its results.
+        if (cancelled()) throw new CheckFailure('cancelled');
         result.health.forEach((health, index) => { if (health !== 'valid') problems.push({ ...batch[index]!, health }); });
         checked += batch.length; bytes += batchBytes; start = end;
         progress({ checked, total, bytes, totalBytes });
@@ -48,6 +50,7 @@ export async function runOriginalsCheck(db: SqlDatabase, bridge: CheckBridge, ca
       if (rows.length < PAGE) break;
       after = rows[rows.length - 1]!.hash;
     }
+    if (cancelled()) throw new CheckFailure('cancelled');
     return { total, totalBytes, problems };
   } finally { await bridge.endOriginalCheck().catch(() => {}); }
 }
@@ -75,7 +78,8 @@ export interface RepairBridge {
   sealBackupInspection(): Promise<Result>;
   /** Removes partly written originals left in store staging by an earlier operation. */
   prepareBackupRepair(): Promise<Result>;
-  repairBackupObject(hash: string, bytes: number): Promise<Result & { outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch' }>;
+  /** warning: on a completed repair, a problem after the replacement (the repaired file is already in place). */
+  repairBackupObject(hash: string, bytes: number): Promise<Result & { outcome?: 'repaired' | 'already_valid' | 'unavailable' | 'mismatch'; warning?: string | null }>;
   endBackupInspection(): Promise<Result>;
 }
 export type RepairProgress = { stage: 'validating' } | { stage: 'repairing'; done: number; total: number };
@@ -85,14 +89,18 @@ export type RepairProgress = { stage: 'validating' } | { stage: 'repairing'; don
 export type RepairReport = {
   repaired: string[]; alreadyValid: string[]; unavailable: string[]; mismatch: string[]; failed: { hash: string; code: string }[];
   notAttempted: string[]; stopped: string | null; storeCleanupFailed: boolean; cleanupFailed: boolean;
+  /** Repaired originals with a problem after their replacement: "thumbnail-eviction-failed" or "sync-failed". */
+  warnings: { hash: string; code: string }[];
 };
-/** Fails before anything was repaired: the backup could not be opened or validated. */
+/** Fails before anything was repaired: the backup could not be opened or validated, or store staging could not be
+ * prepared. cleanupFailed: a private copy of the backup was left; storeCleanupFailed: a partly written original was
+ * left in store staging. Both are reported beside the code, including on cancellation. */
 export class RepairFailure extends Error {
-  readonly cleanupFailed: boolean;
-  constructor(code: string, cleanupFailed: boolean) { super(code); this.cleanupFailed = cleanupFailed; }
+  readonly cleanupFailed: boolean; readonly storeCleanupFailed: boolean;
+  constructor(code: string, cleanupFailed: boolean, storeCleanupFailed = false) { super(code); this.cleanupFailed = cleanupFailed; this.storeCleanupFailed = storeCleanupFailed; }
 }
 /** One object could not be repaired, but the others can still be tried; the original is unchanged in each case. */
-const PER_OBJECT = new Set(['quarantine-failed', 'repair-target-appeared', 'thumbnail-eviction-failed']);
+const PER_OBJECT = new Set(['quarantine-failed', 'repair-target-appeared', 'repair-target-inaccessible', 'thumbnail-eviction-failed']);
 
 /** Opens the chosen backup, validates its manifest and object catalog (versions 1 and 2), then repairs each problem
  * from it. Only the objects being repaired are read. The library database is never written: a repaired original keeps
@@ -101,7 +109,7 @@ export async function runBackupRepair(bridge: RepairBridge, uri: string, problem
   progress: (state: RepairProgress) => void): Promise<RepairReport> {
   const opened = await bridge.beginBackupInspection(uri);
   if (!opened.ok) throw new RepairFailure(cancelled() ? 'cancelled' : opened.code ?? 'backup-unreadable', !!opened.cleanupFailed);
-  const report: RepairReport = { repaired: [], alreadyValid: [], unavailable: [], mismatch: [], failed: [], notAttempted: [], stopped: null, storeCleanupFailed: false, cleanupFailed: false };
+  const report: RepairReport = { repaired: [], alreadyValid: [], unavailable: [], mismatch: [], failed: [], notAttempted: [], stopped: null, storeCleanupFailed: false, cleanupFailed: false, warnings: [] };
   const checked = <T extends Result>(result: T): T => {
     if (!result.ok) { if (result.storeCleanupFailed) report.storeCleanupFailed = true; if (result.cleanupFailed) report.cleanupFailed = true; throw new Error(result.code ?? 'backup-unreadable'); }
     return result;
@@ -119,7 +127,7 @@ export async function runBackupRepair(bridge: RepairBridge, uri: string, problem
       checked(await bridge.prepareBackupRepair());
     } catch (error) {
       await close();
-      throw new RepairFailure(cancelled() ? 'cancelled' : error instanceof Error ? error.message : 'backup-unreadable', report.cleanupFailed);
+      throw new RepairFailure(cancelled() ? 'cancelled' : error instanceof Error ? error.message : 'backup-unreadable', report.cleanupFailed, report.storeCleanupFailed);
     }
     for (const [index, problem] of problems.entries()) {
       if (cancelled()) { report.stopped = 'cancelled'; report.notAttempted.push(...problems.slice(index).map(p => p.hash)); break; }
@@ -129,6 +137,7 @@ export async function runBackupRepair(bridge: RepairBridge, uri: string, problem
       if (result.ok && result.outcome) {
         // A repair that finished is reported as repaired even if cancellation arrived just after it.
         ({ repaired: report.repaired, already_valid: report.alreadyValid, unavailable: report.unavailable, mismatch: report.mismatch })[result.outcome].push(problem.hash);
+        if (result.outcome === 'repaired' && result.warning) report.warnings.push({ hash: problem.hash, code: result.warning });
         continue;
       }
       if (result.cleanupFailed) report.cleanupFailed = true;
@@ -139,4 +148,11 @@ export async function runBackupRepair(bridge: RepairBridge, uri: string, problem
     progress({ stage: 'repairing', done: problems.length - report.notAttempted.length, total: problems.length });
   } finally { await close(); }
   return report;
+}
+
+/** Warnings on completed repairs, one entry per kind with its count, for one notice each. */
+export function repairWarnings(report: RepairReport): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const warning of report.warnings) counts.set(warning.code, (counts.get(warning.code) ?? 0) + 1);
+  return [...counts];
 }

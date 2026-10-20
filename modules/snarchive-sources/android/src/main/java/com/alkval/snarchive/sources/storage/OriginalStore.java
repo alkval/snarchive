@@ -4,6 +4,7 @@ import java.io.*;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.util.HashSet;
 import java.util.Set;
@@ -187,13 +188,26 @@ public final class OriginalStore {
   /** What a full check found for one recorded object. */
   public enum Health { VALID, MISSING, DAMAGED, UNREADABLE }
 
-  /** Reads one recorded object in full and classifies it; never changes anything. MISSING: no file at the hash path.
-   * DAMAGED: not a regular file, the wrong length, or different content. UNREADABLE: present, but opening or reading
-   * it failed, so its content is unknown (access or I/O error). Cancellation throws "cancelled". */
+  /** The attributes of whatever is at path, without following a link; null only when the filesystem reports that
+   * nothing is there (ENOENT, including a missing parent directory). Any other failure, such as a directory on the way
+   * that cannot be searched or an I/O error, is "object-inaccessible": it is never mistaken for absence. */
+  private static BasicFileAttributes stat(Path path) throws IOException {
+    try { return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS); }
+    catch (NoSuchFileException absent) { return null; }
+    catch (IOException | SecurityException unknown) { throw new IOException("object-inaccessible", unknown); }
+  }
+
+  /** Reads one recorded object in full and classifies it; never changes anything. MISSING: the filesystem reports
+   * nothing at the hash path. DAMAGED: not a regular file, the wrong length, or different content. UNREADABLE: its
+   * presence or content could not be determined (access or I/O error, on the file or a directory above it).
+   * Cancellation throws "cancelled", checked before any verdict. */
   public Health inspect(String hash, long size, BooleanSupplier stop) throws IOException {
+    cancel(stop);
     File file = object(hash, size);
-    if (!file.exists()) return Health.MISSING;
-    if (!file.isFile() || file.length() != size) return Health.DAMAGED;
+    BasicFileAttributes attributes;
+    try { attributes = stat(file.toPath()); } catch (IOException unknown) { return Health.UNREADABLE; }
+    if (attributes == null) return Health.MISSING;
+    if (!attributes.isRegularFile() || attributes.size() != size) return Health.DAMAGED;
     MessageDigest digest = digest(); long read = 0;
     try (InputStream input = new FileInputStream(file)) {
       byte[] buffer = new byte[CHUNK];
@@ -211,39 +225,50 @@ public final class OriginalStore {
 
   /** What a repair did. ALREADY_VALID: the current file verified, so nothing was read from the source or written. */
   public enum Repair { REPAIRED, ALREADY_VALID }
+  /** A repair's outcome. warning is set only on REPAIRED, for a problem after the replacement had happened
+   * ("sync-failed": a directory could not be synced); the new, verified file is then already in place. */
+  public static final class RepairResult {
+    public final Repair outcome; public final String warning;
+    RepairResult(Repair outcome, String warning) { this.outcome = outcome; this.warning = warning; }
+  }
 
   /** Replaces the object recorded as (hash, size) with verified bytes from source. Owns and closes source.
-   * Under the writer lock: the current file is verified first and left exactly as it is (contents and modification
-   * time) if valid. Otherwise source is staged under put's limits and must have exactly this length, CRC (when given)
-   * and SHA-256 before anything else happens. beforeReplace then runs (thumbnail eviction): if it fails, nothing
-   * changes. A damaged file is kept in quarantine/ first (a hard link, or a synced copy where links are unavailable);
-   * if that fails, the target is unchanged and "quarantine-failed" is thrown. The staged file is then renamed over
-   * the target, and both directories are synced. A missing target is filled by a rename that refuses to replace a file
-   * that appeared meanwhile ("repair-target-appeared").
-   * Process death: the rename is atomic, so the path holds either the old file or the new one, never neither. Power
-   * loss: the staged bytes, the quarantine entry and the rename are synced before this returns; an earlier loss can
-   * at worst leave the old damaged file, which a later repair replaces. */
-  public Repair repair(InputStream source, String hash, long size, long expectedCrc, BooleanSupplier stop, Check beforeReplace) throws IOException {
+   * Under the writer lock:
+   *  1. The current path is examined. If its presence cannot be determined, "repair-target-inaccessible" and nothing
+   *     changes. A file that verifies is left exactly as it is (contents and modification time): ALREADY_VALID.
+   *  2. source is staged under put's limits and must have exactly this length, CRC (when given) and SHA-256.
+   *  3. beforeReplace runs (the backup's stamp check and thumbnail eviction); if it fails, nothing changes.
+   *  4. An existing file is kept in quarantine/: a hard link, or a synced copy where links are refused. A failure is
+   *     "quarantine-failed" (cancellation stays "cancelled"); a partial copy is removed and the target is unchanged.
+   *  5. The staged file is renamed over the target (atomically), or into a missing target's place without replacing a
+   *     file that appeared ("repair-target-appeared").
+   *  6. The object's directory and the staging directory are synced (and any directory created on the way, with its
+   *     parent). From step 5 on, the target has been replaced: a later failure is a warning on REPAIRED, never an error.
+   * Interruption: until step 5 the original path is untouched; the rename leaves the old file or the new one, never
+   * neither (tested by killing processes). Power loss depends on the filesystem honouring fsync of files and
+   * directories, which is not tested. */
+  public RepairResult repair(InputStream source, String hash, long size, long expectedCrc, BooleanSupplier stop, Check beforeReplace) throws IOException {
     File target = object(hash, size);
     // The exact length is required, so the budget only must not fire first: a longer source is size-mismatch.
     return locked(source, size, expectedCrc, new Budget(MAX_OBJECT), stop, (input, stage) -> {
-      if (target.exists()) {
-        try { verifyExisting(target, hash, size, stop); return Repair.ALREADY_VALID; }
+      if (presence(target) != null) {
+        try { verifyExisting(target, hash, size, stop); return new RepairResult(Repair.ALREADY_VALID, null); }
         catch (IOException error) { if ("cancelled".equals(error.getMessage())) throw error; } // Damaged or unreadable: replace it.
       }
       writeStage(input, stage, size, expectedCrc, hash, new Budget(MAX_OBJECT), stop, () -> {});
       cancel(stop);
       faults.at("before-replace");
       beforeReplace.run();
-      File parent = directory("objects/" + hash.substring(0, 2));
-      if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-        File quarantine = directory("quarantine");
+      File parent = directorySynced("objects/" + hash.substring(0, 2));
+      if (presence(target) != null) {
+        File quarantine = directorySynced("quarantine");
         File kept = checked("quarantine/" + hash + "-" + System.currentTimeMillis() + "-" + UUID.randomUUID().toString().substring(0, 8) + ".damaged");
-        try { keep(target, kept); } catch (IOException | RuntimeException error) {
-          if (kept.exists() && !kept.delete()) error.addSuppressed(new IOException("quarantine-cleanup-failed"));
+        try { keep(target, kept, stop); } catch (IOException | RuntimeException error) {
+          if (Files.exists(kept.toPath(), LinkOption.NOFOLLOW_LINKS) && !kept.delete()) error.addSuppressed(new IOException("quarantine-cleanup-failed"));
+          if ("cancelled".equals(error.getMessage())) throw error;
           IOException failed = new IOException("quarantine-failed", error); for (Throwable s : error.getSuppressed()) failed.addSuppressed(s); throw failed;
         }
-        syncDirectory(quarantine);
+        syncDirectory(quarantine, "sync-quarantine");
         faults.at("after-quarantine"); cancel(stop);
         Files.move(stage.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
       } else {
@@ -251,25 +276,45 @@ public final class OriginalStore {
         try { Files.move(stage.toPath(), target.toPath()); } // No REPLACE_EXISTING: a file that appeared is not replaced.
         catch (FileAlreadyExistsException error) { throw new IOException("repair-target-appeared", error); }
       }
-      syncDirectory(parent);
-      faults.at("after-replace");
-      return Repair.REPAIRED;
+      // Replaced. Nothing below may report the target as unchanged: a failure here is a warning on a completed repair.
+      try {
+        syncDirectory(parent, "sync-object-directory");
+        syncDirectory(checked("staging"), "sync-staging-directory"); // The other side of the rename.
+        faults.at("after-replace");
+      } catch (IOException | RuntimeException error) { return new RepairResult(Repair.REPAIRED, "sync-failed"); }
+      return new RepairResult(Repair.REPAIRED, null);
     });
+  }
+
+  /** The current file's attributes, or null when nothing is there; an undeterminable presence fails the repair before
+   * anything changes. */
+  private BasicFileAttributes presence(File target) throws IOException {
+    try { return stat(target.toPath()); } catch (IOException unknown) { throw new IOException("repair-target-inaccessible", unknown); }
+  }
+
+  /** As directory(), and when it had to create the directory, syncs its parent so the new entry is recorded too. */
+  private File directorySynced(String relative) throws IOException {
+    File file = checked(relative);
+    if (file.isDirectory()) return file;
+    File created = directory(relative);
+    syncDirectory(created.getParentFile(), "sync-new-directory");
+    syncDirectory(created, "sync-new-directory");
+    return created;
   }
 
   /** Keeps the damaged file's bytes under quarantine: a hard link where allowed, else a synced copy. Android denies apps
    * link() on their own data files (SELinux, seen on API 35), so there the copy is what runs; it needs the damaged
-   * file's size in free space plus the reserve. */
-  private void keep(File target, File kept) throws IOException {
-    faults.at("quarantine");
+   * file's size in free space plus the reserve. The copy is cancellable between chunks. A file the store cannot read
+   * (its permissions changed) gets owner-read for the copy only: its permissions are put back afterwards whatever
+   * happens. On any failure or cancellation the partial copy is removed (a removal that fails is attached). */
+  private void keep(File target, File kept, BooleanSupplier stop) throws IOException {
+    faults.at("quarantine"); cancel(stop);
     try { faults.at("quarantine-link"); Files.createLink(kept.toPath(), target.toPath()); return; }
     catch (UnsupportedOperationException | IOException linkFailed) {
-      if (kept.exists()) throw linkFailed instanceof IOException ? (IOException) linkFailed : new IOException(linkFailed);
+      if (Files.exists(kept.toPath(), LinkOption.NOFOLLOW_LINKS)) throw linkFailed instanceof IOException ? (IOException) linkFailed : new IOException(linkFailed);
     }
-    faults.at("quarantine-copy");
+    faults.at("quarantine-copy"); cancel(stop);
     require(space.available(root) >= RESERVE + target.length(), "insufficient-storage");
-    // The store owns its files: one it cannot read (permissions changed) gets owner-read for the copy, and its
-    // permissions are put back if the copy fails, so a failed repair leaves it as it was. An I/O error still fails.
     Path path = target.toPath(); Set<PosixFilePermission> original = null;
     if (!target.canRead()) {
       try {
@@ -277,17 +322,32 @@ public final class OriginalStore {
         readable.add(PosixFilePermission.OWNER_READ); Files.setPosixFilePermissions(path, readable); original = before;
       } catch (UnsupportedOperationException | IOException ignored) {} // The copy below then fails and is reported.
     }
+    Throwable failure = null;
     try (InputStream in = new FileInputStream(target); FileOutputStream out = new FileOutputStream(kept)) {
       byte[] buffer = new byte[CHUNK];
-      for (int n; (n = in.read(buffer)) != -1;) out.write(buffer, 0, n);
+      for (;;) {
+        cancel(stop); int n = in.read(buffer); if (n == -1) break;
+        out.write(buffer, 0, n); faults.at("quarantine-chunk");
+      }
+      cancel(stop);
       out.getFD().sync();
     } catch (IOException | RuntimeException error) {
-      if (original != null) try { Files.setPosixFilePermissions(path, original); } catch (IOException | RuntimeException restore) { error.addSuppressed(restore); }
+      failure = error;
+      if (Files.exists(kept.toPath(), LinkOption.NOFOLLOW_LINKS) && !kept.delete()) error.addSuppressed(new IOException("quarantine-cleanup-failed"));
       throw error;
+    } finally {
+      if (original != null) {
+        try { Files.setPosixFilePermissions(path, original); }
+        catch (IOException | RuntimeException restore) {
+          IOException restoring = new IOException("permission-restore-failed", restore);
+          if (failure != null) failure.addSuppressed(restoring); else throw restoring;
+        }
+      }
     }
   }
 
-  private void syncDirectory(File directory) throws IOException {
+  private void syncDirectory(File directory, String point) throws IOException {
+    faults.at(point);
     try (FileChannel channel = FileChannel.open(directory.toPath(), StandardOpenOption.READ)) { channel.force(true); }
   }
 

@@ -122,6 +122,32 @@ public class BackupRepairTest {
       check("quarantine-failed".equals(result.code) && result.storeCleanupFailed, "code and leftover: " + result.code);
       check(gate.finish() == null, "closed");
     });
+    test("a bad copy from a backup that also changed reports source-changed, with the store leftover still beside it", () -> {
+      byte[] zip = read(backup.file); byte[] payload = backup.objects.get(a); int at = indexOf(zip, Arrays.copyOf(payload, 64)); check(at > 0, "payload");
+      zip[at + 100] ^= 1; File bad = new File(root, "bad-changing.zip"); Files.write(bad.toPath(), zip);
+      File dir = library(backup, a, null); File staging = new File(dir, "staging"); byte[] before = read(file(dir, a));
+      InspectionGate<BackupInspection> gate = new InspectionGate<>(Runnable::run, error -> BackupInspection.code(error, false), () -> {});
+      check(gate.beginWithStatus(() -> sealed(bad, backup)).code == null, "opened");
+      AtomicBoolean once = new AtomicBoolean();
+      OriginalStore store = new OriginalStore(dir, File::getUsableSpace, p -> {
+        if (p.equals("after-chunk") && once.compareAndSet(false, true)) {
+          check(staging.setWritable(false), "locked");
+          Files.write(bad.toPath(), new byte[] { 0 }, StandardOpenOption.APPEND); bad.setLastModified(bad.lastModified() + 5000);
+        } });
+      InspectionGate.Result<BackupInspection.Repaired> result;
+      try { result = gate.run(session -> session.repair(store, a, payload.length, () -> false, () -> {})); } finally { staging.setWritable(true); }
+      check("source-changed".equals(result.code) && result.storeCleanupFailed, "code and leftover: " + result.code + " " + result.storeCleanupFailed);
+      check(gate.finish() == null && Arrays.equals(before, read(file(dir, a))), "unchanged");
+    });
+    test("a problem after the replacement is a warning on a completed repair, never an unchanged failure", () -> {
+      File dir = library(backup, a, null);
+      OriginalStore store = new OriginalStore(dir, File::getUsableSpace, p -> { if (p.equals("sync-object-directory")) throw new IOException("injected"); });
+      try (BackupInspection session = sealed(backup.file, backup)) {
+        BackupInspection.Repaired result = session.repair(store, a, backup.objects.get(a).length, () -> false, () -> {});
+        check(result.outcome == RepairOutcome.REPAIRED && "sync-failed".equals(result.warning), "repaired with a warning");
+      }
+      check(Arrays.equals(backup.objects.get(a), read(file(dir, a))), "repaired bytes in place");
+    });
     System.out.println(passed + " backup repair host tests passed. No device claim.");
   }
   static int indexOf(byte[] haystack, byte[] needle) {

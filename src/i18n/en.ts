@@ -181,6 +181,9 @@ export const en = {
     : code === 'busy' ? 'Another Snarchive task is running. Wait for it to finish, then try again.'
     : `${en.inspectErrors[code] ?? en.inspectUnreadable} Nothing was changed.`,
   originalsAfterRepair: 'Check again to confirm the result.',
+  originalsRepairWarning: (code: string, count: number) => code === 'thumbnail-eviction-failed'
+    ? `${plural(count, 'repaired original', 'repaired originals')} kept an old cached thumbnail that could not be removed; it may still look damaged in the grid. The original itself is repaired.`
+    : `${plural(count, 'repaired original is', 'repaired originals are')} in place, but the system could not confirm the change was written to storage. Check again later.`,
   originalsUnknownDay: 'Date unknown', originalsRole: { photo: 'photo', video: 'video', overlay: 'overlay' } as const,
   inspectTitle: 'Check a backup', inspectSubtitle: 'Verify a Snarchive backup and see what it contains. Checking changes nothing; restoring is a separate step.',
   inspectFull: 'Reads every original', inspectFullDetail: 'Every photo and video in the backup is read and checked against its recorded size and checksum, so a large backup takes a while. Keep Snarchive open.',

@@ -50,6 +50,9 @@ public class OriginalRepairTest {
   }
   static int staged(File root) { String[] names = new File(root, "staging").list(); return names == null ? 0 : names.length; }
   static OriginalStore.Repair repair(OriginalStore store, byte[] source, BooleanSupplierEx stop, OriginalStore.Check before) throws Exception {
+    return full(store, source, stop, before).outcome;
+  }
+  static OriginalStore.RepairResult full(OriginalStore store, byte[] source, BooleanSupplierEx stop, OriginalStore.Check before) throws Exception {
     return store.repair(new ByteArrayInputStream(source), HASH, GOOD.length, crc(source), stop::get, before);
   }
   interface BooleanSupplierEx { boolean get(); }
@@ -100,7 +103,7 @@ public class OriginalRepairTest {
         @Override public synchronized int read(byte[] b, int off, int len) { read.set(true); return super.read(b, off, len); }
         @Override public void close() { closed.set(true); }
       };
-      check(new OriginalStore(root).repair(source, HASH, GOOD.length, crc(GOOD), () -> false, evicted::incrementAndGet) == OriginalStore.Repair.ALREADY_VALID, "already valid");
+      check(new OriginalStore(root).repair(source, HASH, GOOD.length, crc(GOOD), () -> false, evicted::incrementAndGet).outcome == OriginalStore.Repair.ALREADY_VALID, "already valid");
       check(Arrays.equals(GOOD, read(file)) && file.lastModified() == 1_600_000_000_000L, "unchanged");
       check(!read.get() && closed.get() && evicted.get() == 0 && quarantine(root).isEmpty() && staged(root) == 0, "nothing else happened");
     });
@@ -182,8 +185,10 @@ public class OriginalRepairTest {
       OriginalStore beforeRename = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals("after-quarantine")) throw new IOException("injected"); });
       fails("injected", () -> repair(beforeRename, GOOD, () -> false, () -> {}));
       check(Arrays.equals(before, read(object(root))) && quarantine(root).size() == 1 && staged(root) == 0, "still damaged, one copy kept");
+      // A failure after the rename is not an unchanged target: the repair is reported, with a warning.
       OriginalStore afterRename = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals("after-replace")) throw new IOException("injected"); });
-      fails("injected", () -> repair(afterRename, GOOD, () -> false, () -> {}));
+      OriginalStore.RepairResult late = full(afterRename, GOOD, () -> false, () -> {});
+      check(late.outcome == OriginalStore.Repair.REPAIRED && "sync-failed".equals(late.warning), "repaired with a warning");
       check(Arrays.equals(GOOD, read(object(root))) && quarantine(root).size() == 2, "replaced; a second, uniquely named copy");
       check(repair(new OriginalStore(root), GOOD, () -> false, () -> {}) == OriginalStore.Repair.ALREADY_VALID, "now valid");
     });
@@ -203,6 +208,62 @@ public class OriginalRepairTest {
         check(again == (point.equals("after-replace") ? OriginalStore.Repair.ALREADY_VALID : OriginalStore.Repair.REPAIRED) && Arrays.equals(GOOD, read(object(root))), point + ": recovered");
         check(!thumb.exists(), point + ": no thumbnail of damaged bytes remains");
       }
+    });
+    test("cancelling the quarantine copy keeps cancellation as the code, removes the partial copy and restores permissions", () -> {
+      File root = damaged("same-length"); File file = object(root); byte[] before = read(file); check(file.setReadable(false), "chmod");
+      java.util.Set<java.nio.file.attribute.PosixFilePermission> mode = Files.getPosixFilePermissions(file.toPath());
+      AtomicBoolean stop = new AtomicBoolean(); AtomicInteger chunks = new AtomicInteger();
+      OriginalStore copying = new OriginalStore(root, File::getUsableSpace, p -> {
+        if (p.equals("quarantine-link")) throw new IOException("denied");
+        if (p.equals("quarantine-chunk") && chunks.incrementAndGet() == 2) stop.set(true); });
+      fails("cancelled", () -> repair(copying, GOOD, stop::get, () -> {}));
+      check(chunks.get() == 2 && quarantine(root).isEmpty() && staged(root) == 0, "stopped mid-copy; partial copy removed");
+      check(Files.getPosixFilePermissions(file.toPath()).equals(mode), "permissions restored");
+      file.setReadable(true); check(Arrays.equals(before, read(file)), "target unchanged");
+      // A partial copy that cannot be removed is attached to the cancellation, which stays the code.
+      File quarantineDir = new File(root, "quarantine"); stop.set(false); chunks.set(0);
+      OriginalStore stuck = new OriginalStore(root, File::getUsableSpace, p -> {
+        if (p.equals("quarantine-link")) throw new IOException("denied");
+        if (p.equals("quarantine-chunk") && chunks.incrementAndGet() == 1) { stop.set(true); check(quarantineDir.setWritable(false), "locked"); } });
+      IOException error;
+      try { error = fails("cancelled", () -> repair(stuck, GOOD, stop::get, () -> {})); } finally { quarantineDir.setWritable(true); }
+      check(Arrays.stream(error.getSuppressed()).anyMatch(e -> "quarantine-cleanup-failed".equals(e.getMessage())), "cleanup failure attached");
+      check(Arrays.equals(before, read(file)), "target unchanged");
+    });
+    test("inspect honours cancellation before an early verdict (missing or wrong length)", () -> {
+      for (String how : new String[] { "missing", "truncated" }) fails("cancelled", () -> new OriginalStore(damaged(how)).inspect(HASH, GOOD.length, () -> true));
+    });
+    test("an object under a directory that cannot be searched is unreadable, not missing, and repair leaves it alone", () -> {
+      File root = damaged("valid"); File prefix = object(root).getParentFile(); check(prefix.setExecutable(false) && prefix.setReadable(false), "chmod");
+      try {
+        check(new OriginalStore(root).inspect(HASH, GOOD.length, () -> false) == OriginalStore.Health.UNREADABLE, "unreadable, not missing");
+        fails("repair-target-inaccessible", () -> repair(new OriginalStore(root), GOOD, () -> false, () -> {}));
+        check(staged(root) == 0 && quarantine(root).isEmpty(), "nothing staged or kept");
+      } finally { prefix.setExecutable(true); prefix.setReadable(true); }
+      check(Arrays.equals(GOOD, read(object(root))), "the object is untouched");
+      File missing = damaged("missing"); check(new OriginalStore(missing).inspect(HASH, GOOD.length, () -> false) == OriginalStore.Health.MISSING, "a genuinely missing object");
+      File noPrefix = damaged("missing"); Files.delete(object(noPrefix).getParentFile().toPath());
+      check(new OriginalStore(noPrefix).inspect(HASH, GOOD.length, () -> false) == OriginalStore.Health.MISSING, "a missing prefix directory is absence too");
+    });
+    test("directory syncs: a failure before the replacement changes nothing; after it the repair stands with a warning", () -> {
+      for (String point : new String[] { "sync-quarantine", "sync-new-directory" }) {
+        File root = damaged(point.equals("sync-new-directory") ? "missing" : "same-length");
+        if (point.equals("sync-new-directory")) Files.delete(object(root).getParentFile().toPath()); // The prefix directory must be created.
+        boolean existed = object(root).exists(); byte[] before = existed ? read(object(root)) : null;
+        OriginalStore store = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals(point)) throw new IOException("injected"); });
+        fails("injected", () -> repair(store, GOOD, () -> false, () -> {}));
+        check(existed ? Arrays.equals(before, read(object(root))) : !object(root).exists(), point + ": target unchanged");
+        check(staged(root) == 0, point + ": staging clean");
+      }
+      for (String point : new String[] { "sync-object-directory", "sync-staging-directory" }) {
+        File root = damaged("same-length");
+        OriginalStore store = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals(point)) throw new IOException("injected"); });
+        OriginalStore.RepairResult result = full(store, GOOD, () -> false, () -> {});
+        check(result.outcome == OriginalStore.Repair.REPAIRED && "sync-failed".equals(result.warning) && Arrays.equals(GOOD, read(object(root))), point + ": repaired with a warning");
+      }
+      File root = damaged("missing"); Files.delete(object(root).getParentFile().toPath()); AtomicInteger syncs = new AtomicInteger();
+      OriginalStore counting = new OriginalStore(root, File::getUsableSpace, p -> { if (p.startsWith("sync-")) syncs.incrementAndGet(); });
+      check(repair(counting, GOOD, () -> false, () -> {}) == OriginalStore.Repair.REPAIRED && syncs.get() == 4, "new directory, its parent, the object directory and staging synced: " + syncs.get());
     });
     test("thumbnail eviction removes only that original's derivatives and reports a file it cannot delete", () -> {
       File cache = Files.createTempDirectory(base.toPath(), "cache-").toFile(); File thumbs = new File(cache, ThumbnailFiles.DIRECTORY); thumbs.mkdirs();
