@@ -22,6 +22,7 @@ import com.alkval.snarchive.sources.storage.OriginalStore
 import com.alkval.snarchive.sources.storage.ArchiveOriginals
 import com.alkval.snarchive.sources.storage.FolderOriginals
 import com.alkval.snarchive.sources.storage.ExportRepairSession
+import com.alkval.snarchive.sources.storage.StorageReview
 import com.alkval.snarchive.sources.storage.ThumbnailFiles
 import com.alkval.snarchive.sources.zip.ArchiveSource
 import com.alkval.snarchive.sources.zip.ZipInventory
@@ -47,6 +48,15 @@ class SnarchiveSourcesModule : Module() {
     { BackupInspection.code(it, cancelled.get()) }, { busy.set(false) })
   private val exportRepairs = InspectionGate<ExportRepairSession>({ Thread(it, "snarchive-export-repair-cleanup").start() },
     { ExportRepairSession.code(it, cancelled.get()) }, { busy.set(false) })
+  // Storage review and cleanup (section 24). The gate holds the shared busy guard from opening until close has finished,
+  // so no import, scan, check, backup, inspection, restore or repair overlaps a review; a cleanup session also holds the
+  // store's cross-process writer lock for its whole life.
+  private val storageReviews = InspectionGate<StorageReview>({ Thread(it, "snarchive-storage-review-cleanup").start() },
+    { reviewCode(it) }, { busy.set(false) })
+  private fun reviewCode(error: Exception): String = if (cancelled.get()) "cancelled" else when (error.message) {
+    "cancelled", "storage-busy", "storage-unreadable", "invalid-entry", "unsafe-path", "inaccessible", "delete-failed", "unsafe-storage-path" -> error.message!!
+    else -> "storage-review-failed"
+  }
   private fun backupRoot() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "snarchive-backups")
   private var thumbnails: com.alkval.snarchive.sources.storage.ThumbnailCache? = null
   private var importArchive: ArchiveOriginals? = null
@@ -68,6 +78,7 @@ class SnarchiveSourcesModule : Module() {
       backups.finishLater()
       inspections.finishLater()
       exportRepairs.finishLater()
+      storageReviews.finishLater()
     }
     AsyncFunction("recoverBackups") {
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
@@ -420,6 +431,31 @@ class SnarchiveSourcesModule : Module() {
     }
     AsyncFunction("endExportRepair") {
       val code = exportRepairs.finish()
+      if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
+    }
+    AsyncFunction("beginStorageReview") { mode: String ->
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      val opened = storageReviews.beginWithStatus {
+        require(mode == "scan" || mode == "cleanup")
+        if (mode == "cleanup") StorageReview.cleanup(originals()) else StorageReview.scan(originals())
+      }
+      if (opened.code != null) mapOf("ok" to false, "code" to opened.code) else mapOf("ok" to true)
+    }
+    AsyncFunction("reviewStoragePage") { kind: String, after: String, limit: Int ->
+      val result = storageReviews.run { it.page(kind, after, limit) { cancelled.get() } }
+      result.value?.let { page -> mapOf("ok" to true, "next" to page.next, "unrecognized" to page.unrecognized,
+        "entries" to page.entries.map { mapOf("kind" to it.kind, "path" to it.path, "hash" to it.hash, "bytes" to it.bytes.toDouble(),
+          "modified" to it.modified.toDouble(), "identity" to it.identity) }) }
+        ?: mapOf("ok" to false, "code" to (result.code ?: "storage-review-failed"))
+    }
+    AsyncFunction("removeStorageEntry") { kind: String, path: String, identity: String ->
+      val result = storageReviews.run { it.remove(kind, path, identity) { cancelled.get() } }
+      result.value?.let { mapOf("ok" to true, "outcome" to it.outcome, "reason" to it.reason, "warning" to it.warning) }
+        ?: mapOf("ok" to false, "code" to (result.code ?: "storage-review-failed"))
+    }
+    AsyncFunction("endStorageReview") {
+      val code = storageReviews.finish()
       if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
     }
     AsyncFunction("scanDirectory") { uriString: String ->

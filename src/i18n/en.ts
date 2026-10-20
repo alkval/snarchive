@@ -140,6 +140,52 @@ export const en = {
   // Backup inspection (read-only)
   inspectOpen: 'Check or restore a backup', inspectOpenDetail: 'Verify a backup file, then restore it if you choose',
   originalsOpen: 'Check originals', originalsOpenDetail: 'Verify every stored photo and video',
+  storageOpen: 'Manage storage', storageOpenDetail: 'Review leftover files and kept damaged copies',
+
+  // Manage storage (Android, section 24)
+  storageTitle: 'Manage storage', storageSubtitle: 'Review files Snarchive keeps that no memory uses, and remove the ones you choose.',
+  storageReviewOnly: 'Reviewing changes nothing', storageReviewOnlyDetail: 'Snarchive lists the files and you choose what to remove. Nothing is selected for you.',
+  storageProtected: 'Your library is protected', storageProtectedDetail: 'Originals the library records are never listed, and are checked again just before each removal. Memories, sources and favorites are never removed.',
+  storageEstimate: 'Sizes are estimates', storageEstimateDetail: 'Removing a file may free less space than its size, for example when the system shares its storage with another file.',
+  storageStart: 'Review removable files', storageCancel: 'Cancel', storageCancelling: 'Cancelling…',
+  storageScanning: (listed: number) => `Reviewing storage: ${listed.toLocaleString()} files looked at.`,
+  storageUncatalogued: 'Leftover originals', storageUncataloguedFooter: 'Files left by an interrupted import or restore. The library does not record them, so no memory uses them.',
+  storageQuarantine: 'Kept damaged copies', storageQuarantineFooter: 'Copies of damaged files that a repair replaced. They may be damaged or incomplete.',
+  storageNone: 'Nothing to review here.',
+  storageCount: (count: number, bytes: string) => `${count.toLocaleString()} · ${bytes}`,
+  storageObjectTitle: (hash: string) => `Original ${hash.slice(0, 12)}`,
+  storageQuarantineTitle: (hash: string) => `Copy of ${hash.slice(0, 12)}`,
+  storageDetail: (bytes: string, date: string) => `${bytes} · ${date}`,
+  storageSelectAll: (count: number) => `Select all ${count.toLocaleString()}`, storageClear: 'Clear selection',
+  storageMore: (shown: number, total: number) => `Show more (${shown.toLocaleString()} of ${total.toLocaleString()})`,
+  storageRemoveSelected: (count: number) => `Remove ${plural(count, 'selected file', 'selected files')}…`,
+  storageUnrecognized: (count: number) => `${plural(count, 'other item was', 'other items were')} found that Snarchive does not recognize. ${count === 1 ? 'It is' : 'They are'} not listed and cannot be removed here.`,
+  storageSelection: 'Selected files',
+  storageConfirmTitle: (count: number, bytes: string) => `Remove ${plural(count, 'file', 'files')} (${bytes})?`,
+  storageConfirmObjects: 'Only these files are removed, and only if each is still exactly the file listed and the library still does not use it. Removal cannot be undone.',
+  storageConfirmQuarantine: 'These are copies of damaged files. They may be damaged or incomplete, and may be the only remaining copy of those damaged bytes. Only these copies are removed, and removal cannot be undone.',
+  storageConfirm: 'Remove', storageConfirmCancel: 'Keep files',
+  storageRemoving: (done: number, total: number) => `Removing: ${done.toLocaleString()} of ${total.toLocaleString()}.`,
+  storageResultTitle: 'Removal results',
+  storageResultRows: {
+    removed: ['Removed', 'Deleted from Snarchive’s storage.'],
+    skipped: ['Skipped', 'No longer the file that was listed, or the library now uses it. Left as it is.'],
+    failed: ['Could not be removed', 'Left as it is.'],
+    notAttempted: ['Not attempted', 'The removal stopped before these.'],
+  } as const,
+  storageResultFooter: 'Space freed may be less than the sizes shown. Review again to see what remains.',
+  storageSyncWarning: (count: number) => `${plural(count, 'removed file was', 'removed files were')} deleted, but the system could not confirm the change was written to storage.`,
+  storageStopped: (code: string) => code === 'cancelled' ? 'Removal cancelled. Files already removed stay removed; the rest were left as they are.'
+    : code === 'storage-schema-unsupported' || code === 'library-check-failed' ? 'Snarchive could not confirm that the remaining files are unused, so it stopped. They were left as they are.'
+    : 'Removal stopped. Files already removed stay removed; the rest were left as they are.',
+  storageFailed: (code: string) => code === 'cancelled' ? 'Cancelled. Nothing was removed.'
+    : code === 'busy' ? 'Another Snarchive task is running. Wait for it to finish, then try again.'
+    : code === 'storage-busy' ? 'Another Snarchive write is using storage. Wait for it to finish, then try again. Nothing was removed.'
+    : code === 'storage-schema-unsupported' ? 'This library uses a version this screen cannot check safely. Nothing was removed.'
+    : code === 'native-build-required' ? 'Install the latest Snarchive Android development build to manage storage.'
+    : 'Storage could not be reviewed. Nothing was removed. Try again.',
+  storageSessionCleanup: 'The storage session could not be closed cleanly. Reopen Snarchive before trying again.',
+  storageReviewAgain: 'Review again', storageDone: 'Done',
 
   // Check originals and repair from a backup (Android, section 22)
   originalsTitle: 'Check originals', originalsSubtitle: 'Find originals in your library that are missing or damaged.',

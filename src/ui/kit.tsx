@@ -57,8 +57,9 @@ export function Group({ header, footer, children, inset = 16 }: { header?: strin
   </View>;
 }
 
-export function Row({ icon, title, detail, value, onPress, disabled = false, accessory, tone }: {
-  icon?: IconName; title: string; detail?: string; value?: string | number; onPress?: () => void; disabled?: boolean; accessory?: ReactNode; tone?: 'warning';
+/** checked: a selectable row (a checkbox to assistive technology); undefined for ordinary rows. */
+export function Row({ icon, title, detail, value, onPress, disabled = false, accessory, tone, checked }: {
+  icon?: IconName; title: string; detail?: string; value?: string | number; onPress?: () => void; disabled?: boolean; accessory?: ReactNode; tone?: 'warning'; checked?: boolean;
 }) {
   const t = useTheme();
   const content = <View style={styles.row}>
@@ -71,7 +72,8 @@ export function Row({ icon, title, detail, value, onPress, disabled = false, acc
     {accessory ?? (onPress ? <Ionicons name="chevron-forward" size={18} color={t.secondary} /> : null)}
   </View>;
   if (!onPress) return <View accessible accessibilityLabel={[title, detail, value].filter(item => item !== undefined && item !== '').join(', ')}>{content}</View>;
-  return <Pressable accessibilityRole="button" accessibilityLabel={detail ? `${title}, ${detail}` : title} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress}
+  return <Pressable accessibilityRole={checked === undefined ? 'button' : 'checkbox'} accessibilityLabel={detail ? `${title}, ${detail}` : title}
+    accessibilityState={checked === undefined ? { disabled } : { disabled, checked }} disabled={disabled} onPress={onPress}
     style={({ pressed }) => ({ backgroundColor: pressed ? t.pressed : 'transparent', opacity: disabled ? 0.4 : 1 })}>{content}</Pressable>;
 }
 

@@ -19,6 +19,7 @@ import { sourcePicker } from './src/platform/sourcePicker';
 import { BackupScreen } from './src/ui/BackupScreen';
 import { BackupInspectScreen } from './src/ui/BackupInspectScreen';
 import { OriginalsCheckScreen } from './src/ui/OriginalsCheckScreen';
+import { ManageStorageScreen } from './src/ui/ManageStorageScreen';
 import { recoverBackups } from './src/platform/backup';
 import { Group, LargeTitle, Notice, Row, type Tone } from './src/ui/kit';
 import { space, type, useTheme } from './src/ui/theme';
@@ -32,11 +33,13 @@ export default function App() {
   const closeBackup = useCallback(() => setBackingUp(false), []);
   const [inspecting, setInspecting] = useState(false);
   const [checkingOriginals, setCheckingOriginals] = useState(false);
+  const [managingStorage, setManagingStorage] = useState(false);
   const refreshLibrary = useCallback(() => {
     void library.current?.summary().then(summary => { if (mounted.current) setLibrarySummary(summary); }, () => {});
   }, []);
   const closeInspection = useCallback(() => { setInspecting(false); refreshLibrary(); }, [refreshLibrary]);
   const closeOriginalsCheck = useCallback(() => setCheckingOriginals(false), []);
+  const closeStorage = useCallback(() => { setManagingStorage(false); refreshLibrary(); }, [refreshLibrary]);
   const openRestoredLibrary = useCallback(() => { setInspecting(false); refreshLibrary(); setBrowsing(true); }, [refreshLibrary]);
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -180,6 +183,7 @@ export default function App() {
   const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
   const folderSources = [...sourceIds.current].filter(([key]) => key.startsWith('directory:'));
   if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
+  if (managingStorage) return <SafeAreaProvider><ManageStorageScreen onClose={closeStorage} /></SafeAreaProvider>;
   if (checkingOriginals) return <SafeAreaProvider><OriginalsCheckScreen onClose={closeOriginalsCheck} /></SafeAreaProvider>;
   if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} onChanged={refreshLibrary} onOpenLibrary={openRestoredLibrary} /></SafeAreaProvider>;
   return (
@@ -209,6 +213,7 @@ export default function App() {
               {Platform.OS === 'android' && <Row icon="archive-outline" title={en.backupOpen} detail={en.backupOpenDetail} disabled={!ready || busy} onPress={() => setBackingUp(true)} />}
               {Platform.OS === 'android' && <Row icon="shield-checkmark-outline" title={en.inspectOpen} detail={en.inspectOpenDetail} disabled={!ready || busy} onPress={() => setInspecting(true)} />}
               {Platform.OS === 'android' && <Row icon="pulse-outline" title={en.originalsOpen} detail={en.originalsOpenDetail} disabled={!ready || busy} onPress={() => setCheckingOriginals(true)} />}
+              {Platform.OS === 'android' && <Row icon="server-outline" title={en.storageOpen} detail={en.storageOpenDetail} disabled={!ready || busy} onPress={() => setManagingStorage(true)} />}
             </Group>
           </View>}
           <Group header={en.heading} footer={`${en.explanation} ${en.zipNote}`} inset={52}>

@@ -11,6 +11,7 @@ import java.util.Set;
 import java.nio.channels.OverlappingFileLockException;
 import java.security.*;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.zip.CRC32;
 
@@ -135,8 +136,7 @@ public final class OriginalStore {
       require(expectedBytes <= MAX_OBJECT && expectedBytes <= budget.remaining, "byte-limit");
       cancel(stop);
       // Shared by all instances/processes. Overlapping locks fail instead of racing a finalization.
-      try (RandomAccessFile lockFile = new RandomAccessFile(checked("writer.lock"), "rw"); FileLock lock = acquire(lockFile)) {
-        require(lock != null, "storage-busy");
+      try (Closeable writer = lockWriter()) {
         File stage = checked("staging/" + UUID.randomUUID() + ".part");
         require(stage.createNewFile(), "staging-failed");
         Throwable failure = null;
@@ -379,10 +379,44 @@ public final class OriginalStore {
     return true;
   }
 
+  // Package access for StorageReview (section 24): the same root, path checks, fault points, directory syncs and
+  // cross-process writer lock, so a review session cannot use a different notion of the store than its writers.
+  File rootDirectory() { return root; }
+  File checkedPath(String relative) throws IOException { return checked(relative); }
+  void fault(String point) throws IOException { faults.at(point); }
+  void sync(File directory, String point) throws IOException { syncDirectory(directory, point); }
+  /** Takes the cross-process writer lock without waiting ("storage-busy" if any writer, in any process, holds it). The
+   * returned handle releases it once. Callers must not call recoverStaging, put or repair while holding it.
+   *
+   * The lock file is a POSIX record lock, and closing any descriptor of that file releases every such lock the process
+   * holds on it. So a second writer in the same process must be refused before it opens the file, or its refusal would
+   * silently drop the first writer's lock: the in-process claim on the store root does that. */
+  Closeable lockWriter() throws IOException {
+    String key = root.getPath();
+    if (!WRITERS.add(key)) throw new IOException("storage-busy");
+    RandomAccessFile file = null;
+    try {
+      file = new RandomAccessFile(checked("writer.lock"), "rw");
+      FileLock lock = acquire(file); RandomAccessFile held = file;
+      return new Closeable() {
+        private boolean closed;
+        @Override public void close() throws IOException {
+          if (closed) return; closed = true;
+          try { try { lock.release(); } finally { held.close(); } } finally { WRITERS.remove(key); }
+        }
+      };
+    } catch (IOException | RuntimeException error) {
+      try { if (file != null) file.close(); } catch (IOException closing) { error.addSuppressed(closing); }
+      finally { WRITERS.remove(key); }
+      throw error;
+    }
+  }
+  /** Store roots (canonical paths) whose writer lock this process holds or is taking. */
+  private static final Set<String> WRITERS = ConcurrentHashMap.newKeySet();
+
   /** Removes abandoned parts only; completed objects are retained for later job reconciliation. */
   public int recoverStaging() throws IOException {
-    try (RandomAccessFile lockFile = new RandomAccessFile(checked("writer.lock"), "rw"); FileLock lock = acquire(lockFile)) {
-      require(lock != null, "storage-busy");
+    try (Closeable writer = lockWriter()) {
       File[] entries = directory("staging").listFiles(); require(entries != null, "storage-unavailable"); int removed = 0;
       for (File entry : entries) {
         if (!entry.getName().matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\.part")) continue;
