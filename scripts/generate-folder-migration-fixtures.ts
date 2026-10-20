@@ -11,12 +11,13 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-const [folderDir, scanPath, variantPath, zipPath, out] = process.argv.slice(2);
-const repo = process.cwd();
-const { ImportStore, indexDates } = await import(join(repo, 'src/storage/importStore.ts'));
-const { decodePreview, encodePreview } = await import(join(repo, 'src/storage/previewCodec.ts'));
-const { listedFolderHash, folderInventoryHash, isCanonicalFolderSource } = await import(join(repo, 'src/import/sourceEvidence.ts'));
-const { inventoryFromSnapshot } = await import(join(repo, 'src/import/sourceInventory.ts'));
+import { ImportStore, indexDates } from '../src/storage/importStore.ts';
+import { decodePreview, encodePreview } from '../src/storage/previewCodec.ts';
+import { listedFolderHash, folderInventoryHash, isCanonicalFolderSource } from '../src/import/sourceEvidence.ts';
+import { inventoryFromSnapshot } from '../src/import/sourceInventory.ts';
+const args = process.argv.slice(2);
+if (args.length !== 5) { console.error('Usage: generate-folder-migration-fixtures.ts <folder> <scan.json> <variant.jpg> <photos.zip> <out>'); process.exit(2); }
+const [folderDir, scanPath, variantPath, zipPath, out] = args as [string, string, string, string, string];
 
 class DB {
   raw: DatabaseSync; constructor(path: string) { this.raw = new DatabaseSync(path); }
