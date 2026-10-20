@@ -188,6 +188,7 @@ export const en = {
     : 'Repair stopped. Originals already repaired stay repaired; the others were not changed.',
   originalsRepairFailed: (code: string, source: 'backup' | 'zip' | 'folder' = 'backup') => code === 'cancelled' ? 'Repair cancelled. Nothing was changed.'
     : code === 'busy' ? 'Another Snarchive task is running. Wait for it to finish, then try again.'
+    : code === 'storage-busy' ? 'Another Snarchive write is using storage. Wait for it to finish, then try again. Nothing was changed.'
     : code === 'store-staging-cleanup-failed' ? 'A partly written original could not be cleared, so repair did not start. Your originals were not changed.'
     : code === 'choose-one-zip' ? 'Choose one export ZIP for this repair. You can repeat with another part afterwards. Nothing was changed.'
     : code === 'native-build-required' ? 'Install the latest Snarchive Android development build to use this repair source.'

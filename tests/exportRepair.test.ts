@@ -199,3 +199,11 @@ test('export open failures use export wording for ZIPs and folders, while backup
   assert.match(en.originalsRepairFailed('staging-cleanup-failed', 'backup'), /this backup was not opened/);
   assert.match(en.originalsFolderDetail, /relative paths begin/); assert.match(en.originalsFolderDetail, /outer folder/);
 });
+test('storage-busy repair failures describe the writer lock for every source', () => {
+  for (const source of ['backup', 'zip', 'folder'] as const) {
+    const message = en.originalsRepairFailed('storage-busy', source);
+    assert.match(message, /Another Snarchive write is using storage/);
+    assert.match(message, /try again/); assert.match(message, /Nothing was changed/);
+    assert.doesNotMatch(message, /provider|expired|could not be opened/);
+  }
+});
