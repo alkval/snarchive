@@ -21,6 +21,7 @@ import java.io.FileOutputStream
 import com.alkval.snarchive.sources.storage.OriginalStore
 import com.alkval.snarchive.sources.storage.ArchiveOriginals
 import com.alkval.snarchive.sources.storage.FolderOriginals
+import com.alkval.snarchive.sources.storage.ThumbnailFiles
 import com.alkval.snarchive.sources.zip.ArchiveSource
 import com.alkval.snarchive.sources.zip.ZipInventory
 import android.provider.DocumentsContract
@@ -50,14 +51,16 @@ class SnarchiveSourcesModule : Module() {
   private var importBudget: OriginalStore.Budget? = null
   // A folder preservation session: this run's scan of the reselected tree, pinning each file's document and facts.
   private var importFolder: FolderOriginals? = null
-  /** True while a ZIP or folder preservation session is open; every other operation is refused meanwhile. */
-  private fun importing() = importArchive != null || importFolder != null
+  // An originals check (section 22) in progress: reads the whole store, so nothing may write to it meanwhile.
+  @Volatile private var originalCheck = false
+  /** True while a ZIP or folder preservation session or an originals check is open; every other operation is refused. */
+  private fun importing() = importArchive != null || importFolder != null || originalCheck
   private fun originals(): OriginalStore = OriginalStore(File(requireNotNull(appContext.reactContext).filesDir, "snarchive-originals"))
   override fun definition() = ModuleDefinition {
     Name("SnarchiveSources")
     Function("cancel") { cancelled.set(true) }
     OnDestroy {
-      cancelled.set(true)
+      cancelled.set(true); originalCheck = false
       synchronized(backupLock) { backupPicker?.resolve(mapOf("ok" to true, "canceled" to true)); backupPicker = null }
       backups.finishLater()
       inspections.finishLater()
@@ -331,6 +334,45 @@ class SnarchiveSourcesModule : Module() {
     AsyncFunction("closeFolderImport") {
       if (!busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       try { mapOf("ok" to true) } finally { importFolder = null; importBudget = null; busy.set(false) }
+    }
+    // Check originals (section 22). Read-only: every recorded object is read in full and classified.
+    AsyncFunction("beginOriginalCheck") {
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false); originalCheck = true; busy.set(false)
+      mapOf("ok" to true)
+    }
+    AsyncFunction("checkOriginals") { hashes: List<String>, sizes: List<Double> ->
+      if (!originalCheck || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      try {
+        require(hashes.size == sizes.size && hashes.size <= 1000)
+        val store = originals()
+        val health = hashes.indices.map { index ->
+          val bytes = sizes[index]
+          require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+          store.inspect(hashes[index], bytes.toLong()) { cancelled.get() }.name.lowercase()
+        }
+        mapOf("ok" to true, "health" to health)
+      } catch (error: Exception) {
+        mapOf("ok" to false, "code" to if (cancelled.get()) "cancelled" else "check-failed")
+      } finally { busy.set(false) }
+    }
+    AsyncFunction("endOriginalCheck") { originalCheck = false; mapOf("ok" to true) }
+    // Repair from a backup (section 22), inside an inspection session whose manifest was validated and sealed.
+    AsyncFunction("prepareBackupRepair") {
+      val result = inspections.run { originals().recoverStaging(); true }
+      if (result.code == null) mapOf("ok" to true) else runFailure(result)
+    }
+    AsyncFunction("repairBackupObject") { hash: String, bytes: Double ->
+      val cacheDir = requireNotNull(appContext.reactContext).cacheDir
+      val result = inspections.run { session ->
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        // Thumbnails are discarded before the replacement and again after it, so none made from damaged bytes survives.
+        val repaired = session.repair(originals(), hash, bytes.toLong(), { cancelled.get() }) { ThumbnailFiles.evict(cacheDir, hash) }
+        if (repaired.outcome == BackupInspection.RepairOutcome.REPAIRED) ThumbnailFiles.evict(cacheDir, hash)
+        repaired
+      }
+      result.value?.let { mapOf("ok" to true, "outcome" to it.outcome.name.lowercase(), "storeCleanupFailed" to it.storeCleanupFailed) }
+        ?: runFailure(result)
     }
     AsyncFunction("scanDirectory") { uriString: String ->
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")

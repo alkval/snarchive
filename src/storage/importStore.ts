@@ -85,6 +85,8 @@ export function normalizeSource(source: SourceInventory): SourceInventory {
 export class ImportStore {
   private db: SqlDatabase;
   constructor(db: SqlDatabase) { this.db = db; }
+  /** The library connection, for read-only queries elsewhere (the originals check). */
+  get database(): SqlDatabase { return this.db; }
   async initialize() {
     await this.db.execAsync('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
     await this.db.withExclusiveTransactionAsync(async tx => {

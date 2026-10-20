@@ -15,16 +15,15 @@ export interface InspectionTransport {
 export type InspectionProgress = { stage: 'manifest' } | ({ stage: 'objects' } & VerifyProgress);
 const DECLARE_BATCH = 500;
 
-/** Validates the whole manifest, then verifies every object. Resolves only when everything matches. */
-export async function inspectBackup(transport: InspectionTransport, cancelled: () => boolean,
-  progress: (state: InspectionProgress) => void): Promise<BackupPreview> {
+/** Validates the whole manifest, declaring every object to the native side, then seals the session (no undeclared
+ * object may remain). Shared by inspection and repair; it reads no media. */
+export async function validateManifest(transport: Pick<InspectionTransport, 'readManifest' | 'declare' | 'seal'>, cancelled: () => boolean): Promise<BackupPreview> {
   const stop = () => { if (cancelled()) throw new Error('cancelled'); };
   const validator = new BackupManifestValidator();
   const flush = async () => {
     const declared = validator.takeDeclarations();
     for (let index = 0; index < declared.length; index += DECLARE_BATCH) { stop(); await transport.declare(declared.slice(index, index + DECLARE_BATCH)); }
   };
-  progress({ stage: 'manifest' });
   for (;;) {
     stop();
     const chunk = await transport.readManifest();
@@ -34,6 +33,15 @@ export async function inspectBackup(transport: InspectionTransport, cancelled: (
   }
   const preview = validator.finish();
   stop(); await transport.seal();
+  return preview;
+}
+
+/** Validates the whole manifest, then verifies every object. Resolves only when everything matches. */
+export async function inspectBackup(transport: InspectionTransport, cancelled: () => boolean,
+  progress: (state: InspectionProgress) => void): Promise<BackupPreview> {
+  const stop = () => { if (cancelled()) throw new Error('cancelled'); };
+  progress({ stage: 'manifest' });
+  const preview = await validateManifest(transport, cancelled);
   for (;;) {
     stop();
     const state = await transport.verify();

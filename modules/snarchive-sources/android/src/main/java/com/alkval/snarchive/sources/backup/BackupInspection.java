@@ -18,8 +18,8 @@ import java.util.zip.CRC32;
 import net.lingala.zip4j.exception.ZipException;
 import net.lingala.zip4j.model.FileHeader;
 
-/** Read-only inspection of an untrusted portable backup (format v1). Never writes the library, the originals
- * store or the selected document. The ZIP is validated with the import engine's structural rules and the v1
+/** Inspection of an untrusted portable backup (formats 1 and 2). Inspection never writes the library, the originals
+ * store or the selected document; restore and repair modes write only the originals store. The ZIP is validated with the import engine's structural rules and the v1
  * layout; the manifest is handed out as strictly decoded UTF-8 text in bounded chunks for the JS validator;
  * every declared object is then streamed and checked for exact length, ZIP CRC and SHA-256. */
 public final class BackupInspection implements Closeable {
@@ -36,7 +36,10 @@ public final class BackupInspection implements Closeable {
     // Restore: a local original of the wrong length or content; the store is left unchanged.
     "stored-object-corrupt",
     // Restore: a partly written original in the store's staging could not be removed (see OriginalStore).
-    OriginalStore.STAGING_CLEANUP_FAILED));
+    OriginalStore.STAGING_CLEANUP_FAILED,
+    // Repair (section 22): a damaged original could not be kept in quarantine, a missing one reappeared before the
+    // repair finished, or a cached thumbnail could not be discarded. The original is unchanged in each case.
+    "quarantine-failed", "repair-target-appeared", "thumbnail-eviction-failed", "storage-busy"));
 
   public static final class Chunk {
     public final String text; public final boolean done;
@@ -301,6 +304,42 @@ public final class BackupInspection implements Closeable {
       if (System.nanoTime() - start >= maxMillis * 1_000_000L) break;
     }
     return new Stored(stored, order.size(), added, reused, storedBytes, objectBytes);
+  }
+
+  /** What repairing one recorded original from this backup did. */
+  public enum RepairOutcome { REPAIRED, ALREADY_VALID, UNAVAILABLE, MISMATCH }
+  public static final class Repaired {
+    public final RepairOutcome outcome; public final boolean storeCleanupFailed;
+    Repaired(RepairOutcome outcome, boolean storeCleanupFailed) { this.outcome = outcome; this.storeCleanupFailed = storeCleanupFailed; }
+  }
+
+  /** Repair (section 22), after the manifest was validated, every object declared and the session sealed: replaces the
+   * library's original recorded as (hash, bytes) with this backup's copy, through OriginalStore.repair. The library's
+   * record is the target. UNAVAILABLE: the backup has no object with that hash. MISMATCH: its entry has another length,
+   * or its bytes failed the length, ZIP CRC or SHA-256 check (nothing was replaced). ALREADY_VALID: the local file
+   * verified, so the backup's copy was not read. Only the requested object is read; other media are not re-hashed. */
+  public Repaired repair(OriginalStore store, String hash, long bytes, BooleanSupplier stop, OriginalStore.Check beforeReplace) throws IOException {
+    require(!closed && sealed && stagedManifest == null, "backup-invalid");
+    require(hash != null && hash.matches("[a-f0-9]{64}") && bytes >= 0, "backup-invalid");
+    FileHeader header = objects.get(hash);
+    if (header == null) return new Repaired(RepairOutcome.UNAVAILABLE, false);
+    if (header.getUncompressedSize() != bytes) return new Repaired(RepairOutcome.MISMATCH, false);
+    try {
+      // The backup must not have moved while its copy was read; checked before anything is replaced, so a changed
+      // backup stops the repair instead of being reported after a replacement.
+      OriginalStore.Repair result = store.repair(new Bounded(ZipInventory.open(source, header), bytes), hash, bytes, header.getCrc(), stop,
+        () -> { source.checkUnchanged(); beforeReplace.run(); });
+      return new Repaired(result == OriginalStore.Repair.REPAIRED ? RepairOutcome.REPAIRED : RepairOutcome.ALREADY_VALID, false);
+    } catch (IOException error) {
+      String message = error.getMessage();
+      boolean mismatch = "content-mismatch".equals(message) || "crc-mismatch".equals(message) || "size-mismatch".equals(message)
+        || "backup-damaged".equals(message) || (error instanceof ZipException && ((ZipException) error).getType() == ZipException.Type.CHECKSUM_MISMATCH);
+      if (!mismatch) throw error;
+      source.checkUnchanged(); // A backup that changed while being read is source-changed, not a bad copy.
+      boolean leftover = false;
+      for (Throwable suppressed : error.getSuppressed()) leftover |= OriginalStore.STAGING_CLEANUP_FAILED.equals(suppressed.getMessage());
+      return new Repaired(RepairOutcome.MISMATCH, leftover);
+    }
   }
 
   /** Restore mode, after every object is stored: the manifest again, from the private copy made in pass 1. Its
