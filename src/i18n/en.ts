@@ -58,7 +58,7 @@ export const en = {
   importChanged: 'That ZIP does not match this preview. Choose the original ZIP, or scan the changed archive as a new source.',
   importPaused: 'The import stopped. Completed files were kept. Choose the same ZIP again to continue.',
   importStorage: 'Not enough free storage to continue. Completed files were kept. Free some space, then choose the same ZIP to resume.',
-  importCorrupt: 'A stored original could not be verified. The import stopped without replacing it. Use Check originals on the home screen to find it and repair it from a backup that contains it. Keep your source exports.',
+  importCorrupt: 'A stored original could not be verified. The import stopped without replacing it. Use Check originals on the home screen to repair it from a backup or a recorded export. Keep your source exports.',
   importComplete: 'Original files are preserved. Open the library to see your memories, and keep an independent backup.',
   importProgress: (count: number) => `${plural(count, 'file', 'files')} copied or verified. Keep Snarchive open.`,
   folderPick: 'Choose the same folder again to preserve or resume its original files.',
@@ -88,7 +88,7 @@ export const en = {
   thumbnailMissing: 'No preview',
   libraryVariants: 'This memory has competing base files. All of them were kept; choosing a version is not available yet.',
   libraryVideoFailed: 'This video could not be verified or played. Its record and original file have been kept.',
-  libraryPhotoFailed: 'This photo could not be verified or displayed. Its record has been kept. Keep your source export; repair is not available yet.',
+  libraryPhotoFailed: 'This photo could not be verified or displayed. Its record has been kept. Use Check originals on the home screen to check it and, if needed, repair its exact bytes. Keep your source exports.',
   libraryOverlayVariants: 'Several overlays were preserved, so none is shown automatically.',
   libraryOverlaySize: 'The overlay has a different shape from the photo. It is preserved, but hidden so it is not stretched.',
   libraryOverlayFailed: 'The overlay could not be verified or shown. The original is still available.',
@@ -130,7 +130,7 @@ export const en = {
     'backup-unverified': 'The backup was written, but the chosen location could not hand it back for checking (some cloud services are still uploading). It was kept, but it has not been checked. Do not rely on it as your only copy.',
     'backup-saved-cleanup-failed': 'Backup saved and checked, but temporary files could not be cleared. Reopen the app before another backup.',
     'backup-cleanup-failed': 'Temporary backup files could not be cleared. Reopen the app before trying again.',
-    'stored-object-corrupt': 'An original is missing or damaged, so no backup was saved. Use Check originals on the home screen to find it and repair it from an earlier backup.',
+    'stored-object-corrupt': 'An original is missing or damaged, so no backup was saved. Use Check originals on the home screen to repair it from an earlier backup or a recorded export. Keep your source exports.',
     'insufficient-storage': 'Not enough space to create the backup. Free some space and try again.',
     'backup-schema-unsupported': 'This version of the app cannot back up this library yet. Update the app and try again.',
     'native-build-required': 'Install the latest Android development build to save backups.',
@@ -145,7 +145,15 @@ export const en = {
   originalsTitle: 'Check originals', originalsSubtitle: 'Find originals in your library that are missing or damaged.',
   originalsFull: 'Every file is read', originalsFullDetail: 'Each original is read in full and compared with the checksum recorded when it was preserved. This can take a while for a large library.',
   originalsReadOnly: 'Checking changes nothing', originalsReadOnlyDetail: 'The check only reads. Repair is a separate step that you start.',
-  originalsRepairScope: 'Repair needs a backup', originalsRepairScopeDetail: 'A damaged original can be repaired from a Snarchive backup that contains the exact same file. Repair from export ZIPs or folders is not available yet; keep your exports.',
+  originalsRepairScope: 'Repair needs an exact copy', originalsRepairScopeDetail: 'Choose a Snarchive backup, the original export ZIP, or an extracted folder. Only files matching the library’s recorded checksum and length can repair an original. Keep your exports and independent backups.',
+  originalsChooseSource: 'Choose a repair source',
+  originalsRepairZip: 'Repair from an export ZIP', originalsRepairFolder: 'Repair from an extracted folder',
+  originalsBackupDetail: 'A Snarchive backup containing the exact original',
+  originalsZipDetail: 'Choose one original ZIP part; repeat with other parts as needed',
+  originalsFolderDetail: 'Choose a folder containing recorded original paths; other contents may have changed',
+  originalsExportValidating: 'Opening and checking the export…',
+  originalsPickerClosed: 'No repair source was chosen.',
+  originalsSourceCleanup: 'The selected source could not be fully closed or its temporary files could not be cleared. Reopen the app before trying again. Snarchive retries temporary-copy cleanup at startup or when opening another ZIP.',
   originalsStart: 'Check originals', originalsCancel: 'Cancel check', originalsCancelling: 'Cancelling…',
   originalsProgress: (checked: number, total: number) => `Checking originals: ${checked.toLocaleString()} of ${total.toLocaleString()}.`,
   originalsAllGood: (total: number) => total === 0 ? 'There are no originals in your library yet.' : `All ${total.toLocaleString()} originals match their recorded checksums.`,
@@ -160,16 +168,16 @@ export const en = {
   originalsUsedBy: (count: number, first: string) => count === 0 ? 'Not used by any memory' : count === 1 ? first : `${first} and ${plural(count - 1, 'other memory', 'other memories')}`,
   originalsShared: (count: number) => `${plural(count, 'damaged original is', 'damaged originals are')} shared by several memories.`,
   originalsMore: (shown: number, total: number) => `Show more (${shown.toLocaleString()} of ${total.toLocaleString()})`,
-  originalsRepair: 'Repair from a backup', originalsRepairAnother: 'Try another backup', originalsCheckAgain: 'Check again', originalsDone: 'Done',
+  originalsRepair: 'Repair from a backup', originalsCheckAgain: 'Check again', originalsDone: 'Done',
   originalsRepairCancel: 'Cancel repair',
   originalsRepairValidating: 'Checking the backup…',
   originalsRepairProgress: (done: number, total: number) => `Repairing: ${done.toLocaleString()} of ${total.toLocaleString()}.`,
   originalsRepairTitle: 'Repair results',
   originalsRepairRows: {
-    repaired: ['Repaired', 'Replaced with the backup’s verified copy.'],
+    repaired: ['Repaired', 'Replaced with verified original bytes.'],
     alreadyValid: ['Already valid', 'Verified when repair began; nothing was written.'],
-    unavailable: ['Not in this backup', 'Try a backup made before the damage.'],
-    mismatch: ['Backup copy did not match', 'The backup’s copy failed its checksum; nothing was changed.'],
+    unavailable: ['Not available in this source', 'No usable recorded path or object was found here. Try another source.'],
+    mismatch: ['Source copy did not match', 'The source’s copy failed its length or checksum check; nothing was changed.'],
     failed: ['Could not be repaired', 'The original was left as it was.'],
     notAttempted: ['Not attempted', 'The repair stopped before these.'],
   } as const,
@@ -179,6 +187,10 @@ export const en = {
     : 'Repair stopped. Originals already repaired stay repaired; the others were not changed.',
   originalsRepairFailed: (code: string) => code === 'cancelled' ? 'Repair cancelled. Nothing was changed.'
     : code === 'busy' ? 'Another Snarchive task is running. Wait for it to finish, then try again.'
+    : code === 'store-staging-cleanup-failed' ? 'A partly written original could not be cleared, so repair did not start. Your originals were not changed.'
+    : code === 'choose-one-zip' ? 'Choose one export ZIP for this repair. You can repeat with another part afterwards. Nothing was changed.'
+    : code === 'native-build-required' ? 'Install the latest Snarchive Android development build to use this repair source.'
+    : code === 'export-unreadable' || code === 'source-changed' ? 'The export could not be read or changed while opening. Choose it again to retry. Nothing was changed.'
     : `${en.inspectErrors[code] ?? en.inspectUnreadable} Nothing was changed.`,
   originalsAfterRepair: 'Check again to confirm the result.',
   originalsRepairWarning: (code: string, count: number) => code === 'thumbnail-eviction-failed'
@@ -257,12 +269,12 @@ export const en = {
   restoreNotChanged: 'Your library was not changed. Originals that were already checked may stay in Snarchive’s storage, unused, and a later restore reuses them.',
   restoreErrors: {
     'restore-conflict': 'This backup disagrees with an export already in your library: the same export, with different contents or different preserved files. Nothing was restored.',
-    'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Use Check originals on the home screen to repair it from a backup that contains it, then restore again. Keep your exports.',
+    'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Use Check originals on the home screen to repair it from a backup or a recorded export, then restore again. Keep your exports.',
     'restore-schema-unsupported': 'This library uses a version Snarchive cannot restore into. Update the app and try again.',
     'restore-failed': 'The restore could not be completed safely.',
     'store-staging-cleanup-failed': 'A partly written original in Snarchive’s storage could not be removed, so the restore stopped. Your backup is unchanged. Snarchive tries to remove it again the next time you restore a backup or preserve originals; try again later.',
   } as Record<string, string>,
-  restoreStoreCleanupFailed: 'A partly written original could not be removed from Snarchive’s storage. It is never used as a memory. Snarchive tries to remove it again the next time you restore a backup or preserve originals.',
+  restoreStoreCleanupFailed: 'A partly written original could not be removed from Snarchive’s storage. It is never used as a memory. Snarchive tries to remove it again the next time you restore a backup, preserve originals or repair.',
   /** Notices for a restore that did not commit: the cause, that the library is unchanged, then each kind of leftover:
    * a private ZIP or manifest copy (cleanupFailed) and a partly written original in store staging (storeCleanupFailed).
    * A leftover that is itself the cause is explained once. */

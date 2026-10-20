@@ -180,12 +180,12 @@ test('a second backup can be tried for what remains, and a partial repair leaves
   assert.deepEqual(second.calls.filter(c => c.startsWith('repair')), remaining.map(p => `repair:${p.hash.slice(0, 4)}`), 'only what remained');
 });
 
-test('wording: repair points to Check originals, keeps the advice to keep exports, and says repair needs a backup', () => {
+test('wording: repair points to Check originals, keeps export advice and offers all exact-copy sources', () => {
   for (const text of [en.importCorrupt, en.restoreErrors['stored-object-corrupt']!, en.backupErrors['stored-object-corrupt']!]) {
     assert.match(text, /Check originals/); assert.doesNotMatch(text, /not available yet/);
   }
   assert.match(en.importCorrupt, /Keep your source exports/); assert.match(en.restoreErrors['stored-object-corrupt']!, /Keep your exports/);
-  assert.match(en.originalsRepairScopeDetail, /backup/); assert.match(en.originalsRepairScopeDetail, /ZIPs or folders is not available yet/);
+  assert.match(en.originalsRepairScopeDetail, /backup/); assert.match(en.originalsRepairScopeDetail, /export ZIP/); assert.match(en.originalsRepairScopeDetail, /extracted folder/);
   assert.match(en.originalsQuarantine, /still use space/);
   assert.equal(en.originalsUsedBy(0, ''), 'Not used by any memory');
   assert.equal(en.originalsUsedBy(3, '2026-02-05 · photo'), '2026-02-05 · photo and 2 other memories');

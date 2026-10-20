@@ -264,7 +264,7 @@ test('restore failure wording: each leftover is named once, store staging never 
   assert.deepEqual(messages('backup-damaged', false, false), [en.inspectErrors['backup-damaged'], en.restoreNotChanged]);
   for (const text of [en.restoreErrors['store-staging-cleanup-failed']!, en.restoreStoreCleanupFailed]) {
     assert.doesNotMatch(text, /reopen|startup|was not opened/i);
-    assert.match(text, /next time you restore a backup or preserve originals/);
+    assert.match(text, /next time you restore a backup(?:,| or) preserve originals/);
   }
 });
 

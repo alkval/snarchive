@@ -21,6 +21,7 @@ import java.io.FileOutputStream
 import com.alkval.snarchive.sources.storage.OriginalStore
 import com.alkval.snarchive.sources.storage.ArchiveOriginals
 import com.alkval.snarchive.sources.storage.FolderOriginals
+import com.alkval.snarchive.sources.storage.ExportRepairSession
 import com.alkval.snarchive.sources.storage.ThumbnailFiles
 import com.alkval.snarchive.sources.zip.ArchiveSource
 import com.alkval.snarchive.sources.zip.ZipInventory
@@ -44,6 +45,8 @@ class SnarchiveSourcesModule : Module() {
   // Read-only backup inspection. Holds the busy guard for the whole session, so no import, scan or backup overlaps it.
   private val inspections = InspectionGate<BackupInspection>({ Thread(it, "snarchive-inspection-cleanup").start() },
     { BackupInspection.code(it, cancelled.get()) }, { busy.set(false) })
+  private val exportRepairs = InspectionGate<ExportRepairSession>({ Thread(it, "snarchive-export-repair-cleanup").start() },
+    { ExportRepairSession.code(it, cancelled.get()) }, { busy.set(false) })
   private fun backupRoot() = File(requireNotNull(appContext.reactContext).noBackupFilesDir, "snarchive-backups")
   private var thumbnails: com.alkval.snarchive.sources.storage.ThumbnailCache? = null
   private var importArchive: ArchiveOriginals? = null
@@ -64,6 +67,7 @@ class SnarchiveSourcesModule : Module() {
       synchronized(backupLock) { backupPicker?.resolve(mapOf("ok" to true, "canceled" to true)); backupPicker = null }
       backups.finishLater()
       inspections.finishLater()
+      exportRepairs.finishLater()
     }
     AsyncFunction("recoverBackups") {
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
@@ -372,6 +376,51 @@ class SnarchiveSourcesModule : Module() {
       }
       result.value?.let { mapOf("ok" to true, "outcome" to it.outcome.name.lowercase(), "storeCleanupFailed" to it.storeCleanupFailed, "warnings" to it.warnings) }
         ?: runFailure(result)
+    }
+    // Repair from a recorded export (section 23). The gate reserves the operation until source cleanup finishes.
+    AsyncFunction("beginExportRepair") { uriString: String, kind: String ->
+      if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
+      cancelled.set(false)
+      val opened = exportRepairs.beginWithStatus {
+        require(kind == "zip" || kind == "folder")
+        if (kind == "folder") {
+          val root = Uri.parse(uriString)
+          val files = HashMap<String, FolderOriginals.Entry>()
+          scan(root, files)
+          ExportRepairSession(FolderOriginals(SafFolder(root), files))
+        } else {
+          val selected = openArchive(uriString)
+          try {
+            selected.first.pinnedSha256() ?: selected.first.sha256 { cancelled.get() }
+            ExportRepairSession(ArchiveOriginals(selected.first) { cancelled.get() }, selected.second?.let { DeleteOnClose(it) })
+          } catch (error: Exception) {
+            try { selected.first.close() } catch (closing: Exception) { error.addSuppressed(closing) }
+            selected.second?.let { DeleteOnClose.deleteOrSuppress(it, error) }
+            throw error
+          }
+        }
+      }
+      if (opened.code != null) return@AsyncFunction mapOf("ok" to false, "code" to opened.code, "cleanupFailed" to opened.cleanupFailed)
+      val result = exportRepairs.run { it.archiveSha256() ?: "" }
+      result.value?.let { mapOf("ok" to true, "archiveSha256" to it) } ?: runFailure(result)
+    }
+    AsyncFunction("prepareExportRepair") {
+      val result = exportRepairs.run { originals().recoverStaging(); true }
+      if (result.code == null) mapOf("ok" to true) else runFailure(result)
+    }
+    AsyncFunction("repairExportObject") { hash: String, bytes: Double, path: String ->
+      val result = exportRepairs.run { session ->
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        val cacheDir = requireNotNull(appContext.reactContext).cacheDir
+        session.repair(originals(), path, hash, bytes.toLong(), { cancelled.get() },
+          { ThumbnailFiles.evict(cacheDir, hash) }, { ThumbnailFiles.evict(cacheDir, hash) })
+      }
+      result.value?.let { mapOf("ok" to true, "outcome" to it.outcome, "storeCleanupFailed" to it.storeCleanupFailed, "warnings" to it.warnings) }
+        ?: runFailure(result)
+    }
+    AsyncFunction("endExportRepair") {
+      val code = exportRepairs.finish()
+      if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
     }
     AsyncFunction("scanDirectory") { uriString: String ->
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")

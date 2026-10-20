@@ -35,6 +35,25 @@ public final class ArchiveOriginals implements AutoCloseable {
     source.checkUnchanged();
     return stored;
   }
+  /** The pinned archive identity used to select only this archive's recorded observations for repair. */
+  public String sha256() { return source.pinnedSha256(); }
+  /** Repair one recorded path, requiring the library's exact bytes. The stamp is checked before replacement. */
+  public OriginalStore.RepairResult repair(String path, String hash, long bytes, OriginalStore store,
+      BooleanSupplier stop, OriginalStore.Check beforeReplace) throws IOException {
+    FileHeader header = HeaderUtil.getFileHeader(archive, path);
+    if (header == null || !header.getFileName().equals(path) || header.isDirectory()) throw new IOException("source-missing");
+    source.checkUnchanged();
+    try (RepairInput input = new RepairInput(ZipInventory.open(source, header))) {
+      return store.repair(input, hash, bytes, header.getCrc(), stop,
+        () -> { source.checkUnchanged(); beforeReplace.run(); });
+    }
+  }
+  private static final class RepairInput extends FilterInputStream {
+    private boolean closed;
+    RepairInput(InputStream input) { super(input); }
+    @Override public void close() throws IOException { if (!closed) { closed = true; super.close(); } }
+  }
+  public void checkUnchanged() throws IOException { source.checkUnchanged(); }
   public long totalOriginalBytes() throws IOException {
     long total = 0;
     for (FileHeader header : archive.getCentralDirectory().getFileHeaders()) {

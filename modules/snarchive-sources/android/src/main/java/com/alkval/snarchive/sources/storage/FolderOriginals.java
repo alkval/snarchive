@@ -65,6 +65,25 @@ public final class FolderOriginals {
   }
 
   public OriginalStore.Stored preserve(String path, OriginalStore store, OriginalStore.Budget budget, BooleanSupplier stop) throws IOException {
+    try {
+      return readPinned(path, (reading, expected, unchanged) -> store.put(reading, expected, -1, null, budget, stop, unchanged));
+    } catch (IOException error) {
+      if ("size-mismatch".equals(error.getMessage())) throw keepSuppressed(new IOException(CHANGED, error), error);
+      throw error;
+    }
+  }
+
+  /** The folder need not have the same inventory as before: only exact recorded bytes may replace the target.
+   * Its facts and open-file stamp are still pinned through the whole read, as for preservation. */
+  public OriginalStore.RepairResult repair(String path, String hash, long bytes, OriginalStore store,
+      BooleanSupplier stop, OriginalStore.Check beforeReplace) throws IOException {
+    return readPinned(path, (reading, expected, unchanged) -> store.repair(reading, hash, bytes, -1, stop,
+      () -> { unchanged.run(); beforeReplace.run(); }));
+  }
+
+  private interface ReadWork<T> { T run(Reading input, long expected, OriginalStore.Check unchanged) throws IOException; }
+  /** Close once even when the store rejects an unsafe target before accepting ownership of the input. */
+  private <T> T readPinned(String path, ReadWork<T> work) throws IOException {
     String basename = path.substring(path.lastIndexOf('/') + 1);
     if (!basename.matches(MEDIA)) throw new IOException("unsupported-entry");
     Entry entry = entries.get(path);
@@ -77,18 +96,13 @@ public final class FolderOriginals {
     catch (IOException | RuntimeException error) { closeQuietly(opened.input, error); throw unreadable(error); }
     // The open file's own length governs when there is one; a provider's report is only a hint that must not move.
     long expected = opened.bytes >= 0 ? opened.bytes : before.bytes >= 0 ? before.bytes : -1;
-    Reading reading = new Reading(opened.input, opened.stamp);
-    try {
-      return store.put(reading, expected, -1, null, budget, stop, () -> {
+    try (Reading reading = new Reading(opened.input, opened.stamp)) {
+      return work.run(reading, expected, () -> {
         // The stamp taken at end of file, while the descriptor was still open (put closes it before this check).
         if (stamp != null && !stamp.equals(reading.endStamp())) throw new IOException(CHANGED);
         Facts after = facts(entry.documentId);
         if (!after.agrees(before)) throw new IOException(CHANGED);
       });
-    } catch (IOException error) {
-      // More or fewer bytes than pinned means the file was truncated, grew or was replaced while it was read.
-      if ("size-mismatch".equals(error.getMessage())) throw keepSuppressed(new IOException(CHANGED, error), error);
-      throw error;
     }
   }
 
@@ -121,7 +135,7 @@ public final class FolderOriginals {
   /** Read and close failures from the provider become source-unreadable, without the provider's message. At the first
    * end of file it re-reads the open file's stamp, so the check before finalizing needs no open descriptor. */
   private static final class Reading extends FilterInputStream {
-    private final Stamp stamp; private String end; private IOException endFailure;
+    private final Stamp stamp; private String end; private IOException endFailure; private boolean closed;
     Reading(InputStream input, Stamp stamp) { super(input); this.stamp = stamp; }
     @Override public int read() throws IOException {
       int value; try { value = super.read(); } catch (IOException | RuntimeException e) { throw unreadable(e); }
@@ -141,6 +155,9 @@ public final class FolderOriginals {
       if (end == null) throw new IOException(CHANGED);
       return end;
     }
-    @Override public void close() throws IOException { try { super.close(); } catch (IOException | RuntimeException e) { throw unreadable(e); } }
+    @Override public void close() throws IOException {
+      if (closed) return; closed = true;
+      try { super.close(); } catch (IOException | RuntimeException e) { throw unreadable(e); }
+    }
   }
 }

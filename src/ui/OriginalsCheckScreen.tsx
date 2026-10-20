@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Affected, CheckProgress, CheckResult, Problem, RepairProgress, RepairReport } from '../integrity/originals';
 import { RepairFailure, repairWarnings } from '../integrity/originals';
-import { cancelOriginalsWork, checkLibraryOriginals, describeProblems, repairFromBackup } from '../platform/originalsCheck';
+import { cancelOriginalsWork, checkLibraryOriginals, describeProblems, repairFromBackup, repairFromExport } from '../platform/originalsCheck';
 import { sourcePicker } from '../platform/sourcePicker';
 import { en } from '../i18n/en';
 import { BackButton, Button, Group, LargeTitle, Notice, Row } from './kit';
@@ -16,7 +16,7 @@ type State =
   | { kind: 'idle' } | { kind: 'cancelled' } | { kind: 'failed'; code: string }
   | { kind: 'checking'; progress: CheckProgress | null; cancelling: boolean }
   | ({ kind: 'checked' } & Found)
-  | ({ kind: 'repairing'; progress: RepairProgress | null; cancelling: boolean } & Found)
+  | ({ kind: 'repairing'; source: 'backup' | 'zip' | 'folder'; progress: RepairProgress | null; cancelling: boolean } & Found)
   | ({ kind: 'repaired'; report: RepairReport } & Found)
   | ({ kind: 'repair-failed'; code: string; cleanupFailed: boolean; storeCleanupFailed: boolean } & Found)
   | ({ kind: 'picker-closed' } & Found);
@@ -28,7 +28,7 @@ function size(bytes: number): string {
   return unit === 0 ? `${bytes} bytes` : `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
 }
 
-/** Verifies every original (read-only), then, only on the explicit repair action, replaces damaged ones from a backup.
+/** Verifies every original (read-only), then, only on the explicit repair action, replaces damaged ones from a selected source.
  * Results live only on this screen; leaving it discards them. */
 export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
   const t = useTheme();
@@ -67,17 +67,33 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
   }
 
   /** The explicit approval to replace damaged originals. Only bytes that match the library's record are written. */
-  async function repair(found: Found) {
+  async function repair(found: Found, source: 'backup' | 'zip' | 'folder') {
     if (running.current) return;
     running.current = 'repair'; stopped.current = false;
     const base: Found = { result: found.result, problems: found.problems, shown: found.shown, affected: found.affected };
     try {
-      const uri = await sourcePicker.selectBackup();
+      let uri: string | null;
+      try {
+        if (source === 'backup') uri = await sourcePicker.selectBackup();
+        else if (source === 'folder') uri = (await sourcePicker.selectDirectory()).uri;
+        else {
+          const selected = await sourcePicker.selectArchives();
+          if (selected.length > 1) throw new Error('choose-one-zip');
+          uri = selected[0]?.uri ?? null;
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message === 'choose-one-zip') throw error;
+        if (mounted.current) setState({ kind: 'picker-closed', ...base });
+        return;
+      }
       if (!mounted.current) return;
       if (!uri) { setState({ kind: 'picker-closed', ...base }); return; }
-      setState({ kind: 'repairing', progress: null, cancelling: false, ...base });
-      const report = await repairFromBackup(uri, found.problems, () => stopped.current,
-        progress => { if (mounted.current) setState(previous => previous.kind === 'repairing' ? { ...previous, progress } : previous); });
+      if (stopped.current) throw new RepairFailure('cancelled', false);
+      setState({ kind: 'repairing', source, progress: null, cancelling: false, ...base });
+      const progress = (progress: RepairProgress) => { if (mounted.current) setState(previous => previous.kind === 'repairing' ? { ...previous, progress } : previous); };
+      const report = source === 'backup'
+        ? await repairFromBackup(uri, found.problems, () => stopped.current, progress)
+        : await repairFromExport(source, uri, found.problems, () => stopped.current, progress);
       // What remains is anything not repaired and not found valid; those can be tried from another backup.
       const fixed = new Set([...report.repaired, ...report.alreadyValid]);
       const problems = found.problems.filter(problem => !fixed.has(problem.hash));
@@ -96,7 +112,7 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
   const fraction = state.kind === 'checking' && state.progress ? (state.progress.totalBytes > 0 ? state.progress.bytes / state.progress.totalBytes : state.progress.total > 0 ? state.progress.checked / state.progress.total : 0)
     : state.kind === 'repairing' && state.progress?.stage === 'repairing' ? (state.progress.total > 0 ? state.progress.done / state.progress.total : 1) : null;
   const progressMessage = state.kind === 'checking' ? (state.cancelling ? en.originalsCancelling : state.progress ? en.originalsProgress(state.progress.checked, state.progress.total) : en.originalsProgress(0, 0))
-    : state.kind === 'repairing' ? (state.cancelling ? en.originalsCancelling : state.progress?.stage === 'repairing' ? en.originalsRepairProgress(state.progress.done, state.progress.total) : en.originalsRepairValidating)
+    : state.kind === 'repairing' ? (state.cancelling ? en.originalsCancelling : state.progress?.stage === 'repairing' ? en.originalsRepairProgress(state.progress.done, state.progress.total) : state.source === 'backup' ? en.originalsRepairValidating : en.originalsExportValidating)
     : '';
   const shared = found ? found.problems.slice(0, found.shown).filter(problem => (found.affected.get(problem.hash)?.memoryCount ?? 0) > 1).length : 0;
   const report = state.kind === 'repaired' ? state.report : null;
@@ -114,17 +130,17 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
       </View>}
       {state.kind === 'cancelled' && <Notice tone="info" message={en.originalsCancelled} />}
       {state.kind === 'failed' && <Notice tone="warning" message={state.code === 'busy' ? en.originalsBusy : en.originalsFailed} />}
-      {state.kind === 'picker-closed' && <Notice tone="info" message={en.inspectPickerClosed} />}
+      {state.kind === 'picker-closed' && <Notice tone="info" message={en.originalsPickerClosed} />}
       {state.kind === 'repair-failed' && <>
         <Notice tone={state.code === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairFailed(state.code)} />
-        {state.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
+        {state.cleanupFailed && <Notice tone="warning" message={en.originalsSourceCleanup} />}
         {state.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
       </>}
       {report && <>
         {report.stopped && <Notice tone={report.stopped === 'cancelled' ? 'info' : 'warning'} message={en.originalsRepairStopped(report.stopped)} />}
         {report.storeCleanupFailed && <Notice tone="warning" message={en.restoreStoreCleanupFailed} />}
         {repairWarnings(report).map(([code, count]) => <Notice key={code} tone="warning" message={en.originalsRepairWarning(code, count)} />)}
-        {report.cleanupFailed && <Notice tone="warning" message={en.inspectCleanupFailed} />}
+        {report.cleanupFailed && <Notice tone="warning" message={en.originalsSourceCleanup} />}
         <Group header={en.originalsRepairTitle} footer={report.repaired.length > 0 ? `${en.originalsQuarantine} ${en.originalsAfterRepair}` : en.originalsAfterRepair}>
           {([['repaired', report.repaired.length], ['alreadyValid', report.alreadyValid.length], ['unavailable', report.unavailable.length],
             ['mismatch', report.mismatch.length], ['failed', report.failed.length], ['notAttempted', report.notAttempted.length]] as const)
@@ -136,6 +152,11 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
         ? <Notice tone="success" title={en.originalsAllGoodTitle} message={state.kind === 'checked' ? en.originalsAllGood(found.result.total) : en.originalsAfterRepair} />
         : <>
           {state.kind === 'checked' && <Notice tone="warning" title={en.originalsFoundTitle(found.problems.length)} message={en.originalsFound(found.result.total)} />}
+          <Group header={en.originalsChooseSource} footer={en.originalsRepairScopeDetail}>
+            <Row icon="archive-outline" title={en.originalsRepair} detail={en.originalsBackupDetail} onPress={() => void repair(found, 'backup')} />
+            <Row icon="document-outline" title={en.originalsRepairZip} detail={en.originalsZipDetail} onPress={() => void repair(found, 'zip')} />
+            <Row icon="folder-outline" title={en.originalsRepairFolder} detail={en.originalsFolderDetail} onPress={() => void repair(found, 'folder')} />
+          </Group>
           <Group header={en.originalsFoundTitle(found.problems.length)} footer={shared > 0 ? en.originalsShared(shared) : en.originalsRepairScopeDetail}>
             {found.problems.slice(0, found.shown).map(problem => {
               const affected = found.affected.get(problem.hash);
@@ -156,7 +177,6 @@ export function OriginalsCheckScreen({ onClose }: { onClose(): void }) {
     <View style={[styles.actions, { backgroundColor: t.ground }]}>
       {working ? <Button variant="secondary" label={state.kind === 'repairing' ? en.originalsRepairCancel : en.originalsCancel} disabled={state.cancelling} onPress={cancel} />
         : found && found.problems.length > 0 ? <>
-          <Button icon="archive-outline" label={state.kind === 'checked' ? en.originalsRepair : en.originalsRepairAnother} onPress={() => void repair(found)} />
           <Button variant="plain" label={en.originalsCheckAgain} onPress={() => void check()} />
         </>
         : found ? <>
