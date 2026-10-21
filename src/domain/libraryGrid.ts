@@ -15,7 +15,11 @@ export type FetchBefore<T> = (key: SequenceKey, filters: LibraryFilters) => Prom
  * closed, or before the browser renders again. Every completed save is recorded here (`saved`), whatever opened it,
  * and the visible rows are always the page as read with those saves applied. So a page read that started before a
  * save finished can never bring back the state the save replaced, and a save never depends on which viewer is open.
- * The record holds only this browser's completed writes: it is what the library now stores for those memories. */
+ * The record holds only this browser's completed writes: it is what the library now stores for those memories.
+ *
+ * Applying the record can hide rows but never add them: a memory favourited after a Favourites read was taken is not
+ * in that read. So a Favourites read during which any save completed is read again, and so is the page shown when a
+ * save adds a Favourites member it lacks. Emptiness is judged on the 30 rows shown, never on the lookahead row. */
 export class LibraryGrid<T extends GridRow> {
   filters: LibraryFilters = { ...defaultFilters };
   cursor: SequenceKey | null = null;
@@ -26,9 +30,13 @@ export class LibraryGrid<T extends GridRow> {
   private more = false;
   private saved = new Map<string, boolean>();
   private request = 0;
+  /** Completed saves so far; a read compares it before and after to know whether one finished meanwhile. */
+  private saves = 0;
   private listeners = new Set<() => void>();
   private readonly fetchPage: FetchPage<T>;
   private readonly fetchBefore: FetchBefore<T>;
+
+  static readonly REREADS = 3;
 
   constructor(fetchPage: FetchPage<T>, fetchBefore: FetchBefore<T>) { this.fetchPage = fetchPage; this.fetchBefore = fetchBefore; }
 
@@ -45,14 +53,19 @@ export class LibraryGrid<T extends GridRow> {
   async load(): Promise<void> {
     const request = ++this.request;
     this.loading = true; this.failed = false; this.page = []; this.more = false; this.changed();
-    for (let attempt = 0; ; attempt++) {
+    for (let rereads = 0; ; ) {
+      const saves = this.saves;
       let page: T[];
       try { page = await this.fetchPage(this.cursor, this.filters); }
       catch { if (request === this.request) { this.loading = false; this.failed = true; this.changed(); } return; }
       if (request !== this.request) return;
-      // Rows the read returned but that saves completed meanwhile have removed: the library no longer has them on
-      // this page, so read it again (a bounded number of times; each save completes once).
-      if (page.length && !patchFavorites(page, this.saved, this.filters).length && attempt < 3) continue;
+      // Re-reads are bounded (each save completes once); after REREADS the record still hides removed rows.
+      const again = rereads < LibraryGrid.REREADS;
+      // A save finished while this Favourites read was in flight: it may have added a member the read excluded.
+      if (again && this.filters.favorites && this.saves !== saves) { rereads++; continue; }
+      // The rows that would be shown are all gone after saves: read again rather than show an empty page.
+      const shown = page.slice(0, 30);
+      if (again && shown.length && !patchFavorites(shown, this.saved, this.filters).length) { rereads++; continue; }
       const fallback = page.length ? null : emptyPageFallback(this.cursor, this.history);
       if (fallback) { this.cursor = fallback.cursor; this.history = fallback.history; continue; }
       this.page = page.slice(0, 30); this.more = page.length > 30; this.loading = false; this.changed();
@@ -63,9 +76,12 @@ export class LibraryGrid<T extends GridRow> {
   /** A favourite save completed (from any viewer, open or closed). If it empties the page shown, the page is read
    * again: an empty first page then shows later matches; an empty later page steps back. */
   favoriteSaved(id: string, favorite: boolean): void {
-    this.saved.set(id, favorite);
+    this.saved.set(id, favorite); this.saves++;
     this.changed();
-    if (!this.loading && this.page.length && !this.rows.length) void this.load();
+    if (this.loading) return; // The read in flight sees the new count and reads again if it matters.
+    const emptied = this.page.length > 0 && !this.rows.length;
+    const added = this.filters.favorites && favorite && !this.page.some(row => row.id === id);
+    if (emptied || added) void this.load();
   }
 
   setFilters(filters: LibraryFilters): Promise<void> { this.filters = { ...filters }; this.cursor = null; this.history = []; return this.load(); }

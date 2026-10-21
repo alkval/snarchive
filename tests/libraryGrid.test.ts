@@ -103,8 +103,10 @@ test('a page read that started before a save finished cannot bring back the old 
     await reads.release(); await loading;                  // The older response arrives.
     if (filters.favorites) assert.ok(!grid.rows.some(row => row.id === 'f01'));
     else assert.equal(favouriteOf(grid, 'f01'), 0);
-    assert.equal(grid.rows.length, filters.favorites ? 29 : 30);
-    assert.equal(grid.hasNext, true, 'pagination unchanged');
+    // Favourites: the read was taken again after the save, so the page is full again (f30 moved up) and has no next.
+    assert.equal(grid.rows.length, 30);
+    assert.equal(grid.hasNext, !filters.favorites);
+    if (filters.favorites) assert.equal(grid.rows[29]!.id, 'f30');
   }
 });
 
@@ -173,6 +175,68 @@ test('pagination, history, a superseded response and returning to another page',
   assert.equal(grid.rows[0]!.id, 'f31'); assert.equal(grid.history.length, 1);
   await grid.previousPage();
   assert.equal(grid.rows[0]!.id, 'f00');
+});
+
+test('a held read whose 30 shown rows were all removed meanwhile is read again, so the lookahead match is shown', async t => {
+  const { store, grid, writes, reads } = await browser(t);
+  await grid.setFilters(favourites);
+  reads.hold();
+  const loading = grid.retry();                            // Snapshot: f00 … f30, 31 rows (30 shown + lookahead).
+  for (let i = 0; i < 30; i++) await writes.toggle(id(i), true);
+  await reads.release(); await loading;
+  assert.deepEqual((await store.chronologicalPage(null, 31, favourites)).map(row => row.id), ['f30']);
+  assert.deepEqual(grid.rows.map(row => row.id), ['f30'], 'the surviving match is shown, not an empty page');
+  assert.equal(grid.hasNext, false); assert.equal(grid.cursor, null); assert.deepEqual(grid.history, []);
+});
+
+test('a Favourites read taken before a favourite was added is read again and includes it', async t => {
+  const { store, grid, writes, reads } = await browser(t);
+  await store.setFavorite('f00', false);
+  await grid.setFilters(all);
+  reads.hold();
+  const saving = writes.toggle('f00', false);              // Favourite f00 …
+  const loading = grid.setFilters(favourites);            // … while a Favourites read excluding it is in flight.
+  await saving;
+  await reads.release(); await loading;
+  const persisted = await store.chronologicalPage(null, 31, favourites);
+  assert.equal(persisted[0]?.id, 'f00');
+  assert.deepEqual(grid.rows.map(row => row.id), persisted.slice(0, 30).map(row => row.id), 'same rows as the library now has');
+  assert.equal(grid.hasNext, persisted.length > 30, 'pagination from the fresh read');
+  assert.deepEqual(grid.filters, favourites); assert.deepEqual(grid.history, []);
+});
+
+test('an initially empty Favourites result picks up a favourite added during the read, or after it', async t => {
+  const { store, grid, writes, reads } = await browser(t);
+  for (let i = 0; i < 31; i++) await store.setFavorite(id(i), false);
+  await grid.setFilters(favourites);
+  assert.equal(grid.rows.length, 0);
+  reads.hold();
+  const loading = grid.retry();                            // Snapshot: no favourites.
+  await writes.toggle('f05', false);
+  await reads.release(); await loading;
+  assert.deepEqual(grid.rows.map(row => row.id), ['f05']);
+  // Shown (not loading): a save adding a member the page lacks reads the page again.
+  await writes.toggle('f02', false); await tick(); await tick();
+  assert.deepEqual(grid.rows.map(row => row.id), ['f02', 'f05']);
+  // Removing and re-adding a member that is shown keeps it.
+  await writes.toggle('f02', true); await tick(); await tick();
+  assert.deepEqual(grid.rows.map(row => row.id), ['f05']);
+  await writes.toggle('f02', false); await tick(); await tick();
+  assert.deepEqual(grid.rows.map(row => row.id), ['f02', 'f05']);
+});
+
+test('re-reads stay bounded when saves keep completing during every read; superseded reads stay ignored', async () => {
+  type Row = ChronologicalRow;
+  const row = (memory: string): Row => ({ id: memory, day: '2026-01-01', instant: null, dateConflict: 0, photos: 1, videos: 0, overlays: 0, favorite: 1, sortDay: '2026-01-01', sortTime: '' });
+  let reads = 0;
+  const grid: LibraryGrid<Row> = new LibraryGrid<Row>(async () => { reads++; grid.favoriteSaved(`other-${reads}`, true); return [row('a')]; }, async () => []);
+  grid.filters = favourites;
+  await grid.load();
+  assert.equal(reads, 1 + LibraryGrid.REREADS, 'one read plus the bounded re-reads');
+  assert.deepEqual(grid.rows.map(r => r.id), ['a']); assert.equal(grid.loading, false);
+  // With a filter where favourites cannot change membership, a save during the read needs no re-read.
+  reads = 0; grid.filters = all; await grid.load();
+  assert.equal(reads, 1);
 });
 
 test('patching and the empty-page fallback on their own', () => {

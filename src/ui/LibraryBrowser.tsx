@@ -90,7 +90,8 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
       <Ionicons name={chips.length ? 'funnel-outline' : 'images-outline'} size={40} color={t.secondary} />
       <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
     </View>;
-  const footer = rows.length > 0 ? <View style={styles.footer}>
+  // Pagination stays reachable even if every row on this page was hidden by saves.
+  const footer = rows.length > 0 || history.length > 0 || grid.hasNext ? <View style={styles.footer}>
     {(history.length > 0 || grid.hasNext) && <View style={styles.pager}>
       <View style={styles.pagerButton}><Button variant="secondary" icon="chevron-back" label={en.libraryPrevious} disabled={!history.length}
         onPress={() => void grid.previousPage()} /></View>
