@@ -1,20 +1,18 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
 import { ActivityIndicator, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import type { ImportStore, LibraryCursor, ChronologicalRow } from '../storage/importStore';
+import type { ImportStore, ChronologicalRow } from '../storage/importStore';
 import { thumbnail } from '../platform/originalImporter';
 import { pageThumbnails } from '../storage/pageThumbnails';
-import { defaultFilters, type LibraryFilters } from '../domain/libraryFilters';
 import { librarySections } from '../domain/librarySections';
 import { LibraryFilterForm } from './LibraryFilters';
 import { dayTitle, memoryDate } from './MemoryViewer';
 import { MemoryPager } from './MemoryPager';
-import { MemorySequence, keyOf } from '../domain/memoryNavigation';
-import { matchesFilters } from '../domain/libraryFilters';
+import { MemorySequence } from '../domain/memoryNavigation';
 import { FavoriteWrites } from '../domain/favoriteWrites';
-import { emptyPageFallback, patchFavorites, returnToGrid } from '../domain/gridReturn';
+import { LibraryGrid, favoriteSavedHandler } from '../domain/libraryGrid';
 import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -32,79 +30,39 @@ function sections(rows: ChronologicalRow[]): Section[] {
 
 export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportStore; onClose: () => void; backHandler: MutableRefObject<(() => boolean) | null> }) {
   const t = useTheme();
-  const mounted = useRef(true);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const [filters, setFilters] = useState<LibraryFilters>({ ...defaultFilters });
   const [editingFilters, setEditingFilters] = useState(false);
-  const [rows, setRows] = useState<ChronologicalRow[]>([]);
-  const [cursor, setCursor] = useState<LibraryCursor | null>(null);
-  const [history, setHistory] = useState<(LibraryCursor | null)[]>([]);
   const [previews, setPreviews] = useState<Record<string, string | null>>({});
-  const [next, setNext] = useState(false);
   const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
-  /** Favourite states saved from the viewer since it opened, by memory ID. */
-  const favorites = useRef(new Map<string, boolean>());
-  const latest = useRef({ sequence, filters });
-  latest.current = { sequence, filters };
-  /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write and a save
-   * that finishes later still updates the open sequence or the grid. */
-  const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite), (id, favorite) => {
-    favorites.current.set(id, favorite);
-    const { sequence: open, filters: active } = latest.current;
-    const loaded = open?.row(id);
-    if (open && loaded) { const updated = { ...loaded, favorite: favorite ? 1 : 0 }; open.update(updated, matchesFilters(updated, active)); }
-    else if (!open && mounted.current) setRows(previous => {
-      const patched = patchFavorites(previous, new Map([[id, favorite]]), active);
-      if (previous.length && !patched.length) emptied.current = true; // Recovered by the reload below.
-      return patched;
-    });
-  }), [store]);
-  const emptied = useRef(false);
-  useEffect(() => { if (emptied.current) { emptied.current = false; setRetry(value => value + 1); } }, [rows]);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed] = useState(false);
-  const [retry, setRetry] = useState(0);
-  useEffect(() => {
-    let active = true; setLoading(true); setFailed(false); setRows([]); setPreviews({});
-    void store.chronologicalPage(cursor, 31, filters).then(page => {
-      if (!active) return;
-      // A later page can empty (for example after favourites were removed): step back to the page before it.
-      const fallback = page.length ? null : emptyPageFallback(cursor, history);
-      if (fallback) { setCursor(fallback.cursor); setHistory(fallback.history); return; }
-      setRows(page.slice(0, 30)); setNext(page.length > 30);
-    })
-      .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [store, cursor, retry, filters]);
+  /** Page, filters, history and every completed favourite save (see LibraryGrid). */
+  const grid = useMemo(() => new LibraryGrid<ChronologicalRow>(
+    (cursor, filters) => store.chronologicalPage(cursor, 31, filters),
+    (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters)), [store]);
+  const [, render] = useReducer((value: number) => value + 1, 0);
+  useEffect(() => { const stop = grid.subscribe(render); void grid.load(); return stop; }, [grid]);
+  const latest = useRef(sequence);
+  latest.current = sequence;
+  /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write. A completed
+   * save always reaches the grid, whichever viewer started it and whenever it finishes; the open sequence, if it has
+   * that memory loaded, is updated too. */
+  const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite),
+    favoriteSavedHandler(grid, () => latest.current)), [store, grid]);
+  const rows = grid.rows, page = grid.pageRows, filters = grid.filters, history = grid.history;
+  useEffect(() => { setPreviews({}); }, [page]);
   useEffect(() => {
     let stopped = false;
-    if (!sequence) void pageThumbnails(rows, store, thumbnail, () => stopped,
+    if (!sequence) void pageThumbnails(page, store, thumbnail, () => stopped,
       (id, uri) => setPreviews(previous => ({ ...previous, [id]: uri })));
     return () => { stopped = true; };
-  }, [rows, sequence, store]);
+  }, [page, sequence, store]);
   const open = (row: ChronologicalRow) => {
     const index = rows.findIndex(item => item.id === row.id);
     if (index < 0) return;
     const current = filters;
-    favorites.current = new Map();
     setSequence(new MemorySequence(rows, index, (anchor, direction, limit) => store.chronologicalAdjacent(anchor, direction, limit, current)));
   };
-  /** Back to the grid with the same filters. If the last memory viewed is on this page, the page stays as it was
-   * (scroll position included), with favourite changes applied. Otherwise the grid opens at a page starting at that
-   * memory, and Previous returns to the page the viewer was opened from. */
-  const closeViewer = (last: ChronologicalRow) => {
-    setSequence(null);
-    const decision = returnToGrid(rows, last.id, favorites.current, filters);
-    if (decision.kind === 'keep') { if (favorites.current.size) setRows(decision.rows); return; }
-    // The page emptied (every memory on it was unfavourited): read it again; an empty later page steps back.
-    if (decision.kind === 'reload') { setRetry(value => value + 1); return; }
-    const from = cursor, past = history;
-    void store.chronologicalAdjacent(keyOf(last), 'previous', 1, filters).then(before => {
-      if (!mounted.current) return;
-      const start = before[0] ? keyOf(before[0]) : null;
-      setHistory(start ? [...past, from] : []); setCursor(start);
-    }).catch(() => { if (mounted.current) setRetry(value => value + 1); });
-  };
+  /** Back to the grid with the same filters: the same page (scroll position included) if the last memory viewed is
+   * on it, otherwise a page starting at that memory, from which Previous returns here. */
+  const closeViewer = (last: ChronologicalRow) => { setSequence(null); void grid.closedViewer(last); };
   // System Back steps out of the viewer or filters before it leaves the library.
   useEffect(() => {
     backHandler.current = () => {
@@ -118,7 +76,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
   const chips = en.filterChips(filters.media, filters.favorites, filters.month);
 
   if (editingFilters) return <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)}
-    apply={value => { setFilters(value); setCursor(null); setHistory([]); setEditingFilters(false); }} />;
+    apply={value => { void grid.setFilters(value); setEditingFilters(false); }} />;
 
   const header = <View style={styles.header}>
     <LargeTitle title={en.libraryTitle} subtitle={en.libraryOrder} />
@@ -126,19 +84,19 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
       {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
     </Pressable>}
   </View>;
-  const empty = loading ? <View style={styles.centered}><ActivityIndicator color={t.secondary} accessibilityLabel={en.libraryLoading} /></View>
-    : failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => setRetry(value => value + 1) }} /></View>
+  const empty = grid.loading ? <View style={styles.centered}><ActivityIndicator color={t.secondary} accessibilityLabel={en.libraryLoading} /></View>
+    : grid.failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => void grid.retry() }} /></View>
     : <View style={styles.centered}>
       <Ionicons name={chips.length ? 'funnel-outline' : 'images-outline'} size={40} color={t.secondary} />
       <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
     </View>;
   const footer = rows.length > 0 ? <View style={styles.footer}>
-    {(history.length > 0 || next) && <View style={styles.pager}>
+    {(history.length > 0 || grid.hasNext) && <View style={styles.pager}>
       <View style={styles.pagerButton}><Button variant="secondary" icon="chevron-back" label={en.libraryPrevious} disabled={!history.length}
-        onPress={() => { setCursor(history[history.length - 1]!); setHistory(history.slice(0, -1)); }} /></View>
+        onPress={() => void grid.previousPage()} /></View>
       <Text style={[type.footnote, { color: t.secondary }]}>{en.libraryPage(history.length + 1)}</Text>
-      <View style={styles.pagerButton}><Button variant="secondary" label={en.libraryNext} disabled={!next}
-        onPress={() => { setHistory([...history, cursor]); const last = rows[rows.length - 1]!; setCursor({ day: last.sortDay, time: last.sortTime, id: last.id }); }} /></View>
+      <View style={styles.pagerButton}><Button variant="secondary" label={en.libraryNext} disabled={!grid.hasNext}
+        onPress={() => void grid.nextPage()} /></View>
     </View>}
     <Text style={[type.footnote, { color: t.secondary, textAlign: 'center' }]}>{en.libraryPreviewNote}</Text>
   </View> : undefined;
@@ -155,7 +113,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
         <Text style={[type.body, { color: t.accent }]}>{en.filterButton}</Text>
       </Pressable>
     </View>
-    <SectionList key={JSON.stringify(cursor)} sections={loading || failed ? [] : grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
+    <SectionList key={JSON.stringify(grid.cursor)} sections={grid.loading || grid.failed ? [] : grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
       ListHeaderComponent={header} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
       renderSectionHeader={({ section }) => <View style={[styles.sectionHeader, { backgroundColor: t.ground }]} accessibilityRole="header">
         <Text style={[type.headline, { color: t.text }]}>{section.title}</Text>
