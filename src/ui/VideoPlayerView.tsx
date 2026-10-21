@@ -7,9 +7,14 @@ import type { ImportStore, LibraryRow } from '../storage/importStore';
 import { matchingAspect, seekTarget, videoDisplaySize, videoControlsReady } from '../domain/photoGeometry';
 import { en } from '../i18n/en';
 import { MediaButton } from './kit';
+import { GestureStage } from './GestureStage';
+import type { Navigation } from '../domain/viewerGestures';
 import { type, useTheme } from './theme';
 
-export function VideoPlayerView({ video, row, store }: { video: LocalVideo; row: LibraryRow; store: ImportStore }) {
+/** One player per open video: its parent remounts this for another memory, and the player is paused and released on
+ * unmount, so leaving a video stops it and visited videos keep no player. Swipes navigate on the picture only; the
+ * controls below it never start a swipe. */
+export function VideoPlayerView({ video, row, store, onNavigate }: { video: LocalVideo; row: LibraryRow; store: ImportStore; onNavigate: (direction: Navigation) => void }) {
   const t = useTheme();
   const player = useVideoPlayer({ uri: video.uri, contentType: 'progressive', useCaching: false }, instance => {
     instance.staysActiveInBackground = false;
@@ -26,17 +31,21 @@ export function VideoPlayerView({ video, row, store }: { video: LocalVideo; row:
   const [note, setNote] = useState('');
   useEffect(() => {
     const listener = AppState.addEventListener('change', state => { if (state !== 'active') player.pause(); });
-    return () => listener.remove(); // useVideoPlayer releases the player on unmount.
+    return () => {
+      listener.remove();
+      try { player.pause(); } catch { /* Already released. */ } // useVideoPlayer then releases the player.
+    };
   }, [player]);
+  const { id, overlays } = row;
   useEffect(() => {
     let active = true;
     void (async () => {
-      if (!row.overlays) return;
-      if (row.overlays > 1) { setNote(en.libraryOverlayVariants); return; }
+      if (!overlays) return;
+      if (overlays > 1) { setNote(en.libraryOverlayVariants); return; }
       const size = videoDisplaySize(video.width, video.height, video.rotation);
       if (!size) { setNote(en.videoGeometry); return; }
       try {
-        const object = (await store.objects(row.id)).find(item => item.role === 'overlay');
+        const object = (await store.objects(id)).find(item => item.role === 'overlay');
         if (!object) throw new Error('missing-overlay');
         const uri = await originalUri(object);
         const dimensions = await new Promise<{ width: number; height: number }>((resolve, reject) => Image.getSize(uri, (width, height) => resolve({ width, height }), reject));
@@ -46,17 +55,17 @@ export function VideoPlayerView({ video, row, store }: { video: LocalVideo; row:
       } catch { if (active) setNote(en.libraryOverlayFailed); }
     })();
     return () => { active = false; };
-  }, [video, row, store]);
+  }, [video, id, overlays, store]);
   const duration = Number.isFinite(player.duration) ? player.duration : 0;
   const ready = videoControlsReady(status, duration);
   const progress01 = duration > 0 ? Math.min(1, Math.max(0, currentTime / duration)) : 0;
   return <View style={styles.root}>
     {status === 'error' ? <Text accessibilityLiveRegion="polite" style={[type.body, styles.centerText, { color: t.onMedia }]}>{en.libraryVideoFailed}</Text> : <>
-      <View style={styles.canvas}>
+      <View style={styles.canvas}><GestureStage zoomable={false} content={null} onNavigate={onNavigate}>
         <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" surfaceType="textureView" nativeControls={false} fullscreenOptions={{ enable: false }} allowsPictureInPicture={false} allowsVideoFrameAnalysis={false} />
         {overlay && showOverlay && <Image pointerEvents="none" accessible={false} source={{ uri: overlay }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setOverlay(null); setNote(en.libraryOverlayFailed); }} />}
         {!ready && <View style={styles.loading}><ActivityIndicator color={t.onMediaSecondary} accessibilityLabel={en.videoLoading} /></View>}
-      </View>
+      </GestureStage></View>
       <View style={styles.chrome}>
         <View accessible accessibilityLabel={en.videoTime(currentTime, duration)} style={styles.timeline}>
           <View style={[styles.track, { backgroundColor: t.mediaControl }]}>

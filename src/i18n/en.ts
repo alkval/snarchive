@@ -92,6 +92,10 @@ export const en = {
   libraryOverlayVariants: 'Several overlays were preserved, so none is shown automatically.',
   libraryOverlaySize: 'The overlay has a different shape from the photo. It is preserved, but hidden so it is not stretched.',
   libraryOverlayFailed: 'The overlay could not be verified or shown. The original is still available.',
+  viewerStep: (direction: 'next' | 'previous') => direction === 'next' ? 'Next memory' : 'Previous memory',
+  viewerNone: (direction: 'next' | 'previous') => direction === 'next' ? 'No next memory' : 'No previous memory',
+  viewerNavigationFailed: (direction: 'next' | 'previous') => `The ${direction} memory could not be loaded. Your library has not been changed. Try again.`,
+  viewerResetZoom: 'Reset zoom',
   libraryShowOverlay: 'Show overlay', libraryHideOverlay: 'Hide overlay', libraryPhoto: 'Preserved original photo',
 
   // Video

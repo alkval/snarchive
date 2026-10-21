@@ -3,7 +3,7 @@ import type { ImportStore } from '../storage/importStore';
 import { en } from '../i18n/en';
 import { MediaButton } from './kit';
 
-export function FavoriteButton({ id, initial, store, saved, failed }: { id: string; initial: boolean; store: ImportStore; saved: () => void; failed: (message: string) => void }) {
+export function FavoriteButton({ id, initial, store, saved, failed }: { id: string; initial: boolean; store: ImportStore; saved: (favorite: boolean) => void; failed: (message: string) => void }) {
   const [favorite, setFavorite] = useState(initial);
   const [saving, setSaving] = useState(false);
   const lock = useRef(false), active = useRef(true);
@@ -11,7 +11,7 @@ export function FavoriteButton({ id, initial, store, saved, failed }: { id: stri
   async function toggle() {
     if (lock.current) return;
     lock.current = true; setSaving(true); failed('');
-    try { await store.setFavorite(id, !favorite); saved(); if (active.current) setFavorite(!favorite); }
+    try { await store.setFavorite(id, !favorite); saved(!favorite); if (active.current) setFavorite(!favorite); }
     catch { if (active.current) failed(en.favoriteFailed); }
     finally { lock.current = false; if (active.current) setSaving(false); }
   }

@@ -202,8 +202,20 @@ export class ImportStore {
     return JSON.parse(row?.data ?? '[]') as LibraryRow[];
   }
   async chronologicalPage(after: LibraryCursor | null = null, limit = 30, filters: LibraryFilters = defaultFilters): Promise<ChronologicalRow[]> {
+    return this.chronological(after, 'next', limit, filters);
+  }
+  /** The memories next to a position in the grid's order (sortDay DESC, sortTime DESC, id ASC), nearest first, under
+   * the same filters. The anchor is a sort key, not a membership test: it need not itself match the filters (for
+   * example a memory just removed from favorites), and is never returned. Bounded like a page. */
+  async chronologicalAdjacent(anchor: LibraryCursor, direction: 'next' | 'previous', limit = 20, filters: LibraryFilters = defaultFilters): Promise<ChronologicalRow[]> {
+    check(direction === 'next' || direction === 'previous');
+    return this.chronological(anchor, direction, limit, filters);
+  }
+  private async chronological(anchor: LibraryCursor | null, direction: 'next' | 'previous', limit: number, filters: LibraryFilters): Promise<ChronologicalRow[]> {
     check(Number.isInteger(limit) && limit >= 1 && limit <= 100);
     check(validFilters(filters));
+    // "previous" is the same strict order reversed, so the nearest earlier row comes first and ties never repeat or skip.
+    const [newer, older, before, order] = direction === 'next' ? ['<', '<', '>', 'sortDay DESC,sortTime DESC,id ASC'] : ['>', '>', '<', 'sortDay ASC,sortTime ASC,id DESC'];
     const row = await this.db.getFirstAsync<{ data: string }>(`WITH facts AS (
       SELECT m.id,
         EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id) AS favorite,
@@ -219,11 +231,11 @@ export class ImportStore {
         CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts
     ) SELECT json_group_array(json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
       'favorite',favorite,'photos',photos,'videos',videos,'overlays',overlays,'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
-      SELECT * FROM ordered WHERE (?=1 OR sortDay<? OR (sortDay=? AND sortTime<?) OR (sortDay=? AND sortTime=? AND id>?))
+      SELECT * FROM ordered WHERE (?=1 OR sortDay${newer}? OR (sortDay=? AND sortTime${older}?) OR (sortDay=? AND sortTime=? AND id${before}?))
         AND (?='all' OR (?='photos' AND photos>0) OR (?='videos' AND videos>0))
         AND (?=0 OR favorite=1) AND (?='' OR (dateConflict=0 AND substr(day,1,7)=?))
-      ORDER BY sortDay DESC,sortTime DESC,id ASC LIMIT ?
-    )`, after ? 0 : 1, after?.day ?? '', after?.day ?? '', after?.time ?? '', after?.day ?? '', after?.time ?? '', after?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, limit);
+      ORDER BY ${order} LIMIT ?
+    )`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, limit);
     return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
   }
   async setFavorite(id: string, favorite: boolean): Promise<void> {

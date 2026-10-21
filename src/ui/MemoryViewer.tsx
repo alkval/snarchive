@@ -8,7 +8,9 @@ import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
 import { VideoPlayerView } from './VideoPlayerView';
 import { FavoriteButton } from './FavoriteButton';
 import { FadeImage, MediaButton } from './kit';
-import { type, useTheme } from './theme';
+import { GestureStage } from './GestureStage';
+import type { Direction, NeighbourState } from '../domain/memoryNavigation';
+import { type, useReducedMotion, useTheme } from './theme';
 import { en } from '../i18n/en';
 
 type Photo = { uri: string; size: ImageSize };
@@ -44,8 +46,16 @@ export function memoryDate(row: LibraryRow): { title: string; caption: string } 
   return { title: en.libraryUnknownDate, caption: '' };
 }
 
-export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: LibraryRow & { favorite: number }; store: ImportStore; onBack: () => void; onFavoriteSaved: () => void }) {
+/** What the viewer needs to move through the filtered library; MemoryPager supplies it. */
+export type ViewerNavigation = { previous: NeighbourState; next: NeighbourState; go: (direction: Direction) => void; failed: Direction | null };
+
+/** One memory, fullscreen. Keyed by memory ID by its parent, so moving to another memory starts from a clean state:
+ * zoom, overlay toggle, loads and the video player all belong to the memory they were created for. */
+export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }: {
+  row: LibraryRow & { favorite: number }; store: ImportStore; onBack: () => void; onFavoriteSaved: (favorite: boolean) => void; navigation: ViewerNavigation;
+}) {
   const t = useTheme();
+  const reduced = useReducedMotion();
   const date = memoryDate(row);
   const [video, setVideo] = useState<LocalVideo | null>(null);
   const [base, setBase] = useState<Photo | null>(null);
@@ -55,19 +65,25 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: Lib
   const [status, setStatus] = useState('');
   const [overlayStatus, setOverlayStatus] = useState('');
   const [favoriteError, setFavoriteError] = useState('');
+  const [zoomed, setZoomed] = useState(false);
+  const [resetToken, setResetToken] = useState(0);
   const overlayOpacity = useRef(new Animated.Value(1)).current;
   useEffect(() => {
-    Animated.timing(overlayOpacity, { toValue: showOverlay ? 1 : 0, duration: 150, easing: Easing.bezier(0.23, 1, 0.32, 1), useNativeDriver: true }).start();
-  }, [showOverlay, overlayOpacity]);
+    const toValue = showOverlay ? 1 : 0;
+    if (reduced) { overlayOpacity.setValue(toValue); return; }
+    Animated.timing(overlayOpacity, { toValue, duration: 150, easing: Easing.bezier(0.23, 1, 0.32, 1), useNativeDriver: true }).start();
+  }, [showOverlay, overlayOpacity, reduced]);
+  // Loads only for this memory: a result that arrives after the viewer moved on is dropped (`active`).
+  const { id, photos, videos, overlays } = row;
   useEffect(() => {
     let active = true;
     void (async () => {
-      if (row.photos + row.videos !== 1) { setStatus(en.libraryVariants); setLoading(false); return; }
+      if (photos + videos !== 1) { setStatus(en.libraryVariants); setLoading(false); return; }
       try {
-        const objects = await store.objects(row.id);
-        const object = objects.find(item => item.role === (row.videos ? 'video' : 'photo'));
+        const objects = await store.objects(id);
+        const object = objects.find(item => item.role === (videos ? 'video' : 'photo'));
         if (!object) throw new Error('missing-object');
-        if (row.videos) {
+        if (videos) {
           const local = await originalVideo(object);
           if (active) { setVideo(local); setLoading(false); }
           return;
@@ -75,7 +91,7 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: Lib
         const photo = await measure(await originalUri(object));
         if (!active) return;
         setBase(photo); setLoading(false);
-        if (row.overlays > 1) { setOverlayStatus(en.libraryOverlayVariants); return; }
+        if (overlays > 1) { setOverlayStatus(en.libraryOverlayVariants); return; }
         const layer = objects.find(item => item.role === 'overlay');
         if (!layer) return;
         try {
@@ -84,11 +100,27 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: Lib
           if (!matchingAspect(photo.size, image.size)) { setOverlayStatus(en.libraryOverlaySize); return; }
           setOverlay(image);
         } catch { if (active) setOverlayStatus(en.libraryOverlayFailed); }
-      } catch { if (active) { setStatus(row.videos ? en.libraryVideoFailed : en.libraryPhotoFailed); setLoading(false); } }
+      } catch { if (active) { setStatus(videos ? en.libraryVideoFailed : en.libraryPhotoFailed); setLoading(false); } }
     })();
     return () => { active = false; };
-  }, [row, store]);
-  const note = favoriteError || overlayStatus;
+  }, [id, photos, videos, overlays, store]);
+  const navigate = (direction: Direction) => { if (navigation[direction] !== 'end') navigation.go(direction); };
+  const note = favoriteError || overlayStatus || (navigation.failed ? en.viewerNavigationFailed(navigation.failed) : '');
+  const stageContent = base ? <View style={StyleSheet.absoluteFill}>
+    <FadeImage accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill}
+      onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
+    {overlay && <Animated.Image accessible={false} source={{ uri: overlay.uri }} resizeMode="contain" style={[StyleSheet.absoluteFill, { opacity: overlayOpacity }]}
+      onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}
+  </View> : <View style={styles.centred}>
+    {loading && <ActivityIndicator color={t.onMediaSecondary} accessibilityLabel={en.libraryLoading} />}
+    {!!status && <Text accessibilityLiveRegion="polite" style={[type.body, styles.status, { color: t.onMedia }]}>{status}</Text>}
+  </View>;
+  const step = (direction: Direction) => {
+    const state = navigation[direction];
+    return <MediaButton icon={direction === 'previous' ? 'arrow-back' : 'arrow-forward'}
+      label={state === 'loading' ? en.libraryLoading : state === 'end' ? en.viewerNone(direction) : en.viewerStep(direction)}
+      disabled={state === 'end' || state === 'loading'} onPress={() => navigate(direction)} />;
+  };
   return <View style={[styles.root, { backgroundColor: t.media }]}>
     <StatusBar style="light" />
     <SafeAreaView style={styles.root}>
@@ -102,24 +134,25 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved }: { row: Lib
           <FavoriteButton id={row.id} initial={row.favorite === 1} store={store} saved={onFavoriteSaved} failed={setFavoriteError} />
         </View>
       </View>
-      <View style={styles.stage}>
-        {loading && <ActivityIndicator color={t.onMediaSecondary} accessibilityLabel={en.libraryLoading} />}
-        {!!status && <Text accessibilityLiveRegion="polite" style={[type.body, styles.status, { color: t.onMedia }]}>{status}</Text>}
-        {video && <VideoPlayerView video={video} row={row} store={store} />}
-        {base && <View style={StyleSheet.absoluteFill}>
-          <FadeImage accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill}
-            onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
-          {overlay && <Animated.Image accessible={false} pointerEvents="none" source={{ uri: overlay.uri }} resizeMode="contain" style={[StyleSheet.absoluteFill, { opacity: overlayOpacity }]}
-            onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}
-        </View>}
-      </View>
-      {(!!note || (base && overlay)) && <View style={styles.bottomBar}>
+      {video ? <VideoPlayerView video={video} row={row} store={store} onNavigate={navigate} />
+        : <GestureStage zoomable={!!base} content={base?.size ?? null} onNavigate={navigate} onZoomChange={setZoomed} resetToken={resetToken}>{stageContent}</GestureStage>}
+      <View style={styles.bottomBar}>
         {!!note && <Text accessibilityLiveRegion="polite" style={[type.footnote, styles.note, { color: t.onMediaSecondary }]}>{note}</Text>}
-        {base && overlay && <View style={styles.overlayControl}>
-          <MediaButton icon={showOverlay ? 'layers' : 'layers-outline'} label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />
-          <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay}</Text>
-        </View>}
-      </View>}
+        <View style={styles.controls}>
+          {step('previous')}
+          <View style={styles.middle}>
+            {base && overlay && <View style={styles.control}>
+              <MediaButton icon={showOverlay ? 'layers' : 'layers-outline'} label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />
+              <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay}</Text>
+            </View>}
+            {zoomed && <View style={styles.control}>
+              <MediaButton icon="contract" label={en.viewerResetZoom} onPress={() => setResetToken(value => value + 1)} />
+              <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{en.viewerResetZoom}</Text>
+            </View>}
+          </View>
+          {step('next')}
+        </View>
+      </View>
     </SafeAreaView>
   </View>;
 }
@@ -130,9 +163,11 @@ const styles = StyleSheet.create({
   side: { width: 56, justifyContent: 'center' },
   right: { alignItems: 'flex-end' },
   titleBlock: { flex: 1, alignItems: 'center', paddingHorizontal: 8 },
-  stage: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  centred: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   status: { textAlign: 'center', paddingHorizontal: 32 },
-  bottomBar: { paddingHorizontal: 20, paddingVertical: 12, gap: 12, alignItems: 'center' },
-  note: { textAlign: 'center' },
-  overlayControl: { alignItems: 'center', gap: 6 },
+  bottomBar: { paddingHorizontal: 12, paddingVertical: 10, gap: 10 },
+  note: { textAlign: 'center', paddingHorizontal: 8 },
+  controls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  middle: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16 },
+  control: { alignItems: 'center', gap: 6 },
 });

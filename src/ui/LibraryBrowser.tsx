@@ -9,7 +9,10 @@ import { pageThumbnails } from '../storage/pageThumbnails';
 import { defaultFilters, type LibraryFilters } from '../domain/libraryFilters';
 import { librarySections } from '../domain/librarySections';
 import { LibraryFilterForm } from './LibraryFilters';
-import { MemoryViewer, dayTitle, memoryDate } from './MemoryViewer';
+import { dayTitle, memoryDate } from './MemoryViewer';
+import { MemoryPager } from './MemoryPager';
+import { MemorySequence, keyOf } from '../domain/memoryNavigation';
+import { matchesFilters } from '../domain/libraryFilters';
 import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -36,27 +39,62 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
   const [history, setHistory] = useState<(LibraryCursor | null)[]>([]);
   const [previews, setPreviews] = useState<Record<string, string | null>>({});
   const [next, setNext] = useState(false);
-  const [selected, setSelected] = useState<ChronologicalRow | null>(null);
+  const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
+  /** Favourite states changed in the viewer since it opened, by memory ID. */
+  const favorites = useRef(new Map<string, boolean>());
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let active = true; setLoading(true); setFailed(false); setRows([]); setPreviews({});
-    void store.chronologicalPage(cursor, 31, filters).then(page => { if (active) { setRows(page.slice(0, 30)); setNext(page.length > 30); } })
+    void store.chronologicalPage(cursor, 31, filters).then(page => {
+      if (!active) return;
+      // A later page can empty (for example after favourites were removed); start again from the first page.
+      if (!page.length && cursor) { setCursor(null); setHistory([]); return; }
+      setRows(page.slice(0, 30)); setNext(page.length > 30);
+    })
       .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [store, cursor, retry, filters]);
   useEffect(() => {
     let stopped = false;
-    if (!selected) void pageThumbnails(rows, store, thumbnail, () => stopped,
+    if (!sequence) void pageThumbnails(rows, store, thumbnail, () => stopped,
       (id, uri) => setPreviews(previous => ({ ...previous, [id]: uri })));
     return () => { stopped = true; };
-  }, [rows, selected, store]);
-  const closeViewer = () => { setSelected(null); setRetry(value => value + 1); };
+  }, [rows, sequence, store]);
+  const open = (row: ChronologicalRow) => {
+    const index = rows.findIndex(item => item.id === row.id);
+    if (index < 0) return;
+    const current = filters;
+    favorites.current = new Map();
+    setSequence(new MemorySequence(rows, index, (anchor, direction, limit) => store.chronologicalAdjacent(anchor, direction, limit, current)));
+  };
+  /** Back to the grid with the same filters. If the last memory viewed is on this page, the page stays as it was
+   * (scroll position included), with favourite changes applied. Otherwise the grid opens at a page starting at that
+   * memory, and Previous returns to the page the viewer was opened from. */
+  const closeViewer = (last: ChronologicalRow) => {
+    setSequence(null);
+    if (rows.some(row => row.id === last.id)) {
+      if (!favorites.current.size) return;
+      setRows(rows.flatMap(row => {
+        const favorite = favorites.current.get(row.id);
+        if (favorite === undefined) return [row];
+        const updated = { ...row, favorite: favorite ? 1 : 0 };
+        return matchesFilters(updated, filters) ? [updated] : [];
+      }));
+      return;
+    }
+    const from = cursor, past = history;
+    void store.chronologicalAdjacent(keyOf(last), 'previous', 1, filters).then(before => {
+      if (!active.current) return;
+      const start = before[0] ? keyOf(before[0]) : null;
+      setHistory(start ? [...past, from] : []); setCursor(start);
+    }).catch(() => { if (active.current) setRetry(value => value + 1); });
+  };
   // System Back steps out of the viewer or filters before it leaves the library.
   useEffect(() => {
     backHandler.current = () => {
-      if (selected) { closeViewer(); return true; }
+      if (sequence) { closeViewer(sequence.current); return true; }
       if (editingFilters) { setEditingFilters(false); return true; }
       return false;
     };
@@ -65,8 +103,6 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
   const grouped = useMemo(() => sections(rows), [rows]);
   const chips = en.filterChips(filters.media, filters.favorites, filters.month);
 
-  if (selected) return <MemoryViewer key={selected.id} row={selected} store={store} onBack={closeViewer}
-    onFavoriteSaved={() => { if (active.current) { setCursor(null); setHistory([]); } }} />;
   if (editingFilters) return <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)}
     apply={value => { setFilters(value); setCursor(null); setHistory([]); setEditingFilters(false); }} />;
 
@@ -93,7 +129,9 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     <Text style={[type.footnote, { color: t.secondary, textAlign: 'center' }]}>{en.libraryPreviewNote}</Text>
   </View> : undefined;
 
-  return <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
+  // The grid stays mounted under the viewer (hidden from assistive technology) so its scroll position survives.
+  return <View style={styles.root}><SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}
+    importantForAccessibility={sequence ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={!!sequence}>
     <StatusBar style={t.dark ? 'light' : 'dark'} />
     <View style={styles.topBar}>
       <BackButton label={en.libraryClose} onPress={onClose} />
@@ -114,7 +152,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
           const date = memoryDate(row);
           const uri = previews[row.id];
           return <Pressable key={row.id} accessibilityRole="button" accessibilityLabel={en.libraryTile(date.title, row.videos > 0, row.favorite === 1)}
-            onPress={() => setSelected(row)} style={({ pressed }) => [styles.tile, { backgroundColor: t.raised, opacity: pressed ? 0.7 : 1 }]}>
+            onPress={() => open(row)} style={({ pressed }) => [styles.tile, { backgroundColor: t.raised, opacity: pressed ? 0.7 : 1 }]}>
             {uri ? <FadeImage accessible={false} source={{ uri }} resizeMode="cover" style={StyleSheet.absoluteFill}
               onError={() => setPreviews(previous => ({ ...previous, [row.id]: null }))} />
               : uri === null ? <View style={styles.missing}><Ionicons name="image-outline" size={24} color={t.secondary} accessibilityLabel={en.thumbnailMissing} /></View> : null}
@@ -126,7 +164,11 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
         })}
         {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
       </View>} />
-  </SafeAreaView>;
+  </SafeAreaView>
+    {sequence && <View style={StyleSheet.absoluteFill}>
+      <MemoryPager sequence={sequence} store={store} filters={filters} onClose={closeViewer} onFavorite={(id, favorite) => favorites.current.set(id, favorite)} />
+    </View>}
+  </View>;
 }
 
 const styles = StyleSheet.create({
