@@ -51,8 +51,11 @@ export type ViewerNavigation = { previous: NeighbourState; next: NeighbourState;
 
 /** One memory, fullscreen. Keyed by memory ID by its parent, so moving to another memory starts from a clean state:
  * zoom, overlay toggle, loads and the video player all belong to the memory they were created for. */
-export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }: {
-  row: LibraryRow & { favorite: number }; store: ImportStore; onBack: () => void; onFavoriteSaved: (favorite: boolean) => void; navigation: ViewerNavigation;
+/** The favourite state of the open memory: `pending` and `failed` come from writes that outlive this viewer. */
+export type ViewerFavorite = { pending: boolean; failed: boolean; toggle: () => void };
+
+export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
+  row: LibraryRow & { favorite: number }; store: ImportStore; onBack: () => void; favorite: ViewerFavorite; navigation: ViewerNavigation;
 }) {
   const t = useTheme();
   const reduced = useReducedMotion();
@@ -64,7 +67,6 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
   const [overlayStatus, setOverlayStatus] = useState('');
-  const [favoriteError, setFavoriteError] = useState('');
   const [zoomed, setZoomed] = useState(false);
   const [resetToken, setResetToken] = useState(0);
   const overlayOpacity = useRef(new Animated.Value(1)).current;
@@ -105,7 +107,7 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }
     return () => { active = false; };
   }, [id, photos, videos, overlays, store]);
   const navigate = (direction: Direction) => { if (navigation[direction] !== 'end') navigation.go(direction); };
-  const note = favoriteError || overlayStatus || (navigation.failed ? en.viewerNavigationFailed(navigation.failed) : '');
+  const note = (favorite.failed ? en.favoriteFailed : '') || overlayStatus || (navigation.failed ? en.viewerNavigationFailed(navigation.failed) : '');
   const stageContent = base ? <View style={StyleSheet.absoluteFill}>
     <FadeImage accessibilityLabel={en.libraryPhoto} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill}
       onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
@@ -131,7 +133,7 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }
           {!!date.caption && <Text numberOfLines={2} style={[type.caption, { color: t.onMediaSecondary, textAlign: 'center' }]}>{date.caption}</Text>}
         </View>
         <View style={[styles.side, styles.right]}>
-          <FavoriteButton id={row.id} initial={row.favorite === 1} store={store} saved={onFavoriteSaved} failed={setFavoriteError} />
+          <FavoriteButton favorite={row.favorite === 1} pending={favorite.pending} onToggle={favorite.toggle} />
         </View>
       </View>
       {video ? <VideoPlayerView video={video} row={row} store={store} onNavigate={navigate} />
@@ -145,8 +147,10 @@ export function MemoryViewer({ row, store, onBack, onFavoriteSaved, navigation }
               <MediaButton icon={showOverlay ? 'layers' : 'layers-outline'} label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />
               <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay}</Text>
             </View>}
-            {zoomed && <View style={styles.control}>
-              <MediaButton icon="contract" label={en.viewerResetZoom} onPress={() => setResetToken(value => value + 1)} />
+            {/* Always laid out for a photo, so the stage keeps its size when zoom starts or ends; hidden and inert at fit. */}
+            {base && <View style={[styles.control, !zoomed && styles.hidden]} pointerEvents={zoomed ? 'auto' : 'none'}
+              importantForAccessibility={zoomed ? 'auto' : 'no-hide-descendants'} accessibilityElementsHidden={!zoomed}>
+              <MediaButton icon="contract" label={en.viewerResetZoom} disabled={!zoomed} onPress={() => setResetToken(value => value + 1)} />
               <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{en.viewerResetZoom}</Text>
             </View>}
           </View>
@@ -170,4 +174,5 @@ const styles = StyleSheet.create({
   controls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   middle: { flex: 1, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 16 },
   control: { alignItems: 'center', gap: 6 },
+  hidden: { opacity: 0 },
 });

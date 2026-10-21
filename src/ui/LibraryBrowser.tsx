@@ -13,6 +13,8 @@ import { dayTitle, memoryDate } from './MemoryViewer';
 import { MemoryPager } from './MemoryPager';
 import { MemorySequence, keyOf } from '../domain/memoryNavigation';
 import { matchesFilters } from '../domain/libraryFilters';
+import { FavoriteWrites } from '../domain/favoriteWrites';
+import { emptyPageFallback, patchFavorites, returnToGrid } from '../domain/gridReturn';
 import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -30,8 +32,8 @@ function sections(rows: ChronologicalRow[]): Section[] {
 
 export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportStore; onClose: () => void; backHandler: MutableRefObject<(() => boolean) | null> }) {
   const t = useTheme();
-  const active = useRef(true);
-  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [filters, setFilters] = useState<LibraryFilters>({ ...defaultFilters });
   const [editingFilters, setEditingFilters] = useState(false);
   const [rows, setRows] = useState<ChronologicalRow[]>([]);
@@ -40,8 +42,25 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
   const [previews, setPreviews] = useState<Record<string, string | null>>({});
   const [next, setNext] = useState(false);
   const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
-  /** Favourite states changed in the viewer since it opened, by memory ID. */
+  /** Favourite states saved from the viewer since it opened, by memory ID. */
   const favorites = useRef(new Map<string, boolean>());
+  const latest = useRef({ sequence, filters });
+  latest.current = { sequence, filters };
+  /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write and a save
+   * that finishes later still updates the open sequence or the grid. */
+  const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite), (id, favorite) => {
+    favorites.current.set(id, favorite);
+    const { sequence: open, filters: active } = latest.current;
+    const loaded = open?.row(id);
+    if (open && loaded) { const updated = { ...loaded, favorite: favorite ? 1 : 0 }; open.update(updated, matchesFilters(updated, active)); }
+    else if (!open && mounted.current) setRows(previous => {
+      const patched = patchFavorites(previous, new Map([[id, favorite]]), active);
+      if (previous.length && !patched.length) emptied.current = true; // Recovered by the reload below.
+      return patched;
+    });
+  }), [store]);
+  const emptied = useRef(false);
+  useEffect(() => { if (emptied.current) { emptied.current = false; setRetry(value => value + 1); } }, [rows]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
@@ -49,8 +68,9 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     let active = true; setLoading(true); setFailed(false); setRows([]); setPreviews({});
     void store.chronologicalPage(cursor, 31, filters).then(page => {
       if (!active) return;
-      // A later page can empty (for example after favourites were removed); start again from the first page.
-      if (!page.length && cursor) { setCursor(null); setHistory([]); return; }
+      // A later page can empty (for example after favourites were removed): step back to the page before it.
+      const fallback = page.length ? null : emptyPageFallback(cursor, history);
+      if (fallback) { setCursor(fallback.cursor); setHistory(fallback.history); return; }
       setRows(page.slice(0, 30)); setNext(page.length > 30);
     })
       .catch(() => { if (active) setFailed(true); }).finally(() => { if (active) setLoading(false); });
@@ -74,22 +94,16 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
    * memory, and Previous returns to the page the viewer was opened from. */
   const closeViewer = (last: ChronologicalRow) => {
     setSequence(null);
-    if (rows.some(row => row.id === last.id)) {
-      if (!favorites.current.size) return;
-      setRows(rows.flatMap(row => {
-        const favorite = favorites.current.get(row.id);
-        if (favorite === undefined) return [row];
-        const updated = { ...row, favorite: favorite ? 1 : 0 };
-        return matchesFilters(updated, filters) ? [updated] : [];
-      }));
-      return;
-    }
+    const decision = returnToGrid(rows, last.id, favorites.current, filters);
+    if (decision.kind === 'keep') { if (favorites.current.size) setRows(decision.rows); return; }
+    // The page emptied (every memory on it was unfavourited): read it again; an empty later page steps back.
+    if (decision.kind === 'reload') { setRetry(value => value + 1); return; }
     const from = cursor, past = history;
     void store.chronologicalAdjacent(keyOf(last), 'previous', 1, filters).then(before => {
-      if (!active.current) return;
+      if (!mounted.current) return;
       const start = before[0] ? keyOf(before[0]) : null;
       setHistory(start ? [...past, from] : []); setCursor(start);
-    }).catch(() => { if (active.current) setRetry(value => value + 1); });
+    }).catch(() => { if (mounted.current) setRetry(value => value + 1); });
   };
   // System Back steps out of the viewer or filters before it leaves the library.
   useEffect(() => {
@@ -166,7 +180,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
       </View>} />
   </SafeAreaView>
     {sequence && <View style={StyleSheet.absoluteFill}>
-      <MemoryPager sequence={sequence} store={store} filters={filters} onClose={closeViewer} onFavorite={(id, favorite) => favorites.current.set(id, favorite)} />
+      <MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} />
     </View>}
   </View>;
 }

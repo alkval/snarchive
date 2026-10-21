@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, type ComponentRef, type ReactNode } from 'react';
-import { Animated, Easing, PanResponder, StyleSheet, View, type GestureResponderEvent, type LayoutChangeEvent } from 'react-native';
+import { Animated, Easing, PanResponder, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
+import { stageResponderConfig, type StageEvent } from './stageResponder';
 import { IDENTITY, StageGestures, isZoomed, type Navigation, type Size, type Touch, type Transform } from '../domain/viewerGestures';
 import { useReducedMotion } from './theme';
 
@@ -31,25 +32,13 @@ export function GestureStage({ zoomable, content, onNavigate, onZoomChange, rese
   useEffect(() => { gestures.setZoomable(zoomable); gestures.layout(size.current, content); show(gestures.transform, false); }, [zoomable, content?.width, content?.height]);
   useEffect(() => { if (resetToken) { gestures.reset(); show(IDENTITY, true); } }, [resetToken]);
 
-  const touches = (event: GestureResponderEvent): Touch[] => {
+  const touches = (event: StageEvent): Touch[] => {
     const centre = { x: origin.current.x + size.current.width / 2, y: origin.current.y + size.current.height / 2 };
-    const list = event.nativeEvent.touches.length ? event.nativeEvent.touches : [event.nativeEvent];
-    return list.slice(0, 2).map(touch => ({ id: touch.identifier, x: touch.pageX - centre.x, y: touch.pageY - centre.y }));
+    return event.nativeEvent.touches.slice(0, 2).map(touch => ({ id: touch.identifier, x: touch.pageX - centre.x, y: touch.pageY - centre.y }));
   };
-  const responder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    // Keep a gesture once it has started, so a pan or pinch is not handed to another view halfway.
-    onPanResponderTerminationRequest: () => !gestures.active,
-    onPanResponderGrant: event => { gestures.begin(touches(event), Date.now()); },
-    onPanResponderMove: event => { gestures.move(touches(event), Date.now()); show(gestures.transform, false); },
-    onPanResponderRelease: (_event, state) => {
-      const result = gestures.end(Date.now(), state.vx);
-      show(gestures.transform, true);
-      if (result.navigate) latest.current.onNavigate(result.navigate);
-    },
-    onPanResponderTerminate: () => { gestures.cancel(); show(gestures.transform, true); },
-  }), []);
+  const responder = useMemo(() => PanResponder.create(stageResponderConfig(gestures, {
+    touches, show, navigate: direction => latest.current.onNavigate(direction),
+  })), []);
 
   const layout = (event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;

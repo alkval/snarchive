@@ -23,6 +23,9 @@ export class MemorySequence<T extends SequenceRow> {
   private failed: Record<Direction, boolean> = { next: false, previous: false };
   private loads: Record<Direction, Promise<void> | null> = { next: null, previous: null };
   private listeners = new Set<() => void>();
+  /** Counts completed moves, so a move that waited for a load can tell whether the user moved meanwhile, even if
+   * they came back to the same memory (B → A → B). */
+  private moves = 0;
   /** Fetches made, for tests and diagnostics. */
   fetches = 0;
 
@@ -38,6 +41,8 @@ export class MemorySequence<T extends SequenceRow> {
   }
 
   get current(): T { return this.rows[this.index]!; }
+  /** A loaded memory by ID, if it is still in the window. */
+  row(id: string): T | undefined { return this.rows.find(row => row.id === id); }
   /** Loaded row IDs in order; for tests. */
   ids(): string[] { return this.rows.map(row => row.id); }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
@@ -67,10 +72,10 @@ export class MemorySequence<T extends SequenceRow> {
 
   /** Moves one memory. Loads the next batch first if needed. Never moves twice for one call. */
   async move(direction: Direction): Promise<MoveResult> {
-    const from = this.current.id;
+    const moves = this.moves;
     if (!this.hasLoaded(direction)) {
       await this.load(direction);
-      if (this.current.id !== from) return 'stale'; // Another move happened meanwhile.
+      if (this.moves !== moves) return 'stale'; // Another move happened meanwhile.
       if (!this.hasLoaded(direction)) return this.ended[direction] ? 'end' : 'error';
     }
     const target = direction === 'next' ? this.index + 1 : this.index - 1;
@@ -80,6 +85,7 @@ export class MemorySequence<T extends SequenceRow> {
       this.index = direction === 'next' ? target - 1 : target;
       this.leaving = false;
     } else this.index = target;
+    this.moves++;
     this.trim(direction);
     this.changed();
     // Keep one neighbour ready in the direction of travel.

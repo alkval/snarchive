@@ -170,3 +170,29 @@ test('a stage created before its photo loaded becomes zoomable when the photo ar
   g.setZoomable(false);
   assert.deepEqual(g.transform, IDENTITY, 'and back to fit if it stops being a photo');
 });
+
+test('touch-count changes without movement: two fingers once means no navigation until the gesture ends', () => {
+  const g = photo();
+  g.begin([finger(0, 0, 1)], 0);
+  g.touchesChanged([finger(0, 0, 1), finger(120, 0, 2)], 10);
+  g.touchesChanged([finger(0, 0, 1)], 20);
+  g.move([finger(-300, 0, 1)], 30);
+  assert.equal(g.end(40, -3).navigate, null);
+  g.begin([finger(0, 0, 1)], 100); g.move([finger(-300, 0, 1)], 110);
+  assert.equal(g.end(120, -3).navigate, 'next', 'cleared only when the gesture ended');
+  g.begin([finger(0, 0, 1)], 200); g.touchesChanged([finger(0, 0, 1)], 201); // The first finger's own start event.
+  g.move([finger(-300, 0, 1)], 210);
+  assert.equal(g.end(220, -3).navigate, 'next', 'a start event for the same finger changes nothing');
+});
+
+test('a height-only stage change keeps the zoom within bounds; a width change resets', () => {
+  const g = photo();
+  pinch(g, 100, 300); g.end(30, 0);
+  assert.equal(g.transform.scale, 3);
+  g.layout({ width: 400, height: 776 }, landscape); // Controls or a note appeared below the stage.
+  assert.equal(g.transform.scale, 3, 'zoom kept');
+  g.begin([finger(0, 0)], 100); g.move([finger(-5000, -5000)], 110); g.end(120, 0);
+  assert.deepEqual(g.transform, { scale: 3, x: -400, y: -62 }, 'bounds follow the new height: (900-776)/2');
+  g.layout({ width: 420, height: 776 }, landscape); // A window or orientation change.
+  assert.deepEqual(g.transform, IDENTITY);
+});

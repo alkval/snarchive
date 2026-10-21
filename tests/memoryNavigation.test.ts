@@ -212,3 +212,19 @@ test('a batch that arrives after its edge changed is dropped, and the waiting mo
   assert.deepEqual(sequence.ids(), ['a'], 'the late batch was not attached to another edge');
   assert.equal(sequence.current.id, 'a');
 });
+
+test('a pending move is stale after the user moved away and back to the same memory (B → A → B)', async () => {
+  const row = (id: string): ChronologicalRow => ({ id, day: '2026-01-01', instant: null, dateConflict: 0, photos: 1, videos: 0, overlays: 0, favorite: 0, sortDay: '2026-01-01', sortTime: '' });
+  let release: () => void = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const sequence = new MemorySequence([row('a'), row('b')], 1, async (_anchor, direction) => { await gate; return direction === 'next' ? [row('c'), row('d')] : []; }, { batch: 5, keep: 10 });
+  const pending = sequence.move('next'); // From B; C is not loaded, so this waits.
+  assert.equal(await sequence.move('previous'), 'moved'); // B → A (loaded).
+  assert.equal(await sequence.move('next'), 'moved'); // A → B (loaded): the same memory as before.
+  assert.equal(sequence.current.id, 'b');
+  release();
+  assert.equal(await pending, 'stale', 'the old Next must not advance from the revisited B');
+  assert.equal(sequence.current.id, 'b');
+  assert.deepEqual(sequence.ids(), ['a', 'b', 'c', 'd'], 'the shared load still filled the window');
+  assert.equal(await sequence.move('next'), 'moved'); assert.equal(sequence.current.id, 'c');
+});

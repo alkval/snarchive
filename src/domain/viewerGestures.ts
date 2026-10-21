@@ -68,8 +68,10 @@ export class StageGestures {
   swipeOffset = 0;
   private stage: Size = { width: 0, height: 0 };
   private drawn: Size = { width: 0, height: 0 };
+  private content: Size = { width: 0, height: 0 };
   private mode: Mode = 'idle';
   private multi = false;
+  private count = 0;
   private start = { x: 0, y: 0, time: 0 };
   private base: Transform = IDENTITY;
   private pinch = { distance: 1, focal: { x: 0, y: 0 } };
@@ -85,17 +87,20 @@ export class StageGestures {
   get active(): boolean { return this.mode !== 'idle'; }
   get pinching(): boolean { return this.mode === 'pinch'; }
 
-  /** A new stage or photo size (layout, rotation, a new memory) resets to fit: the old position means nothing there. */
+  /** A new stage width (rotation, a window change) or a new photo resets to fit: the old position means nothing there.
+   * A height-only change, such as a note appearing below the stage, keeps the zoom within the new bounds. */
   layout(stage: Size, content: Size | null): void {
-    const drawn = content ? containedSize(content, stage) : { width: 0, height: 0 };
-    const same = stage.width === this.stage.width && stage.height === this.stage.height && drawn.width === this.drawn.width && drawn.height === this.drawn.height;
-    this.stage = stage; this.drawn = drawn;
-    if (!same) this.reset();
+    const sameContent = (content?.width ?? 0) === this.content.width && (content?.height ?? 0) === this.content.height;
+    const sameWidth = stage.width === this.stage.width;
+    this.stage = stage; this.content = { width: content?.width ?? 0, height: content?.height ?? 0 };
+    this.drawn = content ? containedSize(content, stage) : { width: 0, height: 0 };
+    if (!sameContent || !sameWidth) this.reset();
+    else this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }
-  reset(): void { this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.lastTap = null; }
+  reset(): void { this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.count = 0; this.lastTap = null; }
 
   begin(touches: readonly Touch[], time: number): void {
-    this.multi = touches.length > 1; this.swipeOffset = 0;
+    this.multi = touches.length > 1; this.swipeOffset = 0; this.count = touches.length;
     if (touches.length > 1) { this.startPinch(touches); return; }
     const touch = touches[0];
     if (!touch) return;
@@ -103,20 +108,30 @@ export class StageGestures {
     this.base = this.transform;
   }
 
-  move(touches: readonly Touch[], _time: number): void {
-    if (this.mode === 'idle') return;
+  /** A finger landed or lifted during the gesture, with or without movement (the responder's start and end events).
+   * Once two fingers have taken part, the gesture can no longer navigate, until it ends. Lifting one finger
+   * continues the same gesture (a pan if zoomed); it never restarts it. */
+  touchesChanged(touches: readonly Touch[], _time: number): void {
+    if (this.mode === 'idle' || touches.length === this.count) return;
+    const previous = this.count;
+    this.count = touches.length;
     if (touches.length > 1) {
-      this.multi = true;
+      this.multi = true; this.swipeOffset = 0;
       if (this.mode !== 'pinch') this.startPinch(touches);
-      else this.updatePinch(touches);
       return;
     }
     const touch = touches[0];
+    if (!touch || previous < 2) return; // All fingers lifted: the release follows.
+    this.mode = this.zoomable && isZoomed(this.transform) ? 'pan' : 'ignored';
+    this.start = { ...this.start, x: touch.x, y: touch.y }; this.last = { x: touch.x, y: touch.y }; this.base = this.transform;
+  }
+
+  move(touches: readonly Touch[], time: number): void {
+    if (this.mode === 'idle') return;
+    this.touchesChanged(touches, time);
+    if (touches.length > 1) { if (this.mode === 'pinch') this.updatePinch(touches); return; }
+    const touch = touches[0];
     if (!touch) return;
-    if (this.mode === 'pinch') { // One finger lifted: continue as a pan from here, never as a swipe.
-      this.mode = isZoomed(this.transform) ? 'pan' : 'ignored';
-      this.start = { ...this.start, x: touch.x, y: touch.y }; this.base = this.transform;
-    }
     this.last = { x: touch.x, y: touch.y };
     const dx = touch.x - this.start.x, dy = touch.y - this.start.y;
     if (this.mode === 'pending') {
@@ -133,7 +148,8 @@ export class StageGestures {
   end(time: number, velocityX: number): GestureEnd {
     const mode = this.mode, dx = this.last.x - this.start.x, dy = this.last.y - this.start.y;
     this.mode = 'idle'; this.swipeOffset = 0;
-    if (mode === 'swipe') return { navigate: swipeDecision(dx, dy, velocityX, this.stage.width), tapped: false };
+    this.count = 0;
+    if (mode === 'swipe' && !this.multi) return { navigate: swipeDecision(dx, dy, velocityX, this.stage.width), tapped: false };
     if (mode === 'pending' && !this.multi && time - this.start.time <= TAP.maxDuration) {
       const tap = { x: this.start.x, y: this.start.y, time };
       const previous = this.lastTap;
@@ -150,7 +166,7 @@ export class StageGestures {
   /** The system took the gesture away (another responder, a dialog, the app backgrounding): never navigate, keep any
    * zoom already applied, within bounds. */
   cancel(): void {
-    this.mode = 'idle'; this.swipeOffset = 0; this.lastTap = null;
+    this.mode = 'idle'; this.swipeOffset = 0; this.lastTap = null; this.count = 0;
     this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }
 
