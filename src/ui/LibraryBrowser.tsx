@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
-import { ActivityIndicator, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type { ImportStore, ChronologicalRow } from '../storage/importStore';
@@ -13,6 +13,7 @@ import { MemoryPager } from './MemoryPager';
 import { MemorySequence } from '../domain/memoryNavigation';
 import { FavoriteWrites } from '../domain/favoriteWrites';
 import { LibraryGrid, favoriteSavedHandler } from '../domain/libraryGrid';
+import { utcDay, watchUTCDate } from '../domain/onThisDay';
 import { BackButton, Button, FadeImage, LargeTitle, Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -39,8 +40,14 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters)), [store]);
   const [, render] = useReducer((value: number) => value + 1, 0);
   useEffect(() => { const stop = grid.subscribe(render); void grid.load(); return stop; }, [grid]);
+  // Updated at the event boundary, so midnight/foreground callbacks need not wait for a React render.
   const latest = useRef(sequence);
-  latest.current = sequence;
+  // Keep a viewer's date scope fixed. Refresh the grid at UTC midnight or on foreground when no viewer is open.
+  useEffect(() => {
+    const clock = watchUTCDate(day => { if (!latest.current) void grid.refreshDay(day); });
+    const subscription = AppState.addEventListener('change', state => { if (state === 'active') clock.refresh(); });
+    return () => { clock.stop(); subscription.remove(); };
+  }, [grid]);
   /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write. A completed
    * save always reaches the grid, whichever viewer started it and whenever it finishes; the open sequence, if it has
    * that memory loaded, is updated too. */
@@ -55,14 +62,17 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     return () => { stopped = true; };
   }, [page, sequence, store]);
   const open = (row: ChronologicalRow) => {
+    if (grid.refreshDay(utcDay())) return;
     const index = rows.findIndex(item => item.id === row.id);
     if (index < 0) return;
     const current = filters;
-    setSequence(new MemorySequence(rows, index, (anchor, direction, limit) => store.chronologicalAdjacent(anchor, direction, limit, current)));
+    const next = new MemorySequence(rows, index, (anchor, direction, limit) => store.chronologicalAdjacent(anchor, direction, limit, current));
+    latest.current = next;
+    setSequence(next);
   };
   /** Back to the grid with the same filters: the same page (scroll position included) if the last memory viewed is
    * on it, otherwise a page starting at that memory, from which Previous returns here. */
-  const closeViewer = (last: ChronologicalRow) => { setSequence(null); void grid.closedViewer(last); };
+  const closeViewer = (last: ChronologicalRow) => { latest.current = null; setSequence(null); void (grid.refreshDay(utcDay()) ?? grid.closedViewer(last)); };
   // System Back steps out of the viewer or filters before it leaves the library.
   useEffect(() => {
     backHandler.current = () => {
@@ -73,13 +83,16 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     return () => { backHandler.current = null; };
   });
   const grouped = useMemo(() => sections(rows), [rows]);
-  const chips = en.filterChips(filters.media, filters.favorites, filters.month);
+  const chips = en.filterChips(filters.media, filters.favorites, filters.month, filters.onThisDay);
 
   if (editingFilters) return <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)}
     apply={value => { void grid.setFilters(value); setEditingFilters(false); }} />;
 
   const header = <View style={styles.header}>
-    <LargeTitle title={en.libraryTitle} subtitle={en.libraryOrder} />
+    <LargeTitle title={filters.onThisDay ? en.onThisDay : en.libraryTitle} subtitle={filters.onThisDay ? en.onThisDayScope(filters.onThisDay) : en.libraryOrder} />
+    {filters.onThisDay
+      ? <Button variant="plain" label={en.onThisDayAllDates} onPress={() => void grid.setFilters({ ...filters, onThisDay: '', month: '' })} />
+      : <Button variant="secondary" icon="calendar-outline" label={en.onThisDay} onPress={() => void grid.setFilters({ ...filters, month: '', onThisDay: utcDay() })} />}
     {chips.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
       {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
     </Pressable>}
@@ -88,7 +101,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     : grid.failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => void grid.retry() }} /></View>
     : <View style={styles.centered}>
       <Ionicons name={chips.length ? 'funnel-outline' : 'images-outline'} size={40} color={t.secondary} />
-      <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
+      <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{filters.onThisDay ? en.onThisDayEmpty : chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
     </View>;
   // Pagination stays reachable even if every row on this page was hidden by saves.
   const footer = rows.length > 0 || history.length > 0 || grid.hasNext ? <View style={styles.footer}>

@@ -234,8 +234,9 @@ export class ImportStore {
       SELECT * FROM ordered WHERE (?=1 OR sortDay${newer}? OR (sortDay=? AND sortTime${older}?) OR (sortDay=? AND sortTime=? AND id${before}?))
         AND (?='all' OR (?='photos' AND photos>0) OR (?='videos' AND videos>0))
         AND (?=0 OR favorite=1) AND (?='' OR (dateConflict=0 AND substr(day,1,7)=?))
+        AND (?='' OR (dateConflict=0 AND substr(day,6,5)=substr(?,6,5) AND substr(day,1,4)<substr(?,1,4)))
       ORDER BY ${order} LIMIT ?
-    )`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, limit);
+    )`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '', limit);
     return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
   }
   async setFavorite(id: string, favorite: boolean): Promise<void> {

@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { defaultFilters, validFilters, type LibraryFilters } from '../domain/libraryFilters';
+import { utcDay } from '../domain/onThisDay';
 import { en } from '../i18n/en';
 import { Button, Group, Notice, Segmented } from './kit';
 import { space, type, useTheme } from './theme';
@@ -11,7 +12,10 @@ export function LibraryFilterForm({ current, apply, cancel }: { current: Library
   const t = useTheme();
   const [draft, setDraft] = useState(current);
   const [error, setError] = useState(false);
-  const submit = () => { if (validFilters(draft)) apply(draft); else setError(true); };
+  const submit = () => {
+    const filters = draft.onThisDay ? { ...draft, onThisDay: utcDay() } : draft;
+    if (validFilters(filters)) apply(filters); else setError(true);
+  };
   return <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
     <StatusBar style={t.dark ? 'light' : 'dark'} />
     <View style={styles.topBar}>
@@ -37,12 +41,21 @@ export function LibraryFilterForm({ current, apply, cancel }: { current: Library
             trackColor={{ true: t.accent, false: t.raised }} thumbColor="#FFFFFF" />
         </Pressable>
       </Group>
-      <Group header={en.filterMonth} footer={en.filterMonthNote}>
+      <Group footer={en.onThisDayNote}>
+        <Pressable accessibilityRole="switch" accessibilityState={{ checked: !!draft.onThisDay }} accessibilityLabel={en.onThisDay}
+          onPress={() => { setDraft({ ...draft, month: '', onThisDay: draft.onThisDay ? '' : utcDay() }); setError(false); }}
+          style={({ pressed }) => [styles.switchRow, { backgroundColor: pressed ? t.pressed : 'transparent' }]}>
+          <Text style={[type.body, { color: t.text, flex: 1 }]}>{en.onThisDay}</Text>
+          <Switch accessible={false} value={!!draft.onThisDay} onValueChange={enabled => { setDraft({ ...draft, month: '', onThisDay: enabled ? utcDay() : '' }); setError(false); }}
+            trackColor={{ true: t.accent, false: t.raised }} thumbColor="#FFFFFF" />
+        </Pressable>
+      </Group>
+      {!draft.onThisDay && <Group header={en.filterMonth} footer={en.filterMonthNote}>
         <TextInput accessibilityLabel={en.filterMonth} value={draft.month} onChangeText={month => { setDraft({ ...draft, month }); setError(false); }}
           placeholder={en.filterMonthPlaceholder} placeholderTextColor={t.secondary} autoCorrect={false} autoCapitalize="none" maxLength={7}
           keyboardType="numbers-and-punctuation" returnKeyType="done" onSubmitEditing={submit} selectionColor={t.accent}
           style={[type.body, styles.input, { color: t.text }]} />
-      </Group>
+      </Group>}
       {error && <Notice tone="warning" message={en.filterInvalid} />}
       <Button variant="plain" label={en.filterClear} onPress={() => apply({ ...defaultFilters })} />
     </ScrollView>

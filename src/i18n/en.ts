@@ -76,6 +76,11 @@ export const en = {
   // Library
   libraryTitle: 'Library',
   libraryOrder: 'Newest first. Unknown or conflicting dates come last.',
+  onThisDay: 'On this day',
+  onThisDayScope: (day: string) => `${day} (UTC) · Previous years only. Unknown and conflicting dates are left out.`,
+  onThisDayNote: 'Uses the recorded UTC or filename date, in previous years. Replaces the month filter. February 29 matches February 29 only.',
+  onThisDayEmpty: 'No memories from this day in previous years match these filters.',
+  onThisDayAllDates: 'Show all dates',
   libraryPreviewNote: 'Previews show the base photo without its overlay.',
   libraryClose: 'Snarchive', libraryBack: 'Library',
   libraryNext: 'Next', libraryPrevious: 'Previous', libraryPage: (page: number) => `Page ${page}`,
@@ -115,8 +120,8 @@ export const en = {
   filterMonth: 'Month', filterMonthPlaceholder: 'YYYY-MM',
   filterMonthNote: 'Uses the recorded UTC or filename date. Unknown and conflicting dates are left out when a month is set.',
   filterInvalid: 'Enter a month such as 2026-10, or leave it empty.', filterApply: 'Apply', filterClear: 'Clear filters', filterCancel: 'Cancel',
-  filterChips: (media: 'all' | 'photos' | 'videos', favorites: boolean, month: string) =>
-    [media === 'all' ? '' : media === 'photos' ? 'Photos' : 'Videos', favorites ? 'Favorites' : '', month].filter(Boolean),
+  filterChips: (media: 'all' | 'photos' | 'videos', favorites: boolean, month: string, onThisDay = '') =>
+    [media === 'all' ? '' : media === 'photos' ? 'Photos' : 'Videos', favorites ? 'Favorites' : '', month, onThisDay ? `On this day: ${onThisDay} (UTC)` : ''].filter(Boolean),
   filterEmpty: 'No memories match these filters.',
 
   // Backup

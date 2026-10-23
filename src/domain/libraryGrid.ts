@@ -1,6 +1,7 @@
 import { defaultFilters, matchesFilters, type LibraryFilters } from './libraryFilters.ts';
 import { emptyPageFallback, patchFavorites } from './gridReturn.ts';
 import { keyOf, type MemorySequence, type SequenceKey } from './memoryNavigation.ts';
+import { validReferenceDay } from './onThisDay.ts';
 
 export type GridRow = { id: string; sortDay: string; sortTime: string; photos: number; videos: number; favorite: number; day: string | null; dateConflict: number };
 /** Reads up to 31 rows after `cursor` (30 to show, one to know whether a next page exists). */
@@ -85,6 +86,12 @@ export class LibraryGrid<T extends GridRow> {
   }
 
   setFilters(filters: LibraryFilters): Promise<void> { this.filters = { ...filters }; this.cursor = null; this.history = []; return this.load(); }
+  /** Refresh only an active On this day scope. The UI defers this while fullscreen is open, then calls it on Back. */
+  refreshDay(day: string): Promise<void> | null {
+    if (!validReferenceDay(day)) throw new Error('invalid-reference-day');
+    if (!this.filters.onThisDay || this.filters.onThisDay === day) return null;
+    return this.setFilters({ ...this.filters, month: '', onThisDay: day });
+  }
   retry(): Promise<void> { return this.load(); }
   nextPage(): Promise<void> {
     const last = this.page[this.page.length - 1];
