@@ -216,27 +216,33 @@ export class ImportStore {
     check(validFilters(filters));
     // "previous" is the same strict order reversed, so the nearest earlier row comes first and ties never repeat or skip.
     const [newer, older, before, order] = direction === 'next' ? ['<', '<', '>', 'sortDay DESC,sortTime DESC,id ASC'] : ['>', '>', '<', 'sortDay ASC,sortTime ASC,id DESC'];
-    const row = await this.db.getFirstAsync<{ data: string }>(`WITH facts AS (
+    // Materialize only date facts after cheap candidate checks, avoiding repeated correlated date work during sort.
+    // Numbered parameters reuse the existing binding order (1–7 anchor, 8–11 media/favourites, 12–16 dates, 17 limit).
+    // The EXISTS date checks are only a prefilter: the outer query still requires resolved, matching date evidence.
+    // Display-only counts are calculated after LIMIT, for the returned page rather than every candidate.
+    const row = await this.db.getFirstAsync<{ data: string }>(`WITH facts AS MATERIALIZED (
       SELECT m.id,
-        EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id) AS favorite,
         (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
         (SELECT min(value) FROM library_dates WHERE memory_id=m.id AND kind='instant') AS instant,
-        (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict,
-        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='photo') AS photos,
-        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='video') AS videos,
-        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='overlay') AS overlays
+        (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict
       FROM memories m WHERE EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role!='overlay')
+        AND (?8='all' OR (?9='photos' AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role='photo')) OR (?10='videos' AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role='video')))
+        AND (?11=0 OR EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id))
+        AND (?12='' OR EXISTS(SELECT 1 FROM library_dates WHERE memory_id=m.id AND substr(day,1,7)=?13))
+        AND (?14='' OR EXISTS(SELECT 1 FROM library_dates WHERE memory_id=m.id AND substr(day,6,5)=substr(?15,6,5) AND substr(day,1,4)<substr(?16,1,4)))
     ), ordered AS (
       SELECT *, CASE WHEN dateConflict=0 THEN coalesce(day,'') ELSE '' END AS sortDay,
         CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts
     ) SELECT json_group_array(json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
-      'favorite',favorite,'photos',photos,'videos',videos,'overlays',overlays,'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
-      SELECT * FROM ordered WHERE (?=1 OR sortDay${newer}? OR (sortDay=? AND sortTime${older}?) OR (sortDay=? AND sortTime=? AND id${before}?))
-        AND (?='all' OR (?='photos' AND photos>0) OR (?='videos' AND videos>0))
-        AND (?=0 OR favorite=1) AND (?='' OR (dateConflict=0 AND substr(day,1,7)=?))
-        AND (?='' OR (dateConflict=0 AND substr(day,6,5)=substr(?,6,5) AND substr(day,1,4)<substr(?,1,4)))
-      ORDER BY ${order} LIMIT ?
-    )`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '', limit);
+      'favorite',EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=page.id),
+      'photos',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='photo'),
+      'videos',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='video'),
+      'overlays',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='overlay'),'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
+      SELECT * FROM ordered WHERE (?1=1 OR sortDay${newer}?2 OR (sortDay=?3 AND sortTime${older}?4) OR (sortDay=?5 AND sortTime=?6 AND id${before}?7))
+        AND (?12='' OR (dateConflict=0 AND substr(day,1,7)=?13))
+        AND (?14='' OR (dateConflict=0 AND substr(day,6,5)=substr(?15,6,5) AND substr(day,1,4)<substr(?16,1,4)))
+      ORDER BY ${order} LIMIT ?17
+    ) AS page`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '', limit);
     return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
   }
   async setFavorite(id: string, favorite: boolean): Promise<void> {
