@@ -8,6 +8,16 @@ export const en = {
   title: 'Snarchive',
   promise: 'Your memories, yours to keep.',
 
+  appearanceTitle: 'Appearance',
+  appearanceDetail: 'System, Light or Dark',
+  appearanceChoices: { system: 'System', light: 'Light', dark: 'Dark' },
+  appearanceNote: 'Choose how Snarchive looks. System follows your device’s light or dark setting.',
+  appearanceLocalNote: 'Saved on this device. This preference is not included in library backups. System dialogs and media keep their own appearance.',
+  appearanceLoading: 'Loading appearance…',
+  appearanceSaving: 'Saving appearance…',
+  appearanceLoadFailed: 'Your saved appearance could not be read. Snarchive is using System. Try again to load your preference.',
+  appearanceSaveFailed: 'Appearance could not be saved. Your previous choice is still in use. Choose an option to try again.',
+
   // Home: library
   libraryHeadline: (memories: number) => memories === 1 ? 'memory preserved' : 'memories preserved',
   libraryStats: (objects: number, files: number) => `${plural(objects, 'stored original', 'stored originals')} · ${plural(files, 'file record', 'file records')}`,

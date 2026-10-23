@@ -23,11 +23,19 @@ import { ManageStorageScreen } from './src/ui/ManageStorageScreen';
 import { recoverBackups } from './src/platform/backup';
 import { Group, LargeTitle, Notice, Row, type Tone } from './src/ui/kit';
 import { space, type, useTheme } from './src/ui/theme';
+import { AppearanceProvider } from './src/ui/AppearanceProvider';
+import { AppearanceScreen } from './src/ui/AppearanceScreen';
 
 export default function App() {
+  return <AppearanceProvider><SnarchiveApp /></AppearanceProvider>;
+}
+
+function SnarchiveApp() {
   const t = useTheme();
   const browserBack = useRef<(() => boolean) | null>(null);
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const closeAppearance = useCallback(() => setAppearanceOpen(false), []);
   const [browsing, setBrowsing] = useState(false);
   const [backingUp, setBackingUp] = useState(false);
   const closeBackup = useCallback(() => setBackingUp(false), []);
@@ -190,6 +198,9 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
         <StatusBar style={t.dark ? 'light' : 'dark'} />
+        <Modal visible={appearanceOpen} animationType="slide" onRequestClose={closeAppearance}>
+          {appearanceOpen && <AppearanceScreen onClose={closeAppearance} />}
+        </Modal>
         <Modal visible={browsing} animationType="slide" onRequestClose={closeBrowser}>
           {browsing && library.current && <LibraryBrowser store={library.current} onClose={() => setBrowsing(false)} backHandler={browserBack} />}
         </Modal>
@@ -229,6 +240,9 @@ export default function App() {
             ))}
           </Group>}
           {preview && <InventoryReport preview={preview} footer={`${en.previewNote} ${en.savedNote}`} />}
+          <Group inset={52}>
+            <Row icon="color-palette-outline" title={en.appearanceTitle} detail={en.appearanceDetail} disabled={busy} onPress={() => setAppearanceOpen(true)} />
+          </Group>
           <Text style={[type.footnote, styles.footer, { color: t.secondary }]}>{en.prototype}</Text>
         </ScrollView>
       </SafeAreaView>

@@ -1,5 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { AccessibilityInfo, useColorScheme, type TextStyle } from 'react-native';
+
+import { darkAppearance } from '../domain/appearance';
+import { AppearanceContext } from './appearanceContext';
 
 // One accent, used for links, selection and icons only. Primary actions are near-black (white in dark).
 // Every text tier holds 4.5:1 on the surface it sits on.
@@ -40,7 +43,11 @@ export const type = {
 
 export const space = { gutter: 20, section: 28, row: 52, radius: 16 };
 
-export function useTheme(): Palette { return useColorScheme() === 'dark' ? dark : light; }
+export function useTheme(): Palette {
+  const appearance = useContext(AppearanceContext);
+  const system = useColorScheme();
+  return darkAppearance(appearance?.state.choice ?? 'system', system) ? dark : light;
+}
 
 // One system listener shared by every animated component.
 let reducedMotion = false;
