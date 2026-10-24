@@ -11,4 +11,4 @@ console.log(JSON.stringify({ workspace, inputDigest: inputs.digest, files: input
 console.log('Use the pinned dependencies: npm ci --no-audit --no-fund');
 console.log('Generate Android: npx expo prebuild --platform android --no-install');
 console.log('Then in android/: ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures=arm64-v8a -Pandroid.enableMinifyInReleaseBuilds=true');
-console.log('Requires a compatible JDK and Android SDK. This uses the generated development signing key, for local testing only.');
+console.log('Requires a compatible JDK and Android SDK. Uses the shared public template debug key, not a generated private key. Never install a preview where real data exists; use disposable synthetic app data only.');

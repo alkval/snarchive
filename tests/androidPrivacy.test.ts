@@ -60,8 +60,8 @@ test('backup and cleartext restrictions must be explicit typed booleans, never m
 });
 
 test('compiled policy rejects debuggable, testOnly and network-security overrides', () => {
-  for (const attribute of ['debuggable', 'testOnly', 'networkSecurityConfig']) {
-    const line = `      A: android:${attribute}(0x0101000f)=${attribute === 'networkSecurityConfig' ? '@0x7f150001' : '(type 0x12)0xffffffff'}\n`;
+  for (const [attribute, id] of [['debuggable', '0x0101000f'], ['testOnly', '0x01010272'], ['networkSecurityConfig', '0x01010527']]) {
+    const line = `      A: android:${attribute}(${id})=${attribute === 'networkSecurityConfig' ? '@0x7f150001' : '(type 0x12)0xffffffff'}\n`;
     assert.throws(() => verifyApkPrivacy(manifest.replace('      E: meta-data', line + '      E: meta-data'), previewPermissions), /unsafe-|network-security-override/);
   }
 });
@@ -84,5 +84,48 @@ test('nested attributes cannot masquerade as application privacy flags', () => {
 test('privacy policy fails closed for malformed, duplicate or ambiguous manifest evidence', () => {
   const line = manifest.split('\n').find(line => line.includes('android:allowBackup'))!;
   for (const text of ['', 'unrecognized output', manifest.replace(line, line + '\n' + line), manifest + '    E: application (line=20)\n', manifest + '  E: manifest (line=30)\n'])
-    assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-manifest-evidence|unreviewed-target-sdk/);
+    assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-manifest-evidence|unreviewed-target-sdk|invalid-android-namespace/);
+});
+
+const attributes = [
+  ['allowBackup', '0x01010280'], ['usesCleartextTraffic', '0x010104ec'], ['debuggable', '0x0101000f'],
+  ['testOnly', '0x01010272'], ['networkSecurityConfig', '0x01010527'], ['targetSdkVersion', '0x01010270'],
+  ['name', '0x01010003'], ['value', '0x01010024'],
+] as const;
+function withOptionalAttribute(name: string, id: string) {
+  return manifest.includes(`android:${name}(`) ? manifest : manifest.replace('      E: meta-data',
+    `      A: android:${name}(${id})=(type 0x12)0x0\n      E: meta-data`);
+}
+
+test('privacy attributes require framework IDs, including the reproduced ID-less false flags', () => {
+  for (const [name, id] of attributes) {
+    const text = withOptionalAttribute(name, id).replace(`android:${name}(${id})`, `android:${name}`);
+    assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-attribute-identity/, name);
+  }
+});
+
+test('printed privacy names cannot hide app resource IDs or other framework attribute IDs', () => {
+  for (const [name, id] of attributes) {
+    for (const wrongId of ['0x7f010099', name === 'allowBackup' ? '0x010104ec' : '0x01010280']) {
+      const text = withOptionalAttribute(name, id).replace(`android:${name}(${id})`, `android:${name}(${wrongId})`);
+      assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-attribute-identity/, name);
+    }
+  }
+});
+
+test('a framework privacy resource ID cannot be relabelled as an unrelated attribute', () => {
+  for (const [name, id] of attributes) {
+    const text = withOptionalAttribute(name, id).replace(`android:${name}(${id})`, `android:unrelated(${id})`);
+    assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-attribute-identity/, name);
+  }
+});
+
+test('privacy evidence requires one root Android namespace binding without aliases or rebinding', () => {
+  const namespace = 'N: android=http://schemas.android.com/apk/res/android\n';
+  for (const text of [
+    manifest.replace(namespace, ''), manifest.replace(namespace, 'N: android=https://example.invalid/foreign\n'),
+    manifest.replace(namespace, namespace + namespace), manifest.replace(namespace, ` ${namespace}`),
+    manifest.replace('      E: meta-data', '      N: android=http://schemas.android.com/apk/res/android\n      E: meta-data'),
+    manifest.replace(namespace, namespace + 'N: alias=http://schemas.android.com/apk/res/android\n'),
+  ]) assert.throws(() => verifyApkPrivacy(text, previewPermissions), /invalid-android-namespace/);
 });

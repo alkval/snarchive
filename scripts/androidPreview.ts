@@ -83,6 +83,19 @@ export const previewPermissions = [
 ] as const;
 
 type ManifestNode = { name: string; indent: number; attributes: Map<string, string>; children: ManifestNode[] };
+const androidNamespace = 'http://schemas.android.com/apk/res/android';
+// Framework identities verified with SDK 37 aapt output, including a synthetic compiled manifest.
+const privacyAttributes: Readonly<Record<string, string>> = {
+  'android:allowBackup': '0x01010280',
+  'android:usesCleartextTraffic': '0x010104ec',
+  'android:debuggable': '0x0101000f',
+  'android:testOnly': '0x01010272',
+  'android:networkSecurityConfig': '0x01010527',
+  'android:targetSdkVersion': '0x01010270',
+  'android:name': '0x01010003',
+  'android:value': '0x01010024',
+};
+const privacyAttributeIds = new Set(Object.values(privacyAttributes));
 
 /** Parse SDK aapt's compiled XML tree, retaining element scope and typed values.
  * Reject unsupported evidence instead of interpreting resource references as booleans.
@@ -90,8 +103,19 @@ type ManifestNode = { name: string; indent: number; attributes: Map<string, stri
 export function verifyApkPrivacy(xmltree: string, permissions: readonly string[]) {
   if (permissions.some(p => !previewPermissions.some(allowed => allowed === p))) throw new Error('preview-unexpected-permission');
   const roots: ManifestNode[] = [], stack: ManifestNode[] = [];
+  let hasAndroidNamespace = false;
   for (const line of xmltree.split(/\r?\n/)) {
-    if (!line.trim() || /^\s*N: /.test(line)) continue;
+    if (!line.trim()) continue;
+    const namespace = /^(\s*)N: ([\w.-]+)=(\S+)$/.exec(line);
+    if (namespace) {
+      if (namespace[2] === 'android') {
+        // One unambiguous root binding; nested rebinding cannot change attribute identity.
+        if (namespace[1] || roots.length || hasAndroidNamespace || namespace[3] !== androidNamespace)
+          throw new Error('preview-invalid-android-namespace');
+        hasAndroidNamespace = true;
+      } else if (namespace[3] === androidNamespace) throw new Error('preview-invalid-android-namespace');
+      continue;
+    }
     const element = /^(\s*)E: ([\w.-]+) \(line=\d+\)$/.exec(line);
     if (element) {
       const indent = element[1]!.length;
@@ -100,12 +124,17 @@ export function verifyApkPrivacy(xmltree: string, permissions: readonly string[]
       (stack.at(-1)?.children ?? roots).push(node); stack.push(node);
       continue;
     }
-    const attribute = /^(\s*)A: ([\w:.-]+)(?:\(0x[\da-fA-F]+\))?=(.+)$/.exec(line);
+    const attribute = /^(\s*)A: ([\w:.-]+)(?:\((0x[\da-fA-F]+)\))?=(.+)$/.exec(line);
     const node = stack.at(-1);
     if (!attribute || !node || attribute[1]!.length <= node.indent || node.attributes.has(attribute[2]!))
       throw new Error('preview-invalid-manifest-evidence');
-    node.attributes.set(attribute[2]!, attribute[3]!);
+    const name = attribute[2]!, id = attribute[3]?.toLowerCase(), expectedId = privacyAttributes[name];
+    if (name.startsWith('android:') && !hasAndroidNamespace) throw new Error('preview-invalid-android-namespace');
+    if ((expectedId && id !== expectedId) || (id && privacyAttributeIds.has(id) && expectedId !== id))
+      throw new Error('preview-invalid-attribute-identity');
+    node.attributes.set(name, attribute[4]!);
   }
+  if (!hasAndroidNamespace) throw new Error('preview-invalid-android-namespace');
   const manifest = roots.length === 1 && roots[0]!.name === 'manifest' ? roots[0]! : undefined;
   const sdk = manifest?.children.filter(n => n.name === 'uses-sdk') ?? [];
   // Revisit platform privacy behavior when upgrading the pinned target SDK.
