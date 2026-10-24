@@ -10,6 +10,7 @@ import { FavoriteButton } from './FavoriteButton';
 import { FadeImage, MediaButton } from './kit';
 import { GestureStage, type GestureStageHandle } from './GestureStage';
 import { PhotoControls } from './PhotoControls';
+import { MemoryDetailsScreen } from './MemoryDetailsScreen';
 import { EMPTY_PHOTO_CONTROLS } from '../domain/viewerGestures';
 import type { Direction, NeighbourState } from '../domain/memoryNavigation';
 import { type, useReducedMotion, useTheme } from './theme';
@@ -71,6 +72,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
   const [overlayStatus, setOverlayStatus] = useState('');
   const stage = useRef<GestureStageHandle>(null);
   const [controlsOpen, setControlsOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [controls, setControls] = useState(EMPTY_PHOTO_CONTROLS);
   const [zoomed, setZoomed] = useState(false);
   const [resetToken, setResetToken] = useState(0);
@@ -141,13 +143,17 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
           <FavoriteButton favorite={row.favorite === 1} pending={favorite.pending} onToggle={favorite.toggle} />
         </View>
       </View>
-      {video ? <VideoPlayerView video={video} row={row} store={store} onNavigate={navigate} />
+      {video ? <VideoPlayerView video={video} row={row} store={store} onNavigate={navigate} covered={detailsOpen} />
         : <GestureStage ref={stage} onControlsChange={setControls} zoomable={!!base} content={base?.size ?? null} onNavigate={navigate} onZoomChange={setZoomed} resetToken={resetToken}>{stageContent}</GestureStage>}
       <View style={styles.bottomBar}>
         {!!note && <Text accessibilityLiveRegion="polite" style={[type.footnote, styles.note, { color: t.onMediaSecondary }]}>{note}</Text>}
         <View style={styles.controls}>
           {step('previous')}
           <View style={styles.middle}>
+            <View style={styles.control}>
+              <MediaButton icon="information-circle-outline" label={en.detailsTitle} onPress={() => { stage.current?.cancel(); setDetailsOpen(true); }} />
+              <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{en.detailsTitle}</Text>
+            </View>
             {base && <View style={styles.control}>
               <MediaButton icon="options-outline" label={en.viewerPhotoControls} disabled={!controls.ready} onPress={() => { stage.current?.cancel(); setControlsOpen(true); }} />
               <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{en.viewerPhotoControls}</Text>
@@ -168,6 +174,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
       </View>
     </SafeAreaView>
     {base && <PhotoControls visible={controlsOpen} state={controls} adjust={action => stage.current?.adjust(action)} close={() => setControlsOpen(false)} />}
+    {detailsOpen && <MemoryDetailsScreen id={id} store={store} close={() => setDetailsOpen(false)} />}
   </View>;
 }
 

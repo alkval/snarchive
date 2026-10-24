@@ -14,7 +14,7 @@ import { type, useTheme } from './theme';
 /** One player per open video: its parent remounts this for another memory, and the player is paused and released on
  * unmount, so leaving a video stops it and visited videos keep no player. Swipes navigate on the picture only; the
  * controls below it never start a swipe. */
-export function VideoPlayerView({ video, row, store, onNavigate }: { video: LocalVideo; row: LibraryRow; store: ImportStore; onNavigate: (direction: Navigation) => void }) {
+export function VideoPlayerView({ video, row, store, onNavigate, covered = false }: { video: LocalVideo; row: LibraryRow; store: ImportStore; onNavigate: (direction: Navigation) => void; covered?: boolean }) {
   const t = useTheme();
   const player = useVideoPlayer({ uri: video.uri, contentType: 'progressive', useCaching: false }, instance => {
     instance.staysActiveInBackground = false;
@@ -29,6 +29,7 @@ export function VideoPlayerView({ video, row, store, onNavigate }: { video: Loca
   const [overlay, setOverlay] = useState<string | null>(null);
   const [showOverlay, setShowOverlay] = useState(true);
   const [note, setNote] = useState('');
+  useEffect(() => { if (covered) player.pause(); }, [covered, player]);
   useEffect(() => {
     const listener = AppState.addEventListener('change', state => { if (state !== 'active') player.pause(); });
     return () => {
