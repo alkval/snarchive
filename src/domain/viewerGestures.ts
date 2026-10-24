@@ -57,6 +57,32 @@ export function swipeDecision(dx: number, dy: number, velocityX: number, stageWi
   return dx < 0 ? 'next' : 'previous';
 }
 
+/** Button controls share the gesture transform. Directions describe movement of the photo on screen. */
+export const PHOTO_ADJUSTMENTS = ['zoom-in', 'zoom-out', 'left', 'right', 'up', 'down', 'reset'] as const;
+export type PhotoAdjustment = typeof PHOTO_ADJUSTMENTS[number];
+export type PhotoControlState = { ready: boolean; percent: number; enabled: Record<PhotoAdjustment, boolean> };
+export const PHOTO_ZOOM_STEP = 0.5, PHOTO_MOVE_FRACTION = 0.25;
+
+export function adjustPhoto(transform: Transform, action: PhotoAdjustment, drawn: Size, stage: Size): Transform {
+  const current = clampTransform(transform, drawn, stage);
+  if (action === 'reset') return IDENTITY;
+  if (action === 'zoom-in' || action === 'zoom-out')
+    return zoomAbout(current, current.scale + (action === 'zoom-in' ? PHOTO_ZOOM_STEP : -PHOTO_ZOOM_STEP), { x: 0, y: 0 }, drawn, stage);
+  const dx = action === 'left' ? -stage.width * PHOTO_MOVE_FRACTION : action === 'right' ? stage.width * PHOTO_MOVE_FRACTION : 0;
+  const dy = action === 'up' ? -stage.height * PHOTO_MOVE_FRACTION : action === 'down' ? stage.height * PHOTO_MOVE_FRACTION : 0;
+  return clampTransform({ ...current, x: current.x + dx, y: current.y + dy }, drawn, stage);
+}
+const sameTransform = (a: Transform, b: Transform) => a.scale === b.scale && a.x === b.x && a.y === b.y;
+export function photoControlState(zoomable: boolean, transform: Transform, drawn: Size, stage: Size): PhotoControlState {
+  const ready = zoomable && finitePositive(drawn) && finitePositive(stage);
+  const enabled = Object.fromEntries(PHOTO_ADJUSTMENTS.map(action => [action, ready && !sameTransform(transform, adjustPhoto(transform, action, drawn, stage))])) as Record<PhotoAdjustment, boolean>;
+  return { ready, percent: Math.round(transform.scale * 100), enabled };
+}
+export const EMPTY_PHOTO_CONTROLS: PhotoControlState = photoControlState(false, IDENTITY, { width: 0, height: 0 }, { width: 0, height: 0 });
+export function samePhotoControls(a: PhotoControlState | null, b: PhotoControlState): boolean {
+  return !!a && a.ready === b.ready && a.percent === b.percent && PHOTO_ADJUSTMENTS.every(action => a.enabled[action] === b.enabled[action]);
+}
+
 type Mode = 'idle' | 'pending' | 'swipe' | 'pan' | 'pinch' | 'ignored';
 export type GestureEnd = { navigate: Navigation | null; tapped: boolean };
 
@@ -86,6 +112,14 @@ export class StageGestures {
 
   get active(): boolean { return this.mode !== 'idle'; }
   get pinching(): boolean { return this.mode === 'pinch'; }
+  get controls(): PhotoControlState { return photoControlState(this.zoomable, this.transform, this.drawn, this.stage); }
+  /** An external control ends any in-flight gesture and pending double tap. Its later move/release cannot navigate. */
+  adjust(action: PhotoAdjustment): void {
+    if (!this.controls.ready) return;
+    this.cancel();
+    this.transform = adjustPhoto(this.transform, action, this.drawn, this.stage);
+  }
+
 
   /** A new stage width (rotation, a window change) or a new photo resets to fit: the old position means nothing there.
    * A height-only change, such as a note appearing below the stage, keeps the zoom within the new bounds. */

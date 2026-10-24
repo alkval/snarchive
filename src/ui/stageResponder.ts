@@ -1,3 +1,4 @@
+import { samePhotoControls, type PhotoControlState } from '../domain/viewerGestures.ts';
 import type { Navigation, StageGestures, Touch, Transform } from '../domain/viewerGestures.ts';
 
 /** The subset of a responder event the stage reads. */
@@ -34,5 +35,16 @@ export function stageResponderConfig(gestures: StageGestures, callbacks: StageCa
       if (result.navigate) callbacks.navigate(result.navigate);
     },
     onPanResponderTerminate: () => { gestures.cancel(); callbacks.show(gestures.transform, true); },
+  };
+}
+
+/** Controls need settled state, not every pinch/pan frame. Also avoids publishing an unchanged snapshot. */
+export function stageControlReporter(gestures: StageGestures, publish: (state: PhotoControlState) => void) {
+  let previous: PhotoControlState | null = null;
+  return () => {
+    if (gestures.active) return;
+    const current = gestures.controls;
+    if (samePhotoControls(previous, current)) return;
+    previous = current; publish(current);
   };
 }

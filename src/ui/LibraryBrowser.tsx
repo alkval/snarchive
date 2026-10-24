@@ -115,9 +115,11 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
     <Text style={[type.footnote, { color: t.secondary, textAlign: 'center' }]}>{en.libraryPreviewNote}</Text>
   </View> : undefined;
 
-  // The grid stays mounted under the viewer (hidden from assistive technology) so its scroll position survives.
-  return <View style={styles.root}><SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}
-    importantForAccessibility={sequence ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={!!sequence}>
+  // Keep the grid mounted and laid out for scroll retention, but exclude it from drawing, input and accessibility under the viewer.
+  return <View style={styles.root}>
+    <View collapsable={false} style={[styles.root, sequence && styles.hiddenGrid]} pointerEvents={sequence ? 'none' : 'auto'}
+      importantForAccessibility={sequence ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={!!sequence}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
     <StatusBar style={t.dark ? 'light' : 'dark'} />
     <View style={styles.topBar}>
       <BackButton label={en.libraryClose} onPress={onClose} />
@@ -151,6 +153,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
         {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
       </View>} />
   </SafeAreaView>
+    </View>
     {sequence && <View style={StyleSheet.absoluteFill}>
       <MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} />
     </View>}
@@ -159,6 +162,7 @@ export function LibraryBrowser({ store, onClose, backHandler }: { store: ImportS
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  hiddenGrid: { opacity: 0 },
   topBar: { minHeight: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: space.gutter - 4 },
   filterButton: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, paddingLeft: 8 },
   header: { paddingHorizontal: space.gutter, paddingBottom: 12, gap: 12 },

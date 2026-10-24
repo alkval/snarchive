@@ -8,7 +8,9 @@ import { matchingAspect, type ImageSize } from '../domain/photoGeometry';
 import { VideoPlayerView } from './VideoPlayerView';
 import { FavoriteButton } from './FavoriteButton';
 import { FadeImage, MediaButton } from './kit';
-import { GestureStage } from './GestureStage';
+import { GestureStage, type GestureStageHandle } from './GestureStage';
+import { PhotoControls } from './PhotoControls';
+import { EMPTY_PHOTO_CONTROLS } from '../domain/viewerGestures';
 import type { Direction, NeighbourState } from '../domain/memoryNavigation';
 import { type, useReducedMotion, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -67,6 +69,9 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState('');
   const [overlayStatus, setOverlayStatus] = useState('');
+  const stage = useRef<GestureStageHandle>(null);
+  const [controlsOpen, setControlsOpen] = useState(false);
+  const [controls, setControls] = useState(EMPTY_PHOTO_CONTROLS);
   const [zoomed, setZoomed] = useState(false);
   const [resetToken, setResetToken] = useState(0);
   const overlayOpacity = useRef(new Animated.Value(1)).current;
@@ -137,12 +142,16 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
         </View>
       </View>
       {video ? <VideoPlayerView video={video} row={row} store={store} onNavigate={navigate} />
-        : <GestureStage zoomable={!!base} content={base?.size ?? null} onNavigate={navigate} onZoomChange={setZoomed} resetToken={resetToken}>{stageContent}</GestureStage>}
+        : <GestureStage ref={stage} onControlsChange={setControls} zoomable={!!base} content={base?.size ?? null} onNavigate={navigate} onZoomChange={setZoomed} resetToken={resetToken}>{stageContent}</GestureStage>}
       <View style={styles.bottomBar}>
         {!!note && <Text accessibilityLiveRegion="polite" style={[type.footnote, styles.note, { color: t.onMediaSecondary }]}>{note}</Text>}
         <View style={styles.controls}>
           {step('previous')}
           <View style={styles.middle}>
+            {base && <View style={styles.control}>
+              <MediaButton icon="options-outline" label={en.viewerPhotoControls} disabled={!controls.ready} onPress={() => { stage.current?.cancel(); setControlsOpen(true); }} />
+              <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{en.viewerPhotoControls}</Text>
+            </View>}
             {base && overlay && <View style={styles.control}>
               <MediaButton icon={showOverlay ? 'layers' : 'layers-outline'} label={showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay} onPress={() => setShowOverlay(value => !value)} />
               <Text style={[type.footnote, { color: t.onMediaSecondary }]}>{showOverlay ? en.libraryHideOverlay : en.libraryShowOverlay}</Text>
@@ -158,6 +167,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation }: {
         </View>
       </View>
     </SafeAreaView>
+    {base && <PhotoControls visible={controlsOpen} state={controls} adjust={action => stage.current?.adjust(action)} close={() => setControlsOpen(false)} />}
   </View>;
 }
 

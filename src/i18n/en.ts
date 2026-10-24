@@ -111,6 +111,12 @@ export const en = {
   viewerNone: (direction: 'next' | 'previous') => direction === 'next' ? 'No next memory' : 'No previous memory',
   viewerNavigationFailed: (direction: 'next' | 'previous') => `The ${direction} memory could not be loaded. Your library has not been changed. Try again.`,
   viewerResetZoom: 'Reset zoom',
+  viewerPhotoControls: 'Photo controls', viewerZoomIn: 'Zoom in', viewerZoomOut: 'Zoom out',
+  viewerPhotoMoves: { left: 'Move photo left', right: 'Move photo right', up: 'Move photo up', down: 'Move photo down' },
+  viewerZoomPercent: (percent: number) => `Zoom ${percent}%`,
+  viewerPhotoDirections: { left: 'Left', right: 'Right', up: 'Up', down: 'Down' }, viewerMovePhoto: 'Move photo',
+  viewerPhotoControlsNote: '100% shows the whole photo. Any visible overlay moves with it.',
+  viewerPhotoControlsDone: 'Done',
   libraryShowOverlay: 'Show overlay', libraryHideOverlay: 'Hide overlay', libraryPhoto: 'Preserved original photo',
 
   // Video
