@@ -73,3 +73,58 @@ export function verifyApkEvidence(badging: string, entries: string, signer: stri
   if (permissions.some(p => blockedPermissions.includes(p))) throw new Error('preview-blocked-permission');
   return { applicationId, debuggable: false, abis, certificateSha256, permissions };
 }
+
+// New permissions require a deliberate policy change, even if app.json forgot to block them.
+export const previewPermissions = [
+  'android.permission.ACCESS_NETWORK_STATE',
+  'android.permission.INTERNET',
+  'android.permission.WAKE_LOCK',
+  'com.alkval.snarchive.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
+] as const;
+
+type ManifestNode = { name: string; indent: number; attributes: Map<string, string>; children: ManifestNode[] };
+
+/** Parse SDK aapt's compiled XML tree, retaining element scope and typed values.
+ * Reject unsupported evidence instead of interpreting resource references as booleans.
+ */
+export function verifyApkPrivacy(xmltree: string, permissions: readonly string[]) {
+  if (permissions.some(p => !previewPermissions.some(allowed => allowed === p))) throw new Error('preview-unexpected-permission');
+  const roots: ManifestNode[] = [], stack: ManifestNode[] = [];
+  for (const line of xmltree.split(/\r?\n/)) {
+    if (!line.trim() || /^\s*N: /.test(line)) continue;
+    const element = /^(\s*)E: ([\w.-]+) \(line=\d+\)$/.exec(line);
+    if (element) {
+      const indent = element[1]!.length;
+      while (stack.length && stack.at(-1)!.indent >= indent) stack.pop();
+      const node: ManifestNode = { name: element[2]!, indent, attributes: new Map(), children: [] };
+      (stack.at(-1)?.children ?? roots).push(node); stack.push(node);
+      continue;
+    }
+    const attribute = /^(\s*)A: ([\w:.-]+)(?:\(0x[\da-fA-F]+\))?=(.+)$/.exec(line);
+    const node = stack.at(-1);
+    if (!attribute || !node || attribute[1]!.length <= node.indent || node.attributes.has(attribute[2]!))
+      throw new Error('preview-invalid-manifest-evidence');
+    node.attributes.set(attribute[2]!, attribute[3]!);
+  }
+  const manifest = roots.length === 1 && roots[0]!.name === 'manifest' ? roots[0]! : undefined;
+  const sdk = manifest?.children.filter(n => n.name === 'uses-sdk') ?? [];
+  // Revisit platform privacy behavior when upgrading the pinned target SDK.
+  if (sdk.length !== 1 || sdk[0]!.attributes.get('android:targetSdkVersion') !== '(type 0x10)0x24')
+    throw new Error('preview-unreviewed-target-sdk');
+  const applications = manifest?.children.filter(n => n.name === 'application') ?? [];
+  if (applications.length !== 1) throw new Error('preview-invalid-manifest-evidence');
+  const application = applications[0]!;
+  const isFalse = (value: string | undefined) => value === '(type 0x12)0x0';
+  for (const name of ['allowBackup', 'usesCleartextTraffic']) {
+    if (!isFalse(application.attributes.get(`android:${name}`))) throw new Error(`preview-unsafe-${name}`);
+  }
+  for (const name of ['debuggable', 'testOnly']) {
+    const value = application.attributes.get(`android:${name}`);
+    if (value !== undefined && !isFalse(value)) throw new Error(`preview-unsafe-${name}`);
+  }
+  if (application.attributes.has('android:networkSecurityConfig')) throw new Error('preview-network-security-override');
+  const updates = application.children.filter(n => n.name === 'meta-data' &&
+    n.attributes.get('android:name') === '"expo.modules.updates.ENABLED" (Raw: "expo.modules.updates.ENABLED")');
+  if (updates.length !== 1 || !isFalse(updates[0]!.attributes.get('android:value'))) throw new Error('preview-updates-enabled-or-unknown');
+  return { allowBackup: false, usesCleartextTraffic: false, updatesEnabled: false, networkSecurityConfig: false };
+}

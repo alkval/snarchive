@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { sha256, verifyApkEvidence, verifyPreviewInputs, within } from './androidPreview.ts';
+import { sha256, verifyApkEvidence, verifyApkPrivacy, verifyPreviewInputs, within } from './androidPreview.ts';
 
 const [workspaceArg, output] = process.argv.slice(2);
 if (!workspaceArg || !output) throw new Error('Usage: package-android-preview.ts <workspace> <new-output-directory>');
@@ -24,13 +24,14 @@ const entries = run('aapt', ['list', apk]);
 const signer = run('apksigner', ['verify', '--verbose', '--print-certs', apk]);
 const config = JSON.parse(readFileSync(join(workspace, 'app.json'), 'utf8'));
 const evidence = verifyApkEvidence(badging, entries, signer, sha256(certificate), config.expo.android.blockedPermissions);
+const privacy = verifyApkPrivacy(run('aapt', ['dump', 'xmltree', apk, 'AndroidManifest.xml']), evidence.permissions);
 const bundle = execFileSync('unzip', ['-p', apk, 'assets/index.android.bundle'], { maxBuffer: 128 * 1024 * 1024 });
 if (!bundle.length) throw new Error('preview-empty-bundle');
 if (sha256(readFileSync(apk)) !== apkHash) throw new Error('preview-apk-changed');
 verifyPreviewInputs(workspace);
 const report = { format: 1, purpose: 'Local ARM64 Android preview; development signing key; not for publication',
   inputs: inputs.digest, lockfile: sha256(readFileSync(join(workspace, 'package-lock.json'))),
-  apk: { sha256: sha256(apkBytes), bytes: apkBytes.length, ...evidence },
+  apk: { sha256: sha256(apkBytes), bytes: apkBytes.length, ...evidence, privacy },
   bundle: { sha256: sha256(bundle), bytes: bundle.length }, r8Mapping: { sha256: sha256(readFileSync(mapping)), bytes: statSync(mapping).size } };
 mkdirSync(output); // Fail rather than overwrite a directory that appeared during verification.
 writeFileSync(join(output, 'snarchive-android-preview-arm64.apk'), apkBytes, { flag: 'wx' });
