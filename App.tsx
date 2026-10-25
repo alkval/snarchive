@@ -25,6 +25,7 @@ function SnarchiveApp() {
   const t = useTheme();
   const [store, setStore] = useState<ImportStore | null>(null), [summary, setSummary] = useState<ImportSummary | null>(null);
   const [route, setRoute] = useState<Route>('library'), [initialKind, setInitialKind] = useState<'zip' | 'directory' | undefined>();
+  const [resetWarning, setResetWarning] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0), [failed, setFailed] = useState(false), [warning, setWarning] = useState('');
   const [revision, setRevision] = useState(0), [toast, setToast] = useState('');
   const [resetting, setResetting] = useState(false);
@@ -73,7 +74,7 @@ function SnarchiveApp() {
       const state = await store?.summary().catch(() => null);
       setSummary(state ?? { files: 0, objects: 0, memories: 0, unfinished: 0, conflicts: 0 });
       setRevision(value => value + 1); setRoute('library');
-      setWarning(result.cleanupFailed ? 'The reset finished, but storage cleanup could not be confirmed. Retry Delete all Snarchive media from Settings.' : '');
+      setResetWarning(result.cleanupFailed ? 'The reset finished, but storage cleanup could not be confirmed. Retry Delete all Snarchive media from Settings.' : '');
       setToast(result.cleanupFailed ? 'Library cleared. Storage cleanup could not be completed; retry Delete all in Settings.' : 'Library cleared. You can import your exports again.');
     } finally { resetRunning.current = false; setResetting(false); }
   };
@@ -101,7 +102,7 @@ function SnarchiveApp() {
     {!!toast && route === 'library' && <View style={[styles.toast, { backgroundColor: t.text }]} pointerEvents="none"><Text accessibilityLiveRegion="polite" style={[type.body, { color: t.ground }]}>{toast}</Text></View>}
     {route !== 'library' && <View style={[StyleSheet.absoluteFill, { backgroundColor: t.ground }]}>
       {route === 'import' && <ImportScreen store={store} initialKind={initialKind} close={closeImport} complete={finishImport} backHandler={importBack} />}
-      {route === 'settings' && <SettingsScreen close={() => setRoute('library')} open={setRoute} warning={warning} reset={reset} resetting={resetting} />}
+      {route === 'settings' && <SettingsScreen close={() => setRoute('library')} open={setRoute} warning={[warning, resetWarning].filter(Boolean).join('\n\n')} reset={reset} resetting={resetting} />}
       {route === 'appearance' && <AppearanceScreen onClose={settings} />}
       {route === 'backup' && <BackupScreen onClose={settings} />}
       {route === 'restore' && <BackupInspectScreen onClose={finishTool} onChanged={changed} onOpenLibrary={showLibrary} />}

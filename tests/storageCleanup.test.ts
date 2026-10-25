@@ -22,7 +22,7 @@ class DB implements SqlDatabase {
   transactions = 0;
   async withExclusiveTransactionAsync(work: (tx: SqlConnection) => Promise<void>) {
     this.transactions++;
-    this.raw.exec('BEGIN EXCLUSIVE'); try { await work(this); this.raw.exec('COMMIT'); } catch (e) { this.raw.exec('ROLLBACK'); throw e; }
+    this.raw.exec('BEGIN'); try { await work(this); this.raw.exec('COMMIT'); } catch (e) { this.raw.exec('ROLLBACK'); throw e; }
   }
 }
 const receipt = (content: string): Receipt => {
@@ -35,6 +35,7 @@ const hashOf = (content: string) => receipt(content).sha256;
 async function library(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), 'storage-cleanup-'));
   const db = new DB(join(dir, 'library.db')); t.after(() => { try { db.raw.close(); } catch {} rmSync(dir, { recursive: true, force: true }); });
+  db.raw.exec('PRAGMA journal_mode=WAL');
   const store = new ImportStore(db); await store.initialize();
   const zip = 'a'.repeat(64);
   const names = ['2026-02-05_one-main.jpg', '2026-02-06_two-main.jpg', '2026-02-07_three-main.jpg', '2026-02-08_four-main.jpg'];
@@ -199,6 +200,7 @@ test('the reference proof and the removal share one exclusive transaction: no ot
   const report = await removeSelected(db, fake, review.uncatalogued, never, () => {});
   assert.match(blocked, /locked|busy/i, 'a second writer is refused during the native removal');
   assert.deepEqual(report.removed, [target.path]);
+  other.prepare('INSERT INTO stored_objects(hash,relative_path,bytes) VALUES (?,?,?)').run('e'.repeat(64), 'after-lock', 1);
   assert.equal((other.prepare('SELECT count(*) AS n FROM stored_objects WHERE hash=?').get(target.hash) as { n: number }).n, 0);
 });
 

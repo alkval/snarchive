@@ -44,7 +44,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const [deleting, setDeleting] = useState(false);
   const [monthRevision, monthsChanged] = useReducer((value: number) => value + 1, 0);
   const [timeline, setTimeline] = useState<{ key: string; months: LibraryMonth[] }>({ key: '', months: [] });
-  const [visibleMonth, setVisibleMonth] = useState('');
+  const [visibleMonth, setVisibleMonth] = useState<{ key: string; month: string } | null>(null);
   const [feedEpoch, setFeedEpoch] = useState(0);
   const jumpRequest = useRef(0);
   const [, thumbnailChanged] = useReducer((value: number) => value + 1, 0);
@@ -107,7 +107,10 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     // Visibility is an observation, not React state. Updating state here feeds list layout back into another
     // render and another visibility update. Once these thumbnails are cached, this callback causes no renders.
     visibleIds.current = ids;
-    if (visible[0]) setVisibleMonth(visible[0].sortDay.slice(0, 7));
+    if (visible[0]) {
+      const key = visibleScope.current, month = visible[0].sortDay.slice(0, 7);
+      setVisibleMonth(previous => previous?.key === key && previous.month === month ? previous : { key, month });
+    }
     thumbnailRef.current.setRows(window);
   }).current;
   const previousRevision = useRef(refreshToken);
@@ -131,7 +134,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const jump = async (month: string) => {
     const request = ++jumpRequest.current;
     if (await grid.jumpToMonth(month) && jumpRequest.current === request) {
-      visibleIds.current = []; setVisibleMonth(month); setFeedEpoch(value => value + 1);
+      visibleIds.current = []; setVisibleMonth({ key: filterKey, month }); setFeedEpoch(value => value + 1);
     }
   };
   const newest = async () => {
@@ -201,8 +204,8 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
         <Ionicons name="settings-outline" size={23} color={t.text} />
       </Pressable>
     </View>
-    <View style={styles.root}>
-    <SectionList key={`${filterKey}:${feedEpoch}`} sections={grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
+    <View style={[styles.root, { flexDirection: 'row' }]}>
+    <SectionList style={styles.root} key={`${filterKey}:${feedEpoch}`} sections={grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
       ListHeaderComponent={header ?? undefined} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
       onEndReachedThreshold={0.5} onEndReached={() => { if (!grid.loading && !grid.failed && grid.hasNext) void grid.nextPage(); }}
       onViewableItemsChanged={viewability} viewabilityConfig={viewabilityConfig} initialNumToRender={12} windowSize={7}
@@ -218,7 +221,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
           onOpen={openTile} onFailed={failThumbnail} />)}
         {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
       </View>} />
-    {timeline.key === filterKey && timeline.months.length > 1 && <MonthScrollbar key={filterKey} months={timeline.months} month={visibleMonth} select={month => void jump(month)} />}
+    {timeline.key === filterKey && timeline.months.length > 1 && <MonthScrollbar key={filterKey} months={timeline.months} month={visibleMonth?.key === filterKey ? visibleMonth.month : null} select={month => void jump(month)} />}
     </View>
   </SafeAreaView>
     </View>

@@ -47,3 +47,19 @@ test('timeline jumps query the selected month, keep filters and patches, and yie
   assert.deepEqual(grid.feedRows.map(row => row.id), ['4']);
   await grid.refresh(); assert.equal(grid.jumped, false); assert.equal(grid.feedRows[0]?.id, '0');
 });
+
+test('date gutter ignores taps, jitter and horizontal drags; only vertical movement claims a jump', async () => {
+  const { monthDragStarts } = await import('../src/domain/monthScroll.ts');
+  for (const [dx, dy] of [[0, 0], [0, 7], [4, 5], [30, 15], [-30, -15]]) assert.equal(monthDragStarts(dx!, dy!), false);
+  assert.equal(monthDragStarts(0, 8), true); assert.equal(monthDragStarts(4, -20), true);
+  assert.equal(monthDragStarts(30, 0), false, 'a drag ending back at its origin does not select');
+});
+test('unobserved dates start at newest without impersonating the unknown-date bucket or skipping a month', async () => {
+  const { monthActionIndex } = await import('../src/domain/monthScroll.ts');
+  const months = [{ month: '2026-10', count: 80 }, { month: '2025-01', count: 10 }, { month: '', count: 10 }];
+  assert.equal(monthFraction(months, null), 0); assert.equal(monthFraction(months, ''), 1);
+  assert.equal(monthActionIndex(months, null, true), 0); assert.equal(monthActionIndex(months, null, false), 0);
+  assert.equal(monthActionIndex(months, 'missing', true), 0);
+  assert.equal(monthActionIndex(months, '2026-10', true), 1);
+  assert.equal(monthActionIndex(months, '', false), 1); assert.equal(monthActionIndex([], null, true), -1);
+});

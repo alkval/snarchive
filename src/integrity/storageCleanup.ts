@@ -1,3 +1,4 @@
+import { lockObjectReferences } from '../storage/referenceLock.ts';
 import type { SqlConnection, SqlDatabase } from '../storage/previewStore.ts';
 import { LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
 
@@ -112,6 +113,7 @@ export async function removeSelected(db: SqlDatabase, bridge: StorageBridge, sel
       let proved = false;
       try {
         await db.withExclusiveTransactionAsync(async tx => {
+          await lockObjectReferences(tx);
           await requireSchema(tx);
           if (entry.kind === 'object' && (await referencedObjects(tx, [entry.hash])).size > 0) { result = { ok: true, outcome: 'skipped', reason: 'referenced' }; return; }
           proved = true;

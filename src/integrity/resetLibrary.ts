@@ -1,3 +1,4 @@
+import { lockObjectReferences } from '../storage/referenceLock.ts';
 import { LIBRARY_SCHEMA_VERSION } from '../storage/importStore.ts';
 import type { SqlDatabase } from '../storage/previewStore.ts';
 type Result = { ok: boolean; code?: string };
@@ -25,9 +26,10 @@ export async function resetLibrary(db: SqlDatabase, bridge: ResetBridge, clearPr
     cleared = true;
     try { await clearPreview(); } catch { cleanupFailed = true; }
     try {
-      // Commit empty metadata first for crash safety, then hold a second transaction across the unlink. This
-      // prevents another database connection from adding an object reference between the proof and deletion.
+      // Commit empty metadata first for crash safety. Then reserve the database writer before re-reading
+      // references and hold it through unlink, so another connection cannot invalidate the proof.
       await db.withExclusiveTransactionAsync(async tx => {
+        await lockObjectReferences(tx);
         const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
         if (version?.user_version !== LIBRARY_SCHEMA_VERSION) throw new Error('storage-schema-unsupported');
         const referenced = await tx.getFirstAsync(`SELECT 1 WHERE EXISTS(SELECT 1 FROM stored_objects)

@@ -71,3 +71,26 @@ test('a new object reference between the metadata commit and cleanup protects ev
   assert.equal((await resetLibrary(db, fake, async () => {})).cleanupFailed, true);
   assert.deepEqual(calls, ['begin', 'end']); assert.equal((await store.summary()).memories, 1);
 });
+
+test('reset reserves the WAL writer before its second proof and holds it through file removal', async t => {
+  const { mkdtempSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { DatabaseSync } = await import('node:sqlite');
+  const dir = mkdtempSync(join(tmpdir(), 'reset-wal-'));
+  const db = new LibraryDB(join(dir, 'library.db'));
+  db.raw.exec('PRAGMA journal_mode=WAL');
+  const store = new ImportStore(db); await store.initialize();
+  const other = new DatabaseSync(join(dir, 'library.db'), { timeout: 0 });
+  t.after(() => { other.close(); db.raw.close(); rmSync(dir, { recursive: true, force: true }); });
+  const insert = () => other.prepare('INSERT INTO stored_objects(hash,relative_path,bytes) VALUES (?,?,?)')
+    .run('c'.repeat(64), `objects/cc/${'c'.repeat(64)}`, 1);
+  const { fake, calls } = bridge(db);
+  fake.clearLibraryFiles = async () => {
+    assert.throws(insert, /locked|busy/i, 'a competing writer cannot invalidate the empty proof before unlink');
+    calls.push('files'); return { ok: true };
+  };
+  assert.deepEqual(await resetLibrary(db, fake, async () => {}), { cleared: true, cleanupFailed: false });
+  assert.deepEqual(calls, ['begin', 'files', 'end']);
+  insert(); // The transaction released its writer reservation.
+});
