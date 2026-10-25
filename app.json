@@ -2,7 +2,7 @@
   "expo": {
     "name": "Snarchive",
     "slug": "snarchive",
-    "version": "0.2.4",
+    "version": "0.2.5",
     "icon": "./assets/icon.png",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "com.alkval.snarchive",
-      "versionCode": 7,
+      "versionCode": 8,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#101C30"
