@@ -2,7 +2,7 @@
   "expo": {
     "name": "Snarchive",
     "slug": "snarchive",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "icon": "./assets/icon.png",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "com.alkval.snarchive",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#101C30"
@@ -41,7 +41,8 @@
     "plugins": [
       "expo-sqlite",
       "expo-video",
-      "./scripts/withAndroidPrivacy.cjs"
+      "./scripts/withAndroidPrivacy.cjs",
+      "./scripts/withAndroidPickerCancellation.cjs"
     ]
   }
 }

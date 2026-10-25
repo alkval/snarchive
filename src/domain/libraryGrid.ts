@@ -116,7 +116,20 @@ export class LibraryGrid<T extends GridRow> {
     return this.load();
   }
 
-  /** Back from the viewer on `last`. On this page: the page stays (scroll position too); saves are already applied,
+  /** The continuous grid stays at its original scroll position on Back. Extend towards the last viewed memory,
+   * keeping every earlier page reachable. Bound the work even after thousands of viewer moves or a deleted anchor;
+   * scrolling can fetch the rest normally. A newer read/filter/refresh supersedes this extension. */
+  async extendFeedTo(last: GridRow): Promise<void> {
+    for (let pages = 0; pages < 4; pages++) {
+      if (this.loading || this.failed || !this.more || this.feedRows.some(row => row.id === last.id)) return;
+      const expected = this.request + 1;
+      await this.nextPage();
+      if (this.request !== expected) return;
+    }
+  }
+
+  /** Legacy paged-grid return. The continuous browser uses extendFeedTo instead.
+   * Back from the viewer on `last`. On this page: the page stays (scroll position too); saves are already applied,
    * and an emptied page was already re-read. Elsewhere: a page starting at `last` opens, and Previous returns here. */
   async closedViewer(last: GridRow): Promise<'kept' | 'jumped'> {
     if (this.page.some(row => row.id === last.id)) return 'kept';

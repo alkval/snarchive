@@ -19,11 +19,13 @@ export async function scanImportBatch(selections: readonly SourceSelection[], sc
     if (seen.has(identity)) continue;
     seen.add(identity); visited += snapshot.visitedEntries; metadata += snapshot.metadataBytes;
     if (visited > 100_000 || metadata > 16 * 1024 ** 2) throw new Error('selection-limit');
-    parts.push({ selection, source: inventoryFromSnapshot(snapshot, `source-${parts.length + 1}`), hash: selection.kind === 'zip' ? snapshot.archiveSha256! : null });
+    // Every durable plan holds one source. Batch position is not a codec source label.
+    parts.push({ selection, source: inventoryFromSnapshot(snapshot, 'source-1'), hash: selection.kind === 'zip' ? snapshot.archiveSha256! : null });
   }
   const files = parts.flatMap(part => part.source.files);
   if (!files.length) throw new Error('no-media');
-  const inventory = buildInventory(files, parts.flatMap(part => part.source.metadata));
+  // Confirmation still distinguishes repeated paths in different parts. These transient labels are never saved.
+  const inventory = buildInventory(parts.flatMap((part, index) => part.source.files.map(file => ({ ...file, sourceId: `batch-${index}` }))), parts.flatMap(part => part.source.metadata));
   return { parts, memories: inventory.summary.mediaPresent, photos: files.filter(f => f.role === 'photo').length,
     videos: files.filter(f => f.role === 'video').length, overlays: files.filter(f => f.role === 'overlay').length };
 }

@@ -76,7 +76,7 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
     view.current?.measure((_x, _y, _w, _h, pageX, pageY) => { origin.current = { x: pageX, y: pageY }; });
   };
   return <View ref={view} onLayout={layout} style={styles.stage} {...responder.panHandlers}
-    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint="Swipe left or right to browse. Swipe up for details. Double tap a photo to zoom."
+    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint="Use the next or previous memory actions to browse. Activate to open details. Photo zoom is in Memory options."
     accessibilityActions={[{ name: 'increment', label: 'Next memory' }, { name: 'decrement', label: 'Previous memory' }, { name: 'activate', label: 'Memory details' }]}
     onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') latest.current.onVertical?.('up'); else if (event.nativeEvent.actionName === 'increment' || event.nativeEvent.actionName === 'decrement') navigate(event.nativeEvent.actionName === 'increment' ? 'next' : 'previous'); }}>
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { width: width * 3, left: -width, right: undefined, transform: [{ translateX: values.swipe }] }]}>

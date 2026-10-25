@@ -94,12 +94,12 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     latest.current = next;
     setSequence(next);
   };
-  /** Back to the grid with the same filters: the same page (scroll position included) if the last memory viewed is
-   * on it, otherwise a page starting at that memory, from which Previous returns here. */
+  /** Keep the grid's earlier rows and original scroll position; append towards the last viewed memory in bounded
+   * batches. Never jump to a middle-only feed: it has no Previous button to recover omitted rows. */
   const closeViewer = (last: ChronologicalRow) => {
     latest.current = null; setSequence(null);
     const refreshed = grid.refreshDay(utcDay());
-    if (!refreshed && !grid.feedRows.some(row => row.id === last.id)) void grid.closedViewer(last);
+    if (!refreshed) void grid.extendFeedTo(last);
   };
   // System Back steps out of the viewer or filters before it leaves the library.
   useEffect(() => {

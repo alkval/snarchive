@@ -49,10 +49,10 @@ function gate() {
 /** 35 memories, newest first f00 … f34; the first 31 are favourites (Favourites filter: 30 + 1). The browser's wiring:
  * page reads run their SQL at once (a snapshot) but may be held before returning; saves commit at once but may be
  * held before they report completion. */
-async function browser(t: { after(fn: () => void): void }) {
+async function browser(t: { after(fn: () => void): void }, count = 35) {
   const db = new DB(); t.after(() => { try { db.raw.close(); } catch {} });
   const store = new ImportStore(db); await store.initialize();
-  const names = Array.from({ length: 35 }, (_, i) => `2026-0${8 - Math.floor(i / 28)}-${String(28 - (i % 28)).padStart(2, '0')}_${id(i)}-main.jpg`);
+  const names = Array.from({ length: count }, (_, i) => `2026-0${8 - Math.floor(i / 28)}-${String(28 - (i % 28)).padStart(2, '0')}_${id(i)}-main.jpg`);
   const zip = 'b'.repeat(64);
   await store.plan(zip, inventoryFromSnapshot({ entries: names.map(path => ({ path })), metadataBytes: 0, visitedEntries: names.length }, 'source-1'));
   for (let i = 0; i < names.length; i++) await store.commit(zip, i, receipt(names[i]!));
@@ -73,6 +73,42 @@ async function browser(t: { after(fn: () => void): void }) {
   return { store, grid, writes, reads, saves, latest, open };
 }
 const favouriteOf = (grid: LibraryGrid<ChronologicalRow>, memory: string) => grid.rows.find(row => row.id === memory)?.favorite;
+
+test('returning after 17 viewer moves beyond the loaded feed keeps all earlier and later memories reachable', async t => {
+  const { grid, open } = await browser(t, 70); await grid.load();
+  const sequence = open('f25');
+  for (let i = 0; i < 17; i++) assert.equal(await sequence.move('next'), 'moved');
+  assert.equal(sequence.current.id, 'f42'); assert.equal(grid.feedRows.length, 30);
+  await grid.extendFeedTo(sequence.current);
+  assert.equal(grid.feedRows[0]?.id, 'f00'); assert.ok(grid.feedRows.some(row => row.id === 'f42'));
+  assert.deepEqual(grid.feedRows.map(row => row.id), Array.from({ length: 60 }, (_, i) => id(i)));
+  await grid.nextPage();
+  assert.deepEqual(grid.feedRows.map(row => row.id), Array.from({ length: 70 }, (_, i) => id(i)));
+});
+
+test('a held scrolling-feed extension keeps favourite/deletion patches and yields to a filter change', async t => {
+  const { grid, store, reads } = await browser(t, 70); await grid.load();
+  const target = (await store.chronologicalPage(null, 70))[42]!;
+  reads.hold(); const extending = grid.extendFeedTo(target);
+  await store.deleteMemory('f00'); grid.memoryDeleted('f00');
+  await store.setFavorite('f01', false); grid.favoriteSaved('f01', false);
+  await reads.release(); await extending;
+  assert.ok(!grid.feedRows.some(row => row.id === 'f00')); assert.equal(grid.feedRows.find(row => row.id === 'f01')?.favorite, 0);
+  await grid.refresh(); reads.hold(); const stale = grid.extendFeedTo(target);
+  const july = { ...all, month: '2026-07' }; await grid.setFilters(july);
+  const before = grid.feedRows.map(row => row.id);
+  await reads.release(); await stale;
+  assert.deepEqual(grid.filters, july); assert.deepEqual(grid.feedRows.map(row => row.id), before);
+});
+
+test('returning from a very distant or deleted viewer anchor adds at most four pages; scrolling can continue', async () => {
+  const rows = Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(4, '0'), sortDay: '', sortTime: '', day: null, dateConflict: 0, photos: 1, videos: 0, favorite: 0 }));
+  let reads = 0;
+  const grid = new LibraryGrid(async cursor => { reads++; const from = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0; return rows.slice(from, from + 31); }, async () => []);
+  await grid.load(); await grid.extendFeedTo(rows.at(-1)!);
+  assert.equal(reads, 5); assert.equal(grid.feedRows.length, 150); assert.equal(grid.feedRows[0]?.id, '0000');
+  await grid.nextPage(); assert.equal(grid.feedRows.length, 180);
+});
 
 test('the scrolling feed appends pages once, patches older favourites and removes deleted rows during held reads', async t => {
   const { store, grid, reads } = await browser(t);

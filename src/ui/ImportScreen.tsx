@@ -30,6 +30,7 @@ export function ImportScreen({ store, initialKind, close, complete, backHandler 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; cancelled.current = true; }; }, []);
   const explain = (failure: unknown, importing: boolean) => {
     const code = failure instanceof Error ? failure.message : '';
+    if (code === 'native-build-required') return 'This build cannot import these files. Install the latest Android APK, then try again.';
     if (code === 'no-media') return 'No supported memories were found. Choose ZIP files directly, or a folder containing already-extracted photos and videos.';
     if (code === 'selection-limit' || code === 'session-limit') return 'That selection is too large. Choose fewer ZIP parts at a time.';
     if (code === 'insufficient-storage') return 'There is not enough free space. Free some space, then choose these files again to continue.';
