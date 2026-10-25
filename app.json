@@ -2,7 +2,8 @@
   "expo": {
     "name": "Snarchive",
     "slug": "snarchive",
-    "version": "0.1.0",
+    "version": "0.1.1",
+    "icon": "./assets/icon.png",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "platforms": [
@@ -18,6 +19,11 @@
     },
     "android": {
       "package": "com.alkval.snarchive",
+      "versionCode": 2,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#101C30"
+      },
       "allowBackup": false,
       "blockedPermissions": [
         "android.permission.READ_EXTERNAL_STORAGE",

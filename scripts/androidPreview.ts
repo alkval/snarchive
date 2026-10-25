@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 const required = ['App.tsx', 'index.ts', 'app.json', 'package.json', 'package-lock.json', 'tsconfig.json',
   'src', 'modules', 'tests', 'scripts', 'licenses', 'THIRD_PARTY_NOTICES.md'];
-const optional = ['babel.config.js', 'metro.config.js', 'app.config.js', 'app.config.ts'];
+const optional = ['babel.config.js', 'metro.config.js', 'app.config.js', 'app.config.ts', 'assets'];
 const excluded = new Set(['build', 'dist', 'coverage', 'node_modules', '.git', '.gradle', '.expo', 'work', 'private', 'exports', 'backups', '.DS_Store']);
 const secretOrProduct = /^(?:\.env(?:\..*)?|credentials\.json|local\.properties)$|\.(?:apk|aab|ipa|zip|jks|keystore|p12|mobileprovision|class|log)$/i;
 export type InputFile = { path: string; bytes: number; sha256: string };

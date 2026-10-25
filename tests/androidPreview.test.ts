@@ -17,11 +17,13 @@ function setup(t: { after(fn: () => void): void }) {
 
 test('Android preview copies only build inputs, excluding caches, private folders, archives and signing material', t => {
   const { source, destination, put } = setup(t);
+  put('assets/icon.png', 'synthetic icon');
   for (const path of ['exports/private.jpg', '.env', 'android/app/debug.keystore', 'src/.env.local', 'src/credentials.json',
     'modules/local/android/build/classes/Main.class', 'modules/local/android/.gradle/cache', 'modules/local/android/debug.keystore',
     'tests/private/input.json', 'tests/export.zip', 'scripts/work/data.json', 'src/node_modules/a.js']) put(path);
   const snapshot = copyPreviewInputs(source, destination);
-  assert.equal(snapshot.files.length, 12);
+  assert.equal(snapshot.files.length, 13);
+  assert.equal(readFileSync(join(destination, 'assets/icon.png'), 'utf8'), 'synthetic icon');
   assert.equal(snapshot.files.find(f => f.path === 'src/a.ts')?.bytes, 9);
   assert.deepEqual(verifyPreviewInputs(destination), snapshot);
   assert.equal(readFileSync(join(destination, 'modules/local/android/Main.java'), 'utf8'), 'synthetic');
