@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
-import { ActivityIndicator, AppState, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
+import { ActivityIndicator, AppState, Image, Pressable, SectionList, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import type { ImportStore, ChronologicalRow } from '../storage/importStore';
@@ -13,12 +13,14 @@ import { MemoryPager } from './MemoryPager';
 import { MemorySequence } from '../domain/memoryNavigation';
 import { FavoriteWrites } from '../domain/favoriteWrites';
 import { LibraryGrid, favoriteSavedHandler } from '../domain/libraryGrid';
+import { ThumbnailWindow, visibleThumbnailRows } from '../domain/thumbnailWindow';
+import { gridLayout, GRID_COLUMNS, GRID_GAP } from '../domain/gridLayout';
 import { utcDay, watchUTCDate } from '../domain/onThisDay';
-import { Button, FadeImage, Notice } from './kit';
+import { Button, Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
 
-const COLUMNS = 3, GAP = 2;
+const COLUMNS = GRID_COLUMNS, GAP = GRID_GAP;
 type Section = { key: string; title: string; count: number; data: ChronologicalRow[][] };
 
 function sections(rows: ChronologicalRow[]): Section[] {
@@ -34,9 +36,19 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   onAdd?(): void; onSettings?(): void; refreshToken?: number; onLibraryChanged?(): void; onNotice?(message: string): void;
 }) {
   const t = useTheme();
+  const screen = useWindowDimensions();
+  const [listWidth, setListWidth] = useState(screen.width);
+  const [listHeaderHeight, setListHeaderHeight] = useState(0);
   const [editingFilters, setEditingFilters] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [previews, setPreviews] = useState<Record<string, string | null>>({});
+  const [, thumbnailChanged] = useReducer((value: number) => value + 1, 0);
+  const thumbnails = useMemo(() => new ThumbnailWindow<ChronologicalRow>(async row => {
+    let uri: string | null = null;
+    await pageThumbnails([row], store, thumbnail, () => false, (_id, value) => { uri = value; });
+    return uri;
+  }), [store]);
+  useEffect(() => thumbnails.subscribe(thumbnailChanged), [thumbnails]);
+  useEffect(() => { thumbnails.reset(); }, [thumbnails, refreshToken]);
   const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
   /** Page, filters, history and every completed favourite save (see LibraryGrid). */
   const grid = useMemo(() => new LibraryGrid<ChronologicalRow>(
@@ -64,32 +76,29 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const holding = grid.loading && !feed.length && held.current.key === filterKey && held.current.rows.length > 0;
   if (!holding) held.current = { key: filterKey, rows: feed };
   const rows = holding ? held.current.rows : feed;
-  const [visibleRows, setVisibleRows] = useState<ChronologicalRow[]>([]);
   const rowsRef = useRef(rows); rowsRef.current = rows;
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10 }).current;
-  const viewableKey = useRef('');
+  const thumbnailRef = useRef(thumbnails); thumbnailRef.current = thumbnails;
+  const visibleIds = useRef<readonly string[]>([]);
+  const visibleScope = useRef(filterKey);
+  if (visibleScope.current !== filterKey) { visibleScope.current = filterKey; visibleIds.current = []; }
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10, minimumViewTime: 80 }).current;
   const viewability = useRef(({ viewableItems }: { viewableItems: { item: unknown }[] }) => {
+    if (latest.current) return;
     const visible = viewableItems.flatMap(token => Array.isArray(token.item) ? token.item as ChronologicalRow[] : []);
-    const key = visible.map(row => row.id).join('|');
-    if (key === viewableKey.current) return;
-    viewableKey.current = key;
-    const first = rowsRef.current.findIndex(row => row.id === visible[0]?.id);
-    setVisibleRows(rowsRef.current.slice(Math.max(0, first - 9), Math.max(0, first) + 36));
+    const ids = visible.map(row => row.id);
+    const window = visibleThumbnailRows(rowsRef.current, ids);
+    if (!window) return;
+    // Visibility is an observation, not React state. Updating state here feeds list layout back into another
+    // render and another visibility update. Once these thumbnails are cached, this callback causes no renders.
+    visibleIds.current = ids;
+    thumbnailRef.current.setRows(window);
   }).current;
-  const page = useMemo(() => visibleRows.length ? visibleRows : rows.slice(0, 30), [visibleRows, rows]);
   const previousRevision = useRef(refreshToken);
   useEffect(() => { if (previousRevision.current !== refreshToken) { previousRevision.current = refreshToken; void grid.refresh(); } }, [refreshToken, grid]);
-  useEffect(() => { setPreviews({}); setVisibleRows([]); viewableKey.current = ''; }, [filterKey]);
   useEffect(() => {
-    let stopped = false;
-    if (!sequence) void pageThumbnails(page, store, thumbnail, () => stopped,
-      (id, uri) => setPreviews(previous => {
-        const next = { ...previous, [id]: uri };
-        const keys = Object.keys(next); for (const old of keys.slice(0, Math.max(0, keys.length - 96))) if (!page.some(row => row.id === old)) delete next[old];
-        return next;
-      }));
-    return () => { stopped = true; };
-  }, [page, sequence, store]);
+    thumbnails.setRows(sequence ? [] : visibleThumbnailRows(rows, visibleIds.current) ?? rows.slice(0, 30));
+    return () => { thumbnails.setRows([]); };
+  }, [rows, sequence, thumbnails]);
   const open = (row: ChronologicalRow) => {
     if (holding || grid.refreshDay(utcDay())) return;
     const index = rows.findIndex(item => item.id === row.id);
@@ -99,6 +108,9 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     latest.current = next;
     setSequence(next);
   };
+  const openRef = useRef(open); openRef.current = open;
+  const openTile = useCallback((row: ChronologicalRow) => openRef.current(row), []);
+  const failThumbnail = useCallback((id: string, uri: string) => thumbnails.failed(id, uri), [thumbnails]);
   /** Keep the grid's earlier rows and original scroll position; append towards the last viewed memory in bounded
    * batches. Never jump to a middle-only feed: it has no Previous button to recover omitted rows. */
   const closeViewer = (last: ChronologicalRow) => {
@@ -118,8 +130,10 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   });
   const grouped = useMemo(() => sections(rows), [rows]);
   const chips = en.filterChips(filters.media, filters.favorites, filters.month, filters.onThisDay);
+  const layout = useMemo(() => gridLayout(grouped.map(section => section.data.length), listWidth, screen.fontScale,
+    chips.length ? listHeaderHeight : 0), [grouped, listWidth, screen.fontScale, chips.length, listHeaderHeight]);
 
-  const header = chips.length > 0 ? <View style={styles.header}>
+  const header = chips.length > 0 ? <View style={styles.header} onLayout={event => setListHeaderHeight(event.nativeEvent.layout.height)}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
       {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
     </Pressable>
@@ -131,7 +145,9 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
       <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{filters.onThisDay ? en.onThisDayEmpty : chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
     </View>;
   const footer = <View style={styles.footer}>
-    {grid.loading && rows.length > 0 && <ActivityIndicator color={t.accent} accessibilityLabel="Loading more memories" />}
+    <View style={styles.loadingSlot}>
+      {grid.loading && rows.length > 0 && <ActivityIndicator color={t.accent} accessibilityLabel="Loading more memories" />}
+    </View>
     {grid.failed && rows.length > 0 && <Button label="Try loading more again" variant="plain" onPress={() => void grid.retry()} />}
     {!grid.loading && !rows.length && grid.hasNext && <Button label="Load more" onPress={() => void grid.nextPage()} />}
   </View>;
@@ -159,25 +175,16 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
       ListHeaderComponent={header ?? undefined} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
       onEndReachedThreshold={0.5} onEndReached={() => { if (!grid.loading && !grid.failed && grid.hasNext) void grid.nextPage(); }}
       onViewableItemsChanged={viewability} viewabilityConfig={viewabilityConfig} initialNumToRender={12} windowSize={7}
-      renderSectionHeader={({ section }) => <View style={[styles.sectionHeader, { backgroundColor: t.ground }]} accessibilityRole="header">
-        <Text style={[type.headline, { color: t.text }]}>{section.title}</Text>
+      removeClippedSubviews={false}
+      onLayout={event => setListWidth(event.nativeEvent.layout.width)}
+      getItemLayout={(_data, index) => layout.cells[index]!}
+      renderSectionHeader={({ section }) => <View style={[styles.sectionHeader, { backgroundColor: t.ground, height: layout.heading }]} accessibilityRole="header">
+        <Text numberOfLines={1} style={[type.headline, { color: t.text, flex: 1 }]}>{section.title}</Text>
         <Text style={[type.footnote, { color: t.secondary, fontVariant: ['tabular-nums'] }]}>{section.count}</Text>
       </View>}
-      renderItem={({ item }) => <View style={styles.tileRow}>
-        {item.map(row => {
-          const date = memoryDate(row);
-          const uri = previews[row.id];
-          return <Pressable key={row.id} accessibilityRole="button" accessibilityLabel={en.libraryTile(date.title, row.videos > 0, row.favorite === 1)}
-            onPress={() => open(row)} style={({ pressed }) => [styles.tile, { backgroundColor: t.raised, opacity: pressed ? 0.7 : 1 }]}>
-            {uri ? <FadeImage accessible={false} source={{ uri }} resizeMode="cover" style={StyleSheet.absoluteFill}
-              onError={() => setPreviews(previous => ({ ...previous, [row.id]: null }))} />
-              : uri === null ? <View style={styles.missing}><Ionicons name="image-outline" size={24} color={t.secondary} accessibilityLabel={en.thumbnailMissing} /></View> : null}
-            <View style={styles.badges} pointerEvents="none">
-              {row.videos > 0 ? <Ionicons name="videocam" size={15} color="#FFFFFF" style={styles.badge} /> : <View />}
-              {row.favorite === 1 && <Ionicons name="heart" size={15} color="#FFFFFF" style={styles.badge} />}
-            </View>
-          </Pressable>;
-        })}
+      renderItem={({ item }) => <View style={[styles.tileRow, { height: layout.tile }]}>
+        {item.map(row => <LibraryTile key={row.id} row={row} uri={thumbnails.get(row.id)} disabled={holding}
+          onOpen={openTile} onFailed={failThumbnail} />)}
         {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
       </View>} />
   </SafeAreaView>
@@ -191,6 +198,27 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     </View>}
   </View>;
 }
+
+/** A thumbnail result must not re-send every visible Image's props to Android. No fades in the scrolling grid. */
+const LibraryTile = memo(function LibraryTile({ row, uri, disabled, onOpen, onFailed }: {
+  row: ChronologicalRow; uri: string | null | undefined; disabled: boolean;
+  onOpen(row: ChronologicalRow): void; onFailed(id: string, uri: string): void;
+}) {
+  const t = useTheme();
+  const date = memoryDate(row);
+  const source = useMemo(() => uri ? { uri } : undefined, [uri]);
+  return <Pressable disabled={disabled} accessibilityRole="button"
+    accessibilityLabel={en.libraryTile(date.title, row.videos > 0, row.favorite === 1)}
+    onPress={() => onOpen(row)} style={({ pressed }) => [styles.tile, { backgroundColor: t.raised, opacity: pressed ? 0.7 : 1 }]}>
+    {source ? <Image accessible={false} source={source} resizeMode="cover" fadeDuration={0} style={StyleSheet.absoluteFill}
+      onError={() => { if (uri) onFailed(row.id, uri); }} />
+      : uri === null ? <View style={styles.missing}><Ionicons name="image-outline" size={24} color={t.secondary} accessibilityLabel={en.thumbnailMissing} /></View> : null}
+    <View style={styles.badges} pointerEvents="none">
+      {row.videos > 0 ? <Ionicons name="videocam" size={15} color="#FFFFFF" style={styles.badge} /> : <View />}
+      {row.favorite === 1 && <Ionicons name="heart" size={15} color="#FFFFFF" style={styles.badge} />}
+    </View>
+  </Pressable>;
+});
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
@@ -214,6 +242,7 @@ const styles = StyleSheet.create({
   emptyText: { textAlign: 'center' },
   pad: { paddingHorizontal: space.gutter },
   footer: { paddingHorizontal: space.gutter, paddingTop: 24, paddingBottom: 48, gap: 16 },
+  loadingSlot: { height: 24, alignItems: 'center', justifyContent: 'center' },
   pager: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   pagerButton: { flex: 1 },
 });
