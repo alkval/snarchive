@@ -1,37 +1,50 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
-import { Animated, Easing, PanResponder, StyleSheet, View, type LayoutChangeEvent } from 'react-native';
-import { stageControlReporter, stageResponderConfig, type StageEvent } from './stageResponder';
-import { IDENTITY, StageGestures, isZoomed, type Navigation, type Size, type Touch, type Transform, type PhotoAdjustment, type PhotoControlState } from '../domain/viewerGestures';
+import { Animated, Easing, PanResponder, StyleSheet, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
+import { stageResponderConfig, type StageEvent } from './stageResponder';
+import { IDENTITY, StageGestures, TAP, isZoomed, type Navigation, type Size, type Touch, type Transform } from '../domain/viewerGestures';
 import { useReducedMotion } from './theme';
 
-export type GestureStageHandle = { adjust(action: PhotoAdjustment): void; cancel(): void };
+export type GestureStageHandle = { cancel(): void };
 
 type Props = {
   zoomable: boolean; content: Size | null; onNavigate: (direction: Navigation) => void | boolean | Promise<void | boolean>; onZoomChange?: (zoomed: boolean) => void;
   onVertical?: (direction: 'up' | 'down') => void; previousPreview?: ReactNode; nextPreview?: ReactNode; canNavigate?: (direction: Navigation) => boolean;
-  onControlsChange?: (state: PhotoControlState) => void; resetToken?: number; children: ReactNode;
+  /** Follows an unzoomed vertical drag: its distance (negative is up) while it lasts, then null when it ends. */
+  onVerticalDrag?: (dy: number | null) => void;
+  /** A single tap. On a zoomable photo it waits out the double-tap interval, so a double tap (zoom) never also taps. */
+  onTap?: () => void; resetToken?: number; children: ReactNode;
 };
 
 /** The fullscreen media area: one-finger swipes navigate at fit; when `zoomable` (a photo of size `content`), pinch,
  * pan and double-tap zoom it. Everything in `children` is moved by one transform, so a photo and its overlay stay aligned.
- * The children receive no touches: controls belong outside the stage. Gesture rules live in viewerGestures. */
-export const GestureStage = forwardRef<GestureStageHandle, Props>(function GestureStage({ zoomable, content, onNavigate, onZoomChange, onControlsChange, onVertical, previousPreview, nextPreview, canNavigate, resetToken = 0, children }, handle) {
+ * The children receive no touches: controls belong outside the stage. Gesture rules live in viewerGestures.
+ *
+ * The stage fills the window, so it starts at the window size: a newly mounted memory is drawn at its final size in its
+ * first frame instead of after a layout pass (a blank frame on every swipe). */
+export const GestureStage = forwardRef<GestureStageHandle, Props>(function GestureStage({ zoomable, content, onNavigate, onZoomChange, onVertical, onVerticalDrag, onTap, previousPreview, nextPreview, canNavigate, resetToken = 0, children }, handle) {
   const reduced = useReducedMotion();
+  const screen = useWindowDimensions();
   const gestures = useRef(new StageGestures(zoomable)).current;
   const values = useRef({ x: new Animated.Value(0), y: new Animated.Value(0), scale: new Animated.Value(1), swipe: new Animated.Value(0) }).current;
   const view = useRef<ComponentRef<typeof View>>(null);
-  const origin = useRef({ x: 0, y: 0 }), size = useRef<Size>({ width: 0, height: 0 });
-  const [width, setWidth] = useState(0);
-  const moving = useRef(false), alive = useRef(true);
-  const latest = useRef({ onNavigate, onZoomChange, onControlsChange, onVertical, canNavigate, reduced, zoomed: false });
-  latest.current = { ...latest.current, onNavigate, onZoomChange, onControlsChange, onVertical, canNavigate, reduced };
-  useEffect(() => { alive.current = true; return () => { alive.current = false; values.swipe.stopAnimation(); }; }, []);
+  const origin = useRef({ x: 0, y: 0 }), size = useRef<Size>({ width: screen.width, height: screen.height });
+  const [width, setWidth] = useState(screen.width);
+  const moving = useRef(false), alive = useRef(true), tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null), vertical = useRef<number | null>(null);
+  const latest = useRef({ onNavigate, onZoomChange, onVertical, onVerticalDrag, onTap, canNavigate, reduced, zoomable, zoomed: false });
+  latest.current = { ...latest.current, onNavigate, onZoomChange, onVertical, onVerticalDrag, onTap, canNavigate, reduced, zoomable };
+  const clearTap = () => { if (tapTimer.current) { clearTimeout(tapTimer.current); tapTimer.current = null; } };
+  useEffect(() => { alive.current = true; return () => { alive.current = false; clearTap(); values.swipe.stopAnimation(); }; }, []);
 
-  const report = useMemo(() => stageControlReporter(gestures, controls => latest.current.onControlsChange?.(controls)), []);
+  const tap = (doubleTap: boolean) => {
+    clearTap();
+    if (doubleTap) return;
+    if (!latest.current.zoomable) { latest.current.onTap?.(); return; }
+    tapTimer.current = setTimeout(() => { tapTimer.current = null; if (alive.current) latest.current.onTap?.(); }, TAP.doubleInterval);
+  };
   const show = (transform: Transform, animate: boolean) => {
     const zoomed = isZoomed(transform);
     if (zoomed !== latest.current.zoomed) { latest.current.zoomed = zoomed; latest.current.onZoomChange?.(zoomed); }
-    report();
+    if (gestures.verticalOffset !== vertical.current) { vertical.current = gestures.verticalOffset; latest.current.onVerticalDrag?.(vertical.current); }
     if (!animate || latest.current.reduced) {
       values.x.setValue(transform.x); values.y.setValue(transform.y); values.scale.setValue(transform.scale); values.swipe.setValue(gestures.swipeOffset);
       return;
@@ -40,8 +53,7 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
     Animated.parallel([timing(values.x, transform.x), timing(values.y, transform.y), timing(values.scale, transform.scale), timing(values.swipe, gestures.swipeOffset)]).start();
   };
   useImperativeHandle(handle, () => ({
-    adjust(action) { gestures.adjust(action); show(gestures.transform, true); },
-    cancel() { values.swipe.stopAnimation(); moving.current = false; gestures.cancel(); show(gestures.transform, true); },
+    cancel() { clearTap(); values.swipe.stopAnimation(); moving.current = false; gestures.cancel(); show(gestures.transform, true); },
   }));
   // A photo that finished loading, a new photo size or memory starts at fit.
   useEffect(() => { gestures.setZoomable(zoomable); gestures.layout(size.current, content); show(gestures.transform, false); }, [zoomable, content?.width, content?.height]);
@@ -53,6 +65,7 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
   };
   const navigate = (direction: Navigation) => {
     if (moving.current) return;
+    clearTap();
     if (latest.current.canNavigate && !latest.current.canNavigate(direction)) { show(gestures.transform, true); return; }
     moving.current = true;
     Animated.timing(values.swipe, { toValue: direction === 'next' ? -size.current.width : size.current.width,
@@ -64,7 +77,7 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
     });
   };
   const responder = useMemo(() => PanResponder.create(stageResponderConfig(gestures, {
-    touches, show, navigate, locked: () => moving.current, vertical: direction => latest.current.onVertical?.(direction),
+    touches, show, navigate, tap, locked: () => moving.current, vertical: direction => latest.current.onVertical?.(direction),
   })), []);
 
   const layout = (event: LayoutChangeEvent) => {
@@ -76,7 +89,7 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
     view.current?.measure((_x, _y, _w, _h, pageX, pageY) => { origin.current = { x: pageX, y: pageY }; });
   };
   return <View ref={view} onLayout={layout} style={styles.stage} {...responder.panHandlers}
-    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint="Use the next or previous memory actions to browse. Activate to open details. Photo zoom is in Memory options."
+    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint="Use the next or previous memory actions to browse. Activate to open details."
     accessibilityActions={[{ name: 'increment', label: 'Next memory' }, { name: 'decrement', label: 'Previous memory' }, { name: 'activate', label: 'Memory details' }]}
     onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') latest.current.onVertical?.('up'); else if (event.nativeEvent.actionName === 'increment' || event.nativeEvent.actionName === 'decrement') navigate(event.nativeEvent.actionName === 'increment' ? 'next' : 'previous'); }}>
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { width: width * 3, left: -width, right: undefined, transform: [{ translateX: values.swipe }] }]}>

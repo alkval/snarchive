@@ -2,7 +2,7 @@
 // docs/section-25.md for what was checked on the emulator.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOUBLE_TAP_SCALE, IDENTITY, MAX_SCALE, StageGestures, SWIPE, TAP, clampTransform, containedSize, isZoomed, swipeDecision, zoomAbout, type Touch } from '../src/domain/viewerGestures.ts';
+import { DOUBLE_TAP_SCALE, IDENTITY, MAX_SCALE, StageGestures, SWIPE, TAP, VERTICAL, clampTransform, containedSize, isZoomed, swipeDecision, verticalDecision, zoomAbout, type Touch } from '../src/domain/viewerGestures.ts';
 import { matchingAspect } from '../src/domain/photoGeometry.ts';
 
 const stage = { width: 400, height: 800 };
@@ -77,7 +77,7 @@ test('at fit a horizontal drag navigates and follows the finger; a short or vert
   const g = photo();
   g.begin([finger(0, 0)], 0); g.move([finger(-50, 2)], 20);
   assert.equal(g.swipeOffset, -50, 'the photo follows the finger');
-  assert.deepEqual(g.end(60, 0), { navigate: null, tapped: false }, '50 px is not enough');
+  assert.deepEqual(g.end(60, 0), { navigate: null, tapped: false, doubleTap: false }, '50 px is not enough');
   assert.equal(g.swipeOffset, 0, 'snaps back');
   assert.equal(drag(g, -120, 10).navigate, 'next');
   assert.equal(drag(g, 120, 10).navigate, 'previous');
@@ -119,8 +119,8 @@ test('pinch keeps the midpoint content under the fingers and is limited to 4×',
 test('double tap zooms in at the tap and back to fit; slow or distant taps do not', () => {
   const g = photo();
   const tap = (x: number, y: number, time: number) => { g.begin([finger(x, y)], time); return g.end(time + 50, 0); };
-  assert.deepEqual(tap(50, 20, 0), { navigate: null, tapped: true });
-  tap(52, 22, 200);
+  assert.deepEqual(tap(50, 20, 0), { navigate: null, tapped: true, doubleTap: false });
+  assert.deepEqual(tap(52, 22, 200), { navigate: null, tapped: true, doubleTap: true }, 'the second tap zooms and is reported as a double tap');
   near(g.transform.scale, DOUBLE_TAP_SCALE, 'zoomed in');
   tap(0, 0, 1000); tap(0, 0, 1200);
   assert.deepEqual(g.transform, IDENTITY, 'second double tap resets');
@@ -201,8 +201,31 @@ test('vertical swipes open details or return at fit, never while zoomed, multi-t
   const g = photo(); drag(g, 0, -160); assert.equal(g.verticalSwipe, 'up');
   drag(g, 0, 160); assert.equal(g.verticalSwipe, 'down');
   drag(g, 0, 40); assert.equal(g.verticalSwipe, null);
-  g.adjust('zoom-in'); drag(g, 0, -160); assert.equal(g.verticalSwipe, null);
+  g.begin([finger(0, 0)], 0); g.end(10, 0); g.begin([finger(0, 0)], 100); g.end(110, 0); assert.ok(isZoomed(g.transform));
+  drag(g, 0, -160, 0, 1000); assert.equal(g.verticalSwipe, null, 'zoomed: a vertical drag pans');
   g.reset(); g.begin([finger(0, 0)], 0); g.touchesChanged([finger(0, 0), finger(100, 0, 2)], 10);
   g.touchesChanged([finger(0, 0)], 20); g.move([finger(0, -160)], 30); g.end(40, 0); assert.equal(g.verticalSwipe, null);
   g.reset(); g.begin([finger(0, 0)], 0); g.move([finger(0, -160)], 20); g.cancel(); assert.equal(g.verticalSwipe, null);
+});
+
+test('a vertical drag reports its distance while it lasts, and nothing once it ends, is cancelled or gains a finger', () => {
+  const g = photo();
+  g.begin([finger(0, 0)], 0); assert.equal(g.verticalOffset, null);
+  g.move([finger(0, -5)], 10); assert.equal(g.verticalOffset, null, 'within tap slop');
+  g.move([finger(2, -60)], 20); assert.equal(g.verticalOffset, -60);
+  g.move([finger(2, 30)], 30); assert.equal(g.verticalOffset, 30, 'it follows the finger back down past the start');
+  g.end(40, 0); assert.equal(g.verticalOffset, null);
+  g.begin([finger(0, 0)], 100); g.move([finger(0, -80)], 120); g.cancel(); assert.equal(g.verticalOffset, null);
+  g.begin([finger(0, 0)], 200); g.move([finger(0, -80)], 220); g.move([finger(0, -80), finger(50, -80, 2)], 230); assert.equal(g.verticalOffset, null);
+  g.reset(); g.begin([finger(0, 0)], 300); g.move([finger(-80, 0)], 320); assert.equal(g.verticalOffset, null, 'a horizontal swipe is not vertical');
+});
+
+test('a released vertical drag decides by distance or a flick in the direction it travelled', () => {
+  assert.equal(verticalDecision(-VERTICAL.distance, 0), 'up');
+  assert.equal(verticalDecision(VERTICAL.distance, 0), 'down');
+  assert.equal(verticalDecision(-(VERTICAL.distance - 1), 0), null);
+  assert.equal(verticalDecision(-VERTICAL.flickDistance, -VERTICAL.flickVelocity), 'up', 'a short fast flick');
+  assert.equal(verticalDecision(-(VERTICAL.flickDistance - 1), -2), null, 'too short even when fast');
+  assert.equal(verticalDecision(-40, VERTICAL.flickVelocity), null, 'moving back down at release');
+  const g = photo(); g.begin([finger(0, 0)], 0); g.move([finger(0, -30)], 20); g.end(40, 0, -1); assert.equal(g.verticalSwipe, 'up');
 });

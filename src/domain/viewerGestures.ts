@@ -48,6 +48,15 @@ export function zoomAbout(transform: Transform, scale: number, focal: Point, dra
 
 export const isZoomed = (transform: Transform) => transform.scale >= MIN_SCALE + ZOOM_EPSILON;
 
+/** A released vertical drag opens details (up) or closes the viewer (down) when it travels `distance` px, or is
+ * flicked (`flickVelocity` px/ms over at least `flickDistance` px) in the direction it travelled. */
+export const VERTICAL = { distance: 72, flickDistance: 24, flickVelocity: 0.5 };
+export function verticalDecision(dy: number, velocityY: number): 'up' | 'down' | null {
+  const far = Math.abs(dy) >= VERTICAL.distance;
+  const flick = Math.abs(dy) >= VERTICAL.flickDistance && Math.abs(velocityY) >= VERTICAL.flickVelocity && Math.sign(velocityY) === Math.sign(dy);
+  return far || flick ? (dy < 0 ? 'up' : 'down') : null;
+}
+
 /** Whether a released horizontal drag navigates, and where. dx < 0 (moving left) shows the next memory. */
 export function swipeDecision(dx: number, dy: number, velocityX: number, stageWidth: number): Navigation | null {
   if (!(Math.abs(dx) > SWIPE.dominance * Math.abs(dy))) return null;
@@ -57,34 +66,9 @@ export function swipeDecision(dx: number, dy: number, velocityX: number, stageWi
   return dx < 0 ? 'next' : 'previous';
 }
 
-/** Button controls share the gesture transform. Directions describe movement of the photo on screen. */
-export const PHOTO_ADJUSTMENTS = ['zoom-in', 'zoom-out', 'left', 'right', 'up', 'down', 'reset'] as const;
-export type PhotoAdjustment = typeof PHOTO_ADJUSTMENTS[number];
-export type PhotoControlState = { ready: boolean; percent: number; enabled: Record<PhotoAdjustment, boolean> };
-export const PHOTO_ZOOM_STEP = 0.5, PHOTO_MOVE_FRACTION = 0.25;
-
-export function adjustPhoto(transform: Transform, action: PhotoAdjustment, drawn: Size, stage: Size): Transform {
-  const current = clampTransform(transform, drawn, stage);
-  if (action === 'reset') return IDENTITY;
-  if (action === 'zoom-in' || action === 'zoom-out')
-    return zoomAbout(current, current.scale + (action === 'zoom-in' ? PHOTO_ZOOM_STEP : -PHOTO_ZOOM_STEP), { x: 0, y: 0 }, drawn, stage);
-  const dx = action === 'left' ? -stage.width * PHOTO_MOVE_FRACTION : action === 'right' ? stage.width * PHOTO_MOVE_FRACTION : 0;
-  const dy = action === 'up' ? -stage.height * PHOTO_MOVE_FRACTION : action === 'down' ? stage.height * PHOTO_MOVE_FRACTION : 0;
-  return clampTransform({ ...current, x: current.x + dx, y: current.y + dy }, drawn, stage);
-}
-const sameTransform = (a: Transform, b: Transform) => a.scale === b.scale && a.x === b.x && a.y === b.y;
-export function photoControlState(zoomable: boolean, transform: Transform, drawn: Size, stage: Size): PhotoControlState {
-  const ready = zoomable && finitePositive(drawn) && finitePositive(stage);
-  const enabled = Object.fromEntries(PHOTO_ADJUSTMENTS.map(action => [action, ready && !sameTransform(transform, adjustPhoto(transform, action, drawn, stage))])) as Record<PhotoAdjustment, boolean>;
-  return { ready, percent: Math.round(transform.scale * 100), enabled };
-}
-export const EMPTY_PHOTO_CONTROLS: PhotoControlState = photoControlState(false, IDENTITY, { width: 0, height: 0 }, { width: 0, height: 0 });
-export function samePhotoControls(a: PhotoControlState | null, b: PhotoControlState): boolean {
-  return !!a && a.ready === b.ready && a.percent === b.percent && PHOTO_ADJUSTMENTS.every(action => a.enabled[action] === b.enabled[action]);
-}
-
 type Mode = 'idle' | 'pending' | 'swipe' | 'vertical' | 'pan' | 'pinch' | 'ignored';
-export type GestureEnd = { navigate: Navigation | null; tapped: boolean };
+/** `doubleTap`: this tap completed a double tap (it zoomed); a single tap may still become one until TAP.doubleInterval. */
+export type GestureEnd = { navigate: Navigation | null; tapped: boolean; doubleTap: boolean };
 
 /** One gesture at a time over the stage. While zoomed, one finger pans and never navigates; two fingers always
  * pinch. A gesture that involved two fingers never navigates, even after one is lifted. Swipes navigate only at fit. */
@@ -93,6 +77,8 @@ export class StageGestures {
   /** Horizontal offset shown while an unzoomed swipe is in progress; 0 otherwise. */
   swipeOffset = 0;
   verticalSwipe: 'up' | 'down' | null = null;
+  /** Vertical distance of an unzoomed vertical drag in progress (negative is up); null when there is none. */
+  verticalOffset: number | null = null;
   private stage: Size = { width: 0, height: 0 };
   private drawn: Size = { width: 0, height: 0 };
   private content: Size = { width: 0, height: 0 };
@@ -113,14 +99,6 @@ export class StageGestures {
 
   get active(): boolean { return this.mode !== 'idle'; }
   get pinching(): boolean { return this.mode === 'pinch'; }
-  get controls(): PhotoControlState { return photoControlState(this.zoomable, this.transform, this.drawn, this.stage); }
-  /** An external control ends any in-flight gesture and pending double tap. Its later move/release cannot navigate. */
-  adjust(action: PhotoAdjustment): void {
-    if (!this.controls.ready) return;
-    this.cancel();
-    this.transform = adjustPhoto(this.transform, action, this.drawn, this.stage);
-  }
-
 
   /** A new stage width (rotation, a window change) or a new photo resets to fit: the old position means nothing there.
    * A height-only change, such as a note appearing below the stage, keeps the zoom within the new bounds. */
@@ -132,10 +110,10 @@ export class StageGestures {
     if (!sameContent || !sameWidth) this.reset();
     else this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }
-  reset(): void { this.verticalSwipe = null; this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.count = 0; this.lastTap = null; }
+  reset(): void { this.verticalSwipe = null; this.verticalOffset = null; this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.count = 0; this.lastTap = null; }
 
   begin(touches: readonly Touch[], time: number): void {
-    this.verticalSwipe = null;
+    this.verticalSwipe = null; this.verticalOffset = null;
     this.multi = touches.length > 1; this.swipeOffset = 0; this.count = touches.length;
     if (touches.length > 1) { this.startPinch(touches); return; }
     const touch = touches[0];
@@ -152,7 +130,7 @@ export class StageGestures {
     const previous = this.count;
     this.count = touches.length;
     if (touches.length > 1) {
-      this.multi = true; this.swipeOffset = 0;
+      this.multi = true; this.swipeOffset = 0; this.verticalOffset = null;
       if (this.mode !== 'pinch') this.startPinch(touches);
       return;
     }
@@ -179,32 +157,35 @@ export class StageGestures {
     }
     if (this.mode === 'pan') this.transform = clampTransform({ scale: this.base.scale, x: this.base.x + dx, y: this.base.y + dy }, this.drawn, this.stage);
     else if (this.mode === 'swipe') this.swipeOffset = dx;
+    else if (this.mode === 'vertical') this.verticalOffset = dy;
   }
 
-  /** The gesture ended normally. velocityX in px/ms (positive to the right). */
-  end(time: number, velocityX: number): GestureEnd {
+  /** The gesture ended normally. Velocities in px/ms (positive to the right and down). */
+  end(time: number, velocityX: number, velocityY = 0): GestureEnd {
     const mode = this.mode, dx = this.last.x - this.start.x, dy = this.last.y - this.start.y;
-    this.mode = 'idle'; this.swipeOffset = 0;
+    this.mode = 'idle'; this.swipeOffset = 0; this.verticalOffset = null;
     this.count = 0;
-    this.verticalSwipe = mode === 'vertical' && !this.multi && Math.abs(dy) >= 72 ? (dy < 0 ? 'up' : 'down') : null;
-    if (mode === 'swipe' && !this.multi) return { navigate: swipeDecision(dx, dy, velocityX, this.stage.width), tapped: false };
+    this.verticalSwipe = mode === 'vertical' && !this.multi ? verticalDecision(dy, velocityY) : null;
+    if (mode === 'swipe' && !this.multi) return { navigate: swipeDecision(dx, dy, velocityX, this.stage.width), tapped: false, doubleTap: false };
     if (mode === 'pending' && !this.multi && time - this.start.time <= TAP.maxDuration) {
       const tap = { x: this.start.x, y: this.start.y, time };
       const previous = this.lastTap;
       if (this.zoomable && previous && time - previous.time <= TAP.doubleInterval && Math.hypot(tap.x - previous.x, tap.y - previous.y) <= TAP.doubleSlop) {
         this.lastTap = null;
         this.transform = isZoomed(this.transform) ? IDENTITY : zoomAbout(this.transform, DOUBLE_TAP_SCALE, tap, this.drawn, this.stage);
-      } else this.lastTap = tap;
-      return { navigate: null, tapped: true };
+        return { navigate: null, tapped: true, doubleTap: true };
+      }
+      this.lastTap = tap;
+      return { navigate: null, tapped: true, doubleTap: false };
     }
     this.transform = clampTransform(this.transform, this.drawn, this.stage);
-    return { navigate: null, tapped: false };
+    return { navigate: null, tapped: false, doubleTap: false };
   }
 
   /** The system took the gesture away (another responder, a dialog, the app backgrounding): never navigate, keep any
    * zoom already applied, within bounds. */
   cancel(): void {
-    this.verticalSwipe = null;
+    this.verticalSwipe = null; this.verticalOffset = null;
     this.mode = 'idle'; this.swipeOffset = 0; this.lastTap = null; this.count = 0;
     this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }

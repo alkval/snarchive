@@ -8,14 +8,16 @@ import type { Direction, MemorySequence } from '../domain/memoryNavigation';
 import type { FavoriteWrites } from '../domain/favoriteWrites';
 import { MemoryViewer } from './MemoryViewer';
 
-/** Shows the open memory of a sequence and moves through it. Each memory gets a fresh viewer (keyed by ID). Favourite
- * writes belong to the library browser, which updates the sequence's rows when they are saved. */
+/** Shows the open memory of a sequence and moves through it. Each memory gets a fresh viewer (keyed by ID); whether
+ * the viewer's bars are shown is kept here, so it carries over as you swipe. Favourite writes belong to the library
+ * browser, which updates the sequence's rows when they are saved. */
 export function MemoryPager({ sequence, store, writes, onClose, onDeleted, onBusy }: {
   sequence: MemorySequence<ChronologicalRow>; store: ImportStore; writes: FavoriteWrites; onClose: (last: ChronologicalRow) => void;
   onDeleted(id: string, cleanupFailed: boolean): void; onBusy(value: boolean): void;
 }) {
   const [, render] = useReducer((value: number) => value + 1, 0);
   const [failed, setFailed] = useState<Direction | null>(null);
+  const [chrome, setChrome] = useState(true);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => sequence.subscribe(render), [sequence]);
@@ -38,7 +40,7 @@ export function MemoryPager({ sequence, store, writes, onClose, onDeleted, onBus
   return <MemoryViewer key={row.id} row={row} store={store} onBack={() => onClose(sequence.current)}
     navigation={{ previous: sequence.state('previous'), next: sequence.state('next'), go, failed }}
     initialMedia={cache.peek(row.id)} loadMedia={() => cache.load(row.id)}
-    previousPreview={preview(previous)} nextPreview={preview(next)} onBusy={onBusy}
+    previousPreview={preview(previous)} nextPreview={preview(next)} onBusy={onBusy} chrome={chrome} onToggleChrome={() => setChrome(value => !value)}
     onDelete={async () => {
       const result = await deleteMemory(row.id);
       onDeleted(row.id, result.cleanupFailed);
@@ -49,10 +51,12 @@ export function MemoryPager({ sequence, store, writes, onClose, onDeleted, onBus
     favorite={{ pending: writes.isPending(row.id), failed: writes.hasFailed(row.id), toggle: () => void writes.toggle(row.id, row.favorite === 1) }} />;
 }
 
+/** A neighbour drawn beside the stage during a swipe. Images appear at once (no Android fade), so the photo and its
+ * overlay are never seen apart. */
 function MediaPreview({ media }: { media?: ViewerMedia }) {
   const uri = media?.base?.uri ?? media?.poster;
   return uri ? <View style={StyleSheet.absoluteFill}>
-    <Image accessible={false} source={{ uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />
-    {media?.overlay && <Image accessible={false} source={{ uri: media.overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />}
+    <Image accessible={false} fadeDuration={0} source={{ uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />
+    {media?.overlay && <Image accessible={false} fadeDuration={0} source={{ uri: media.overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />}
   </View> : null;
 }

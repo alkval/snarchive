@@ -56,7 +56,14 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
    * that memory loaded, is updated too. */
   const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite),
     favoriteSavedHandler(grid, () => latest.current)), [store, grid]);
-  const rows = useMemo(() => grid.feedRows, [grid, gridVersion]), filters = grid.filters;
+  const feed = useMemo(() => grid.feedRows, [grid, gridVersion]), filters = grid.filters;
+  const filterKey = JSON.stringify(filters);
+  // A refresh (an import closed, a restore) reads the library again from its first page. Until that read lands, keep the
+  // rows already shown rather than blanking the grid to a spinner and back; they cannot be opened meanwhile.
+  const held = useRef({ key: '', rows: [] as ChronologicalRow[] });
+  const holding = grid.loading && !feed.length && held.current.key === filterKey && held.current.rows.length > 0;
+  if (!holding) held.current = { key: filterKey, rows: feed };
+  const rows = holding ? held.current.rows : feed;
   const [visibleRows, setVisibleRows] = useState<ChronologicalRow[]>([]);
   const rowsRef = useRef(rows); rowsRef.current = rows;
   const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10 }).current;
@@ -72,7 +79,6 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const page = useMemo(() => visibleRows.length ? visibleRows : rows.slice(0, 30), [visibleRows, rows]);
   const previousRevision = useRef(refreshToken);
   useEffect(() => { if (previousRevision.current !== refreshToken) { previousRevision.current = refreshToken; void grid.refresh(); } }, [refreshToken, grid]);
-  const filterKey = JSON.stringify(filters);
   useEffect(() => { setPreviews({}); setVisibleRows([]); viewableKey.current = ''; }, [filterKey]);
   useEffect(() => {
     let stopped = false;
@@ -85,7 +91,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     return () => { stopped = true; };
   }, [page, sequence, store]);
   const open = (row: ChronologicalRow) => {
-    if (grid.refreshDay(utcDay())) return;
+    if (holding || grid.refreshDay(utcDay())) return;
     const index = rows.findIndex(item => item.id === row.id);
     if (index < 0) return;
     const current = filters;
@@ -113,9 +119,6 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const grouped = useMemo(() => sections(rows), [rows]);
   const chips = en.filterChips(filters.media, filters.favorites, filters.month, filters.onThisDay);
 
-  if (editingFilters) return <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)}
-    apply={value => { void grid.setFilters(value); setEditingFilters(false); }} />;
-
   const header = chips.length > 0 ? <View style={styles.header}>
     <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
       {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
@@ -132,10 +135,12 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     {grid.failed && rows.length > 0 && <Button label="Try loading more again" variant="plain" onPress={() => void grid.retry()} />}
     {!grid.loading && !rows.length && grid.hasNext && <Button label="Load more" onPress={() => void grid.nextPage()} />}
   </View>;
-  // Keep the grid mounted and laid out for scroll retention, but exclude it from drawing, input and accessibility under the viewer.
+  // Keep the grid mounted and laid out for scroll retention, but exclude it from drawing, input and accessibility under
+  // the viewer or filters. Remounting it would lose the scroll position and redraw every thumbnail.
+  const covered = !!sequence || editingFilters;
   return <View style={styles.root}>
-    <View collapsable={false} style={[styles.root, sequence && styles.hiddenGrid]} pointerEvents={sequence ? 'none' : 'auto'}
-      importantForAccessibility={sequence ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={!!sequence}>
+    <View collapsable={false} style={[styles.root, covered && styles.hiddenGrid]} pointerEvents={covered ? 'none' : 'auto'}
+      importantForAccessibility={covered ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={covered}>
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
     <StatusBar style={t.dark ? 'light' : 'dark'} />
     <View style={styles.topBar}>
@@ -177,6 +182,9 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
       </View>} />
   </SafeAreaView>
     </View>
+    {editingFilters && <View style={StyleSheet.absoluteFill}>
+      <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)} apply={value => { void grid.setFilters(value); setEditingFilters(false); }} />
+    </View>}
     {sequence && <View style={StyleSheet.absoluteFill}>
       <MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} onBusy={setDeleting}
         onDeleted={(id, cleanupFailed) => { grid.memoryDeleted(id); onLibraryChanged?.(); onNotice?.(cleanupFailed ? 'Deleted. Some unused files could not be cleared; you can retry from Settings.' : 'Deleted'); }} />

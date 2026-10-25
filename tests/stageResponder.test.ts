@@ -104,3 +104,19 @@ test('a terminated gesture never navigates and leaves no swipe offset', () => {
   assert.equal(gestures.swipeOffset, 0); assert.deepEqual(gestures.transform, IDENTITY); assert.deepEqual(navigated, []);
   assert.equal(config.onPanResponderTerminationRequest(), true, 'idle again');
 });
+
+test('a release reports the vertical decision before settling, then any tap with whether it completed a double tap', () => {
+  const gestures = new StageGestures(true), calls: string[] = [];
+  gestures.layout({ width: 400, height: 800 }, { width: 4000, height: 3000 });
+  let time = 0;
+  const config = stageResponderConfig(gestures, { touches: e => e.nativeEvent.touches.map(t => ({ id: t.identifier, x: t.pageX, y: t.pageY })),
+    show: () => calls.push(`show:${gestures.verticalOffset}`), navigate() { throw new Error('not horizontal'); },
+    vertical: direction => calls.push(`vertical:${direction}`), tap: doubleTap => calls.push(`tap:${doubleTap}`), now: () => (time += 16) });
+  config.onPanResponderGrant(event(one(0))); config.onPanResponderMove(event(one(0, -150)));
+  assert.deepEqual(calls, ['show:-150'], 'the drag distance is visible while it moves');
+  config.onPanResponderRelease(event(), { vx: 0, vy: -1 });
+  assert.deepEqual(calls.slice(1), ['vertical:up', 'show:null']);
+  calls.length = 0;
+  for (let i = 0; i < 2; i++) { config.onPanResponderGrant(event(one(10))); config.onPanResponderRelease(event(), { vx: 0 }); }
+  assert.deepEqual(calls.filter(call => call.startsWith('tap')), ['tap:false', 'tap:true']);
+});

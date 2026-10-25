@@ -137,11 +137,25 @@ export function Segmented<T extends string>({ options, value, onChange, label }:
   </View>;
 }
 
-/** Thumbnails and photos fade in once decoded instead of popping in. Opacity only. */
+// Images already shown this session; bounded, oldest forgotten first.
+const shownImages = new Set<string>();
+const SHOWN_LIMIT = 2000;
+const imageUri = (source: ImageProps['source']) => source && typeof source === 'object' && 'uri' in source ? source.uri : undefined;
+
+/** Thumbnails fade in the first time they are decoded instead of popping in. One already shown this session (a list
+ * that remounted, a filter or screen change) appears at once rather than blinking again. Opacity only; Android's own
+ * image fade is off so the two never stack. */
 export function FadeImage(props: ImageProps) {
-  const shown = useRef(new Animated.Value(0)).current;
-  return <Animated.Image {...props} style={[props.style, { opacity: shown }]}
-    onLoad={event => { Animated.timing(shown, { toValue: 1, duration: 200, easing: EASE_OUT, useNativeDriver: true }).start(); props.onLoad?.(event); }} />;
+  const uri = imageUri(props.source);
+  const shown = useRef(new Animated.Value(uri && shownImages.has(uri) ? 1 : 0)).current;
+  return <Animated.Image fadeDuration={0} {...props} style={[props.style, { opacity: shown }]}
+    onLoad={event => {
+      if (uri && !shownImages.has(uri)) {
+        shownImages.add(uri);
+        if (shownImages.size > SHOWN_LIMIT) shownImages.delete(shownImages.values().next().value!);
+      }
+      Animated.timing(shown, { toValue: 1, duration: 200, easing: EASE_OUT, useNativeDriver: true }).start(); props.onLoad?.(event);
+    }} />;
 }
 
 const styles = StyleSheet.create({
