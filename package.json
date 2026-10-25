@@ -23,6 +23,8 @@
     "prepare:preview": "node scripts/prepare-local-preview.mjs",
     "prepare:android-preview": "node --experimental-strip-types scripts/prepare-android-preview.ts",
     "package:android-preview": "node --experimental-strip-types scripts/package-android-preview.ts",
+    "init:android-personal-key": "node --experimental-strip-types scripts/init-android-personal-key.ts",
+    "package:android-personal": "node --experimental-strip-types scripts/package-android-personal.ts",
     "test:original-store": "node scripts/test-original-store.mjs",
     "fixtures:resume": "python3 scripts/generate-resume-fixture.py",
     "fixtures:video": "python3 scripts/generate-video-fixture.py",
