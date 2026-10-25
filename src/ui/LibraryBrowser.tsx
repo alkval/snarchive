@@ -40,8 +40,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
   /** Page, filters, history and every completed favourite save (see LibraryGrid). */
   const grid = useMemo(() => new LibraryGrid<ChronologicalRow>(
-    (cursor, filters) => store.chronologicalPage(cursor, 31, filters),
-    (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters)), [store]);
+    (cursor, filters) => store.chronologicalPage(cursor, 31, filters)), [store]);
   const [gridVersion, render] = useReducer((value: number) => value + 1, 0);
   useEffect(() => { const stop = grid.subscribe(render); void grid.load(); return stop; }, [grid]);
   // Updated at the event boundary, so midnight/foreground callbacks need not wait for a React render.

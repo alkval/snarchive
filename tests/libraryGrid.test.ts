@@ -59,8 +59,7 @@ async function browser(t: { after(fn: () => void): void }, count = 35) {
   for (let i = 0; i < 31; i++) await store.setFavorite(id(i), true);
   const reads = gate(), saves = gate();
   const grid = new LibraryGrid<ChronologicalRow>(
-    async (cursor, filters) => { const page = await store.chronologicalPage(cursor, 31, filters); await reads.pass(); return page; },
-    (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters));
+    async (cursor, filters) => { const page = await store.chronologicalPage(cursor, 31, filters); await reads.pass(); return page; });
   // LibraryBrowser's `latest.current`: the sequence of the last render. Tests leave it stale on purpose.
   const latest: { sequence: MemorySequence<ChronologicalRow> | null } = { sequence: null };
   const writes = new FavoriteWrites(async (memory, favorite) => { await store.setFavorite(memory, favorite); await saves.pass(); },
@@ -104,7 +103,7 @@ test('a held scrolling-feed extension keeps favourite/deletion patches and yield
 test('returning from a very distant or deleted viewer anchor adds at most four pages; scrolling can continue', async () => {
   const rows = Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(4, '0'), sortDay: '', sortTime: '', day: null, dateConflict: 0, photos: 1, videos: 0, favorite: 0 }));
   let reads = 0;
-  const grid = new LibraryGrid(async cursor => { reads++; const from = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0; return rows.slice(from, from + 31); }, async () => []);
+  const grid = new LibraryGrid(async cursor => { reads++; const from = cursor ? rows.findIndex(row => row.id === cursor.id) + 1 : 0; return rows.slice(from, from + 31); });
   await grid.load(); await grid.extendFeedTo(rows.at(-1)!);
   assert.equal(reads, 5); assert.equal(grid.feedRows.length, 150); assert.equal(grid.feedRows[0]?.id, '0000');
   await grid.nextPage(); assert.equal(grid.feedRows.length, 180);
@@ -136,7 +135,7 @@ test('a save that completes after the viewer closed, before the browser renders 
     open('f00');
     saves.hold();
     const saving = writes.toggle('f00', true);            // Unfavourite A; the save is held.
-    assert.equal(await grid.closedViewer(latest.sequence!.current), 'kept'); // Viewer closed …
+    await grid.extendFeedTo(latest.sequence!.current); // Viewer closed …
     // … but no render yet: latest.sequence still points at the departing sequence.
     assert.ok(latest.sequence);
     await saves.release(); await saving;
@@ -189,7 +188,7 @@ test('emptying the first Favourites page in the viewer shows the later favourite
   }
   // The page emptied while the viewer was open: the grid read it again underneath.
   await tick(); await tick();
-  assert.equal(await grid.closedViewer(latest.sequence!.current), 'jumped', 'the closed-on memory is no longer on the re-read page');
+  await grid.extendFeedTo(latest.sequence!.current);
   assert.deepEqual(grid.rows.map(row => row.id), ['f30']);
   assert.equal(grid.hasNext, false); assert.deepEqual(grid.filters, favourites);
 });
@@ -201,7 +200,7 @@ test('emptying a later page in the viewer steps back to the earlier page', async
   const sequence = open('f30');
   await writes.toggle('f30', true); await tick(); await tick();
   assert.equal(sequence.current.id, 'f30', 'still open');
-  await grid.closedViewer(latest.sequence!.current);
+  await grid.extendFeedTo(latest.sequence!.current);
   assert.equal(grid.cursor, null); assert.equal(grid.rows.length, 30); assert.equal(grid.rows[0]!.id, 'f00');
 });
 
@@ -222,12 +221,13 @@ test('pagination, history, a superseded response and returning to another page',
   await reads.release(); await stale;
   assert.deepEqual(grid.rows.map(row => row.id), ['f28', 'f29', 'f30', 'f31', 'f32', 'f33', 'f34'], 'the older response was ignored');
   await grid.setFilters(all);
-  // Close the viewer on a memory from another page: a page starts there, and Previous returns here.
+  // Closing beyond the loaded feed appends that page while retaining every earlier row.
   const sequence = open('f29');
   await sequence.move('next'); await sequence.move('next');
   assert.equal(sequence.current.id, 'f31');
-  assert.equal(await grid.closedViewer(sequence.current), 'jumped');
-  assert.equal(grid.rows[0]!.id, 'f31'); assert.equal(grid.history.length, 1);
+  await grid.extendFeedTo(sequence.current);
+  assert.equal(grid.rows[0]!.id, 'f30'); assert.equal(grid.history.length, 1);
+  assert.deepEqual(grid.feedRows.map(row => row.id), Array.from({ length: 35 }, (_, i) => id(i)));
   await grid.previousPage();
   assert.equal(grid.rows[0]!.id, 'f00');
 });
@@ -284,7 +284,7 @@ test('re-reads stay bounded when saves keep completing during every read; supers
   type Row = ChronologicalRow;
   const row = (memory: string): Row => ({ id: memory, day: '2026-01-01', instant: null, dateConflict: 0, photos: 1, videos: 0, overlays: 0, favorite: 1, sortDay: '2026-01-01', sortTime: '' });
   let reads = 0;
-  const grid: LibraryGrid<Row> = new LibraryGrid<Row>(async () => { reads++; grid.favoriteSaved(`other-${reads}`, true); return [row('a')]; }, async () => []);
+  const grid: LibraryGrid<Row> = new LibraryGrid<Row>(async () => { reads++; grid.favoriteSaved(`other-${reads}`, true); return [row('a')]; });
   grid.filters = favourites;
   await grid.load();
   assert.equal(reads, 1 + LibraryGrid.REREADS, 'one read plus the bounded re-reads');

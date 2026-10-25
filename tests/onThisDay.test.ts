@@ -59,8 +59,7 @@ async function allRows(store: ImportStore, filters = defaultFilters): Promise<Ch
   }
 }
 const gridFor = (store: ImportStore) => new LibraryGrid<ChronologicalRow>(
-  (cursor, filters) => store.chronologicalPage(cursor, 31, filters),
-  (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters));
+  (cursor, filters) => store.chronologicalPage(cursor, 31, filters));
 
 test('On this day reference dates are complete calendar days and mutually exclusive with month', () => {
   for (const day of [reference, '2028-02-29', '0001-01-01']) {
@@ -163,13 +162,13 @@ test('late favourite removals and additions during an On this day read keep memb
     const page = await store.chronologicalPage(cursor, 31, filters);
     if (hold) { hold = false; await gate; }
     return page;
-  }, (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters));
+  });
   await grid.setFilters({ ...scope, favorites: true });
   const rows = grid.rows;
   const sequence = new MemorySequence(rows, 0, (key, direction, limit) => store.chronologicalAdjacent(key, direction, limit, grid.filters));
   // Keep the departing sequence pointer stale, exactly as a save completing before the closing render can see it.
   const writes = new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite), favoriteSavedHandler(grid, () => sequence));
-  await grid.closedViewer(sequence.current);
+  await grid.extendFeedTo(sequence.current);
   hold = true; const reading = grid.retry();
   await writes.toggle('m00', true); await writes.toggle('m02', false);
   release(); await reading;
@@ -189,7 +188,7 @@ test('UTC rollover refreshes history and ignores the old read; fullscreen keeps 
   assert.equal(grid.filters.onThisDay, reference, 'same guard as LibraryBrowser: no refresh while fullscreen');
   assert.ok(matchesFilters(sequence.current, captured));
   viewerOpen = false;
-  await (grid.refreshDay(utcDay(now)) ?? grid.closedViewer(sequence.current));
+  await (grid.refreshDay(utcDay(now)) ?? grid.extendFeedTo(sequence.current));
   assert.deepEqual(grid.rows.map(row => row.id), ['after']);
   assert.equal(grid.cursor, null); assert.deepEqual(grid.history, []);
   assert.equal(grid.filters.onThisDay, '2026-10-24');
@@ -213,7 +212,7 @@ test('a day change supersedes held results while retaining media and favourite f
     const page = await store.chronologicalPage(cursor, 31, filters);
     if (hold) { hold = false; await gate; }
     return page;
-  }, (key, filters) => store.chronologicalAdjacent(key, 'previous', 1, filters));
+  });
   await grid.setFilters({ ...scope, media: 'photos', favorites: true });
   hold = true; const old = grid.retry(); await tick();
   await grid.refreshDay('2026-10-24'); release(); await old;

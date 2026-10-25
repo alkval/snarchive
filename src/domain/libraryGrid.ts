@@ -6,8 +6,6 @@ import { validReferenceDay } from './onThisDay.ts';
 export type GridRow = { id: string; sortDay: string; sortTime: string; photos: number; videos: number; favorite: number; day: string | null; dateConflict: number };
 /** Reads up to 31 rows after `cursor` (30 to show, one to know whether a next page exists). */
 export type FetchPage<T> = (cursor: SequenceKey | null, filters: LibraryFilters) => Promise<T[]>;
-/** Reads the one row just before `key`, to start a page at the memory with that key. */
-export type FetchBefore<T> = (key: SequenceKey, filters: LibraryFilters) => Promise<T[]>;
 
 /** The grid's page, filters and history, kept apart from React so the timing between page reads and favourite saves
  * can be tested.
@@ -37,11 +35,10 @@ export class LibraryGrid<T extends GridRow> {
   private saves = 0;
   private listeners = new Set<() => void>();
   private readonly fetchPage: FetchPage<T>;
-  private readonly fetchBefore: FetchBefore<T>;
 
   static readonly REREADS = 3;
 
-  constructor(fetchPage: FetchPage<T>, fetchBefore: FetchBefore<T>) { this.fetchPage = fetchPage; this.fetchBefore = fetchBefore; }
+  constructor(fetchPage: FetchPage<T>) { this.fetchPage = fetchPage; }
 
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   private changed() { for (const listener of [...this.listeners]) listener(); }
@@ -126,23 +123,6 @@ export class LibraryGrid<T extends GridRow> {
       await this.nextPage();
       if (this.request !== expected) return;
     }
-  }
-
-  /** Legacy paged-grid return. The continuous browser uses extendFeedTo instead.
-   * Back from the viewer on `last`. On this page: the page stays (scroll position too); saves are already applied,
-   * and an emptied page was already re-read. Elsewhere: a page starting at `last` opens, and Previous returns here. */
-  async closedViewer(last: GridRow): Promise<'kept' | 'jumped'> {
-    if (this.page.some(row => row.id === last.id)) return 'kept';
-    const request = ++this.request, from = this.cursor, past = this.history;
-    this.pages.clear();
-    let before: T[];
-    try { before = await this.fetchBefore(keyOf(last), this.filters); }
-    catch { if (request === this.request) await this.load(); return 'jumped'; }
-    if (request !== this.request) return 'jumped';
-    const start = before[0] ? keyOf(before[0]) : null;
-    this.history = start ? [...past, from] : []; this.cursor = start;
-    await this.load();
-    return 'jumped';
   }
 }
 
