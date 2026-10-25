@@ -196,3 +196,13 @@ test('a height-only stage change keeps the zoom within bounds; a width change re
   g.layout({ width: 420, height: 776 }, landscape); // A window or orientation change.
   assert.deepEqual(g.transform, IDENTITY);
 });
+
+test('vertical swipes open details or return at fit, never while zoomed, multi-touching or cancelled', () => {
+  const g = photo(); drag(g, 0, -160); assert.equal(g.verticalSwipe, 'up');
+  drag(g, 0, 160); assert.equal(g.verticalSwipe, 'down');
+  drag(g, 0, 40); assert.equal(g.verticalSwipe, null);
+  g.adjust('zoom-in'); drag(g, 0, -160); assert.equal(g.verticalSwipe, null);
+  g.reset(); g.begin([finger(0, 0)], 0); g.touchesChanged([finger(0, 0), finger(100, 0, 2)], 10);
+  g.touchesChanged([finger(0, 0)], 20); g.move([finger(0, -160)], 30); g.end(40, 0); assert.equal(g.verticalSwipe, null);
+  g.reset(); g.begin([finger(0, 0)], 0); g.move([finger(0, -160)], 20); g.cancel(); assert.equal(g.verticalSwipe, null);
+});

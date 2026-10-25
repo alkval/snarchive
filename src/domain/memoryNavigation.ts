@@ -41,6 +41,19 @@ export class MemorySequence<T extends SequenceRow> {
   }
 
   get current(): T { return this.rows[this.index]!; }
+  peek(direction: Direction): T | undefined { return this.rows[this.index + (direction === 'next' ? 1 : -1)]; }
+  /** Removes a deleted row and selects a neighbour, loading at the old strict cursor if necessary. */
+  async remove(id: string): Promise<T | null> {
+    if (this.current?.id === id) {
+      const next = await this.move('next');
+      if (next !== 'moved') await this.move('previous');
+    }
+    const at = this.rows.findIndex(row => row.id === id);
+    if (at >= 0) { this.rows.splice(at, 1); if (at < this.index) this.index--; }
+    if (!this.rows.length) { this.moves++; this.changed(); return null; }
+    this.index = Math.min(this.index, this.rows.length - 1); this.leaving = false; this.moves++; this.changed();
+    return this.current;
+  }
   /** A loaded memory by ID, if it is still in the window. */
   row(id: string): T | undefined { return this.rows.find(row => row.id === id); }
   /** Loaded row IDs in order; for tests. */
@@ -72,6 +85,7 @@ export class MemorySequence<T extends SequenceRow> {
 
   /** Moves one memory. Loads the next batch first if needed. Never moves twice for one call. */
   async move(direction: Direction): Promise<MoveResult> {
+    if (!this.rows.length) return 'end';
     const moves = this.moves;
     if (!this.hasLoaded(direction)) {
       await this.load(direction);
@@ -95,6 +109,7 @@ export class MemorySequence<T extends SequenceRow> {
 
   /** Loads the neighbours of the open memory that are not loaded yet; used when the viewer opens. */
   prepare(): void {
+    if (!this.rows.length) return;
     for (const direction of ['previous', 'next'] as const) if (!this.hasLoaded(direction) && !this.ended[direction]) void this.load(direction);
   }
 

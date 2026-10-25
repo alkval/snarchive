@@ -275,7 +275,7 @@ test('version rules: folder records need version 2, a forged folder identity is 
   const { db, store } = await library(t); await run(store, new Copier(EXPORT), await plan(store, EXPORT));
   const text = await manifest(db); const lines = text.trim().split('\n');
   rejectsManifest(text.replace('"version":2', '"version":1'), 'backup-invalid');
-  rejectsManifest(text.replace('"version":2', '"version":3'), 'backup-unsupported');
+  rejectsManifest(text.replace('"version":2', '"version":4'), 'backup-unsupported');
   const folderLine = lines.findIndex(line => line.includes('"type":"folder"'));
   const record = JSON.parse(lines[folderLine]!); const forged = 'e'.repeat(64);
   record.inventorySha256 = forged; record.inventory.identities = [[`folder:${forged}`, 'source-1']];
@@ -296,13 +296,13 @@ test('a library without folder jobs still writes version 1, and version 1 backup
   assert.equal((target.db.raw.prepare('SELECT kind FROM import_jobs').get() as { kind: string }).kind, 'zip');
 });
 
-test('schema 3 libraries migrate to 5: existing jobs become ZIP jobs and folder jobs can be added', async t => {
+test('schema 3 libraries migrate to 6: existing jobs become ZIP jobs and folder jobs can be added', async t => {
   const { db, store } = await library(t); const zip = '0'.repeat(64);
   await store.plan(zip, inventoryFromSnapshot({ entries: [{ path: '2026-02-05_one-main.jpg' }], metadataBytes: 0, visitedEntries: 1 }, 'source-1'));
   await store.commit(zip, 0, receiptFor('photo one'));
   db.raw.exec('ALTER TABLE import_jobs DROP COLUMN kind; PRAGMA user_version=3;');
   await store.initialize(); await store.initialize();
-  assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+  assert.equal((db.raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
   assert.equal((db.raw.prepare('SELECT kind FROM import_jobs').get() as { kind: string }).kind, 'zip');
   assert.throws(() => db.raw.exec("UPDATE import_jobs SET kind='other'"));
   const hash = await plan(store, EXPORT); await run(store, new Copier(EXPORT), hash);

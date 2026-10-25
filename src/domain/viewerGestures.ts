@@ -83,7 +83,7 @@ export function samePhotoControls(a: PhotoControlState | null, b: PhotoControlSt
   return !!a && a.ready === b.ready && a.percent === b.percent && PHOTO_ADJUSTMENTS.every(action => a.enabled[action] === b.enabled[action]);
 }
 
-type Mode = 'idle' | 'pending' | 'swipe' | 'pan' | 'pinch' | 'ignored';
+type Mode = 'idle' | 'pending' | 'swipe' | 'vertical' | 'pan' | 'pinch' | 'ignored';
 export type GestureEnd = { navigate: Navigation | null; tapped: boolean };
 
 /** One gesture at a time over the stage. While zoomed, one finger pans and never navigates; two fingers always
@@ -92,6 +92,7 @@ export class StageGestures {
   transform: Transform = IDENTITY;
   /** Horizontal offset shown while an unzoomed swipe is in progress; 0 otherwise. */
   swipeOffset = 0;
+  verticalSwipe: 'up' | 'down' | null = null;
   private stage: Size = { width: 0, height: 0 };
   private drawn: Size = { width: 0, height: 0 };
   private content: Size = { width: 0, height: 0 };
@@ -131,9 +132,10 @@ export class StageGestures {
     if (!sameContent || !sameWidth) this.reset();
     else this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }
-  reset(): void { this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.count = 0; this.lastTap = null; }
+  reset(): void { this.verticalSwipe = null; this.transform = IDENTITY; this.swipeOffset = 0; this.mode = 'idle'; this.multi = false; this.count = 0; this.lastTap = null; }
 
   begin(touches: readonly Touch[], time: number): void {
+    this.verticalSwipe = null;
     this.multi = touches.length > 1; this.swipeOffset = 0; this.count = touches.length;
     if (touches.length > 1) { this.startPinch(touches); return; }
     const touch = touches[0];
@@ -172,6 +174,7 @@ export class StageGestures {
       if (Math.hypot(dx, dy) < TAP.slop) return;
       if (this.zoomable && isZoomed(this.transform)) this.mode = 'pan';
       else if (!this.multi && Math.abs(dx) > SWIPE.dominance * Math.abs(dy)) this.mode = 'swipe';
+      else if (!this.multi && Math.abs(dy) > SWIPE.dominance * Math.abs(dx)) this.mode = 'vertical';
       else this.mode = 'ignored';
     }
     if (this.mode === 'pan') this.transform = clampTransform({ scale: this.base.scale, x: this.base.x + dx, y: this.base.y + dy }, this.drawn, this.stage);
@@ -183,6 +186,7 @@ export class StageGestures {
     const mode = this.mode, dx = this.last.x - this.start.x, dy = this.last.y - this.start.y;
     this.mode = 'idle'; this.swipeOffset = 0;
     this.count = 0;
+    this.verticalSwipe = mode === 'vertical' && !this.multi && Math.abs(dy) >= 72 ? (dy < 0 ? 'up' : 'down') : null;
     if (mode === 'swipe' && !this.multi) return { navigate: swipeDecision(dx, dy, velocityX, this.stage.width), tapped: false };
     if (mode === 'pending' && !this.multi && time - this.start.time <= TAP.maxDuration) {
       const tap = { x: this.start.x, y: this.start.y, time };
@@ -200,6 +204,7 @@ export class StageGestures {
   /** The system took the gesture away (another responder, a dialog, the app backgrounding): never navigate, keep any
    * zoom already applied, within bounds. */
   cancel(): void {
+    this.verticalSwipe = null;
     this.mode = 'idle'; this.swipeOffset = 0; this.lastTap = null; this.count = 0;
     this.transform = clampTransform(this.transform, this.drawn, this.stage);
   }

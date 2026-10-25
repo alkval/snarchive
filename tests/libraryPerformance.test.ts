@@ -108,5 +108,5 @@ test('chronological reads do not write rows, change the schema or exceed the req
   await assert.rejects(store.chronologicalPage(null, 101));
   assert.equal(db.raw.prepare('SELECT total_changes() n').get()!.n, changes);
   assert.deepEqual(db.raw.prepare("SELECT sql FROM sqlite_master ORDER BY name").all(), schema);
-  assert.equal(db.raw.prepare('PRAGMA user_version').get()!.user_version, 5);
+  assert.equal(db.raw.prepare('PRAGMA user_version').get()!.user_version, 6);
 });

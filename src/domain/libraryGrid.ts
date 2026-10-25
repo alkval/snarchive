@@ -22,6 +22,8 @@ export type FetchBefore<T> = (key: SequenceKey, filters: LibraryFilters) => Prom
  * in that read. So a Favourites read during which any save completed is read again, and so is the page shown when a
  * save adds a Favourites member it lacks. Emptiness is judged on the 30 rows shown, never on the lookahead row. */
 export class LibraryGrid<T extends GridRow> {
+  private readonly pages = new Map<string, T[]>();
+  private readonly removed = new Set<string>();
   filters: LibraryFilters = { ...defaultFilters };
   cursor: SequenceKey | null = null;
   history: (SequenceKey | null)[] = [];
@@ -47,7 +49,13 @@ export class LibraryGrid<T extends GridRow> {
   /** The page as read, before saves are applied; its identity changes only when a new page is read. */
   get pageRows(): readonly T[] { return this.page; }
   /** What the grid shows: the page with every completed favourite save applied (hearts, and Favourites membership). */
-  get rows(): T[] { return patchFavorites(this.page, this.saved, this.filters); }
+  get rows(): T[] { return patchFavorites(this.page, this.saved, this.filters).filter(row => !this.removed.has(row.id)); }
+  /** Virtualized scrolling keeps row metadata, never decoded images, for pages already visited. */
+  get feedRows(): T[] {
+    const seen = new Set<string>();
+    return [...this.pages.values()].flatMap(page => patchFavorites(page, this.saved, this.filters))
+      .filter(row => { if (seen.has(row.id) || this.removed.has(row.id)) return false; seen.add(row.id); return true; });
+  }
   get hasNext(): boolean { return this.more; }
 
   /** Reads the current page. Superseded reads (a newer read, filter or page change started meanwhile) are ignored. */
@@ -66,10 +74,11 @@ export class LibraryGrid<T extends GridRow> {
       if (again && this.filters.favorites && this.saves !== saves) { rereads++; continue; }
       // The rows that would be shown are all gone after saves: read again rather than show an empty page.
       const shown = page.slice(0, 30);
-      if (again && shown.length && !patchFavorites(shown, this.saved, this.filters).length) { rereads++; continue; }
+      if (again && shown.length && !patchFavorites(shown, this.saved, this.filters).some(row => !this.removed.has(row.id))) { rereads++; continue; }
       const fallback = page.length ? null : emptyPageFallback(this.cursor, this.history);
       if (fallback) { this.cursor = fallback.cursor; this.history = fallback.history; continue; }
-      this.page = page.slice(0, 30); this.more = page.length > 30; this.loading = false; this.changed();
+      this.page = page.slice(0, 30); this.pages.set(JSON.stringify(this.cursor), this.page);
+      this.more = page.length > 30; this.loading = false; this.changed();
       return;
     }
   }
@@ -85,7 +94,9 @@ export class LibraryGrid<T extends GridRow> {
     if (emptied || added) void this.load();
   }
 
-  setFilters(filters: LibraryFilters): Promise<void> { this.filters = { ...filters }; this.cursor = null; this.history = []; return this.load(); }
+  memoryDeleted(id: string): void { this.removed.add(id); this.saves++; this.changed(); if (!this.loading && !this.rows.length) void this.load(); }
+  refresh(): Promise<void> { this.pages.clear(); this.removed.clear(); this.saved.clear(); this.cursor = null; this.history = []; return this.load(); }
+  setFilters(filters: LibraryFilters): Promise<void> { this.filters = { ...filters }; return this.refresh(); }
   /** Refresh only an active On this day scope. The UI defers this while fullscreen is open, then calls it on Back. */
   refreshDay(day: string): Promise<void> | null {
     if (!validReferenceDay(day)) throw new Error('invalid-reference-day');
@@ -110,6 +121,7 @@ export class LibraryGrid<T extends GridRow> {
   async closedViewer(last: GridRow): Promise<'kept' | 'jumped'> {
     if (this.page.some(row => row.id === last.id)) return 'kept';
     const request = ++this.request, from = this.cursor, past = this.history;
+    this.pages.clear();
     let before: T[];
     try { before = await this.fetchBefore(keyOf(last), this.filters); }
     catch { if (request === this.request) await this.load(); return 'jumped'; }

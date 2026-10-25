@@ -7,10 +7,9 @@ export const MAX_MANIFEST_BYTES = 128 * 1024 * 1024;
 export const MAX_BACKUP_OBJECTS = 100_000;
 export const MAX_BACKUP_BYTES = 64 * 1024 ** 3;
 /** The library schema this format covers. A new migration must extend the snapshot (and this) first. */
-export const BACKUP_SCHEMA_VERSION = 5;
-/** Version 1 has ZIP sources only; version 2 adds extracted-folder sources (section 21). The writer uses version 1
- * whenever the library has no folder job, so those backups stay readable by version-1 readers. */
-export const BACKUP_FORMAT_VERSION = 2;
+export const BACKUP_SCHEMA_VERSION = 6;
+/** v1: ZIP jobs. v2: folder jobs. v3: permanent-deletion markers. Writers use the oldest sufficient version. */
+export const BACKUP_FORMAT_VERSION = 3;
 /** Rows per query: each query is a native round trip inside the exclusive transaction. */
 const BATCH = 500;
 /** The sink writes to private staging, never directly to a user-visible completed backup.
@@ -45,9 +44,23 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
     check(!await tx.getFirstAsync(`SELECT 1 FROM library_favorites f WHERE NOT EXISTS (
       SELECT 1 FROM memory_objects m WHERE m.memory_id=f.memory_id AND m.role!='overlay') LIMIT 1`));
     check(!await tx.getFirstAsync('SELECT 1 FROM import_items i WHERE NOT EXISTS (SELECT 1 FROM import_jobs j WHERE j.hash=i.job_hash) LIMIT 1'));
-    const folders = !!await tx.getFirstAsync("SELECT 1 FROM import_jobs WHERE kind='folder' LIMIT 1");
+    check(!await tx.getFirstAsync('SELECT 1 FROM memory_deletions d JOIN memory_objects m ON m.memory_id=d.memory_id LIMIT 1'));
+    const flags = await tx.getFirstAsync<{ folders: number; deletions: number }>("SELECT EXISTS(SELECT 1 FROM import_jobs WHERE kind='folder') AS folders,EXISTS(SELECT 1 FROM memory_deletions) AS deletions");
+    const folders = !!flags?.folders;
     check(!await tx.getFirstAsync("SELECT 1 FROM import_jobs WHERE kind NOT IN ('zip','folder') LIMIT 1"));
-    await emit({ type: 'header', format: 'snarchive-backup', version: folders ? 2 : 1 });
+    const deletions = !!flags?.deletions;
+    await emit({ type: 'header', format: 'snarchive-backup', version: deletions ? 3 : folders ? 2 : 1 });
+    let deletedAfter = '', deletedCount = 0;
+    const untracedDeletions = new Set<string>();
+    for (; deletions;) {
+      const rows = await tx.getAllAsync<{ memory_id: string }>(`SELECT memory_id FROM memory_deletions WHERE memory_id>? ORDER BY memory_id LIMIT ${BATCH}`, deletedAfter);
+      for (const row of rows) {
+        check(/^[A-Za-z0-9_-]{1,1024}$/.test(row.memory_id) && ++deletedCount <= MAX_BACKUP_OBJECTS);
+        untracedDeletions.add(row.memory_id);
+        await emit({ type: 'deleted', memoryId: row.memory_id }); deletedAfter = row.memory_id;
+      }
+      if (rows.length < BATCH) break;
+    }
     let after = '';
     while (true) {
       stop();
@@ -71,6 +84,7 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
         const saved = decodePreview(row.plan_json);
         check(saved.sourceIds.size === 1 && saved.sourceIds.has(`${kind}:${info.hash}`));
         const source = saved.preview.sources[0]!;
+        for (const file of source.files) untracedDeletions.delete(file.memorySourceId);
         // A folder job's key must be the hash of its inventory as written, so a reader can verify the record. Jobs are in
         // canonical order (schema 5); one kept in listing order by that migration is written as it is, and still checks.
         if (kind === 'folder') check(listedFolderHash(source) === info.hash);
@@ -100,6 +114,7 @@ export async function writeBackupSnapshot(db: SqlDatabase, sink: SnapshotSink, c
         check(ordinal + 1 === source.files.length); after = info.hash;
       }
     }
+    check(untracedDeletions.size === 0);
     after = '';
     while (true) {
       stop(); const rows = await tx.getAllAsync<{ memory_id: string }>(`SELECT memory_id FROM library_favorites WHERE memory_id>? ORDER BY memory_id LIMIT ${BATCH}`, after);

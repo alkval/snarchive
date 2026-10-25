@@ -109,7 +109,7 @@ test('cancellation during manifest reading or verification stops before more wor
 
 test('unsupported versions and malformed headers are refused', async t => {
   const { db } = await library(t); const records = await lines(db);
-  rejects(edit(records, 0, value => { value.version = 3; }).join(''), 'backup-unsupported');
+  rejects(edit(records, 0, value => { value.version = 4; }).join(''), 'backup-unsupported');
   rejects(edit(records, 0, value => { value.version = '1'; }).join(''));
   rejects(edit(records, 0, value => { value.format = 'other-backup'; }).join(''));
   rejects(records.slice(1).join(''));                                   // header missing

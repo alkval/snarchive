@@ -10,7 +10,7 @@ export type ImportItem = { ordinal: number; relative_path: string; memory_id: st
 export type ImportSummary = { files: number; objects: number; memories: number; unfinished: number; conflicts: number };
 function check(ok: unknown): asserts ok { if (!ok) throw new Error('invalid-import-state'); }
 /** Bump with each migration. The backup snapshot pins the version it covers; a test fails when they diverge. */
-export const LIBRARY_SCHEMA_VERSION = 5;
+export const LIBRARY_SCHEMA_VERSION = 6;
 export function validateReceipt(value: Receipt): void {
   check(/^[a-f0-9]{64}$/.test(value.sha256));
   check(value.relativePath === `objects/${value.sha256.slice(0, 2)}/${value.sha256}`);
@@ -72,7 +72,7 @@ export async function canonicalizeFolderJobs(tx: SqlConnection): Promise<void> {
     }
     await tx.runAsync('DELETE FROM import_items WHERE job_hash=?', hash);
     await tx.runAsync('DELETE FROM import_jobs WHERE hash=?', hash);
-    const pending = await tx.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='pending' LIMIT 1", key);
+    const pending = await tx.getFirstAsync("SELECT 1 FROM import_items i WHERE job_hash=? AND state='pending' AND NOT EXISTS(SELECT 1 FROM memory_deletions d WHERE d.memory_id=i.memory_id) LIMIT 1", key);
     const anyDone = await tx.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='done' LIMIT 1", key);
     const state = !pending ? 'completed' : anyDone && target.state === 'planned' ? 'paused' : target.state;
     await tx.runAsync('UPDATE import_jobs SET state=? WHERE hash=?', state, key);
@@ -92,7 +92,7 @@ export class ImportStore {
     await this.db.withExclusiveTransactionAsync(async tx => {
       const version = await tx.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
       if (version?.user_version === LIBRARY_SCHEMA_VERSION) return;
-      check(version && [0, 1, 2, 3, 4].includes(version.user_version));
+      check(version && [0, 1, 2, 3, 4, 5].includes(version.user_version));
       if (version.user_version < 2) {
         if (version.user_version === 0) await tx.execAsync(`
           CREATE TABLE import_jobs (hash TEXT PRIMARY KEY, state TEXT NOT NULL CHECK(state IN ('planned','running','paused','completed')), plan_json TEXT NOT NULL);
@@ -118,8 +118,9 @@ export class ImportStore {
       // Schema 4 (section 21): a job is a ZIP archive or an extracted folder. Existing jobs are all ZIP jobs.
       if (version.user_version < 4) await tx.execAsync("ALTER TABLE import_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'zip' CHECK(kind IN ('zip','folder'));");
       // Schema 5 (section 21 review): folder evidence in canonical order, independent of provider listing order.
+      await tx.execAsync('CREATE TABLE IF NOT EXISTS memory_deletions(memory_id TEXT PRIMARY KEY);');
       await canonicalizeFolderJobs(tx);
-      await tx.execAsync('PRAGMA user_version = 5;');
+      await tx.execAsync('PRAGMA user_version = 6;');
     });
   }
   async plan(hash: string, source: SourceInventory): Promise<void> {
@@ -155,10 +156,10 @@ export class ImportStore {
     });
   }
   async item(hash: string, after: number): Promise<ImportItem | null> {
-    return this.db.getFirstAsync<ImportItem>(`SELECT i.ordinal,i.relative_path,i.memory_id,i.role,i.state,i.object_hash,o.bytes FROM import_items i LEFT JOIN stored_objects o ON o.hash=i.object_hash WHERE i.job_hash=? AND i.ordinal>? ORDER BY i.ordinal LIMIT 1`, hash, after);
+    return this.db.getFirstAsync<ImportItem>(`SELECT i.ordinal,i.relative_path,i.memory_id,i.role,i.state,i.object_hash,o.bytes FROM import_items i LEFT JOIN stored_objects o ON o.hash=i.object_hash WHERE i.job_hash=? AND i.ordinal>? AND NOT EXISTS(SELECT 1 FROM memory_deletions d WHERE d.memory_id=i.memory_id) ORDER BY i.ordinal LIMIT 1`, hash, after);
   }
   async hasPending(hash: string): Promise<boolean> {
-    return !!(await this.db.getFirstAsync("SELECT 1 FROM import_items WHERE job_hash=? AND state='pending' LIMIT 1", hash));
+    return !!(await this.db.getFirstAsync("SELECT 1 FROM import_items i WHERE job_hash=? AND state='pending' AND NOT EXISTS(SELECT 1 FROM memory_deletions d WHERE d.memory_id=i.memory_id) LIMIT 1", hash));
   }
   async copiedBytes(hash: string): Promise<number> {
     const row = await this.db.getFirstAsync<{ bytes: number }>('SELECT coalesce(sum(o.bytes),0) AS bytes FROM import_items i JOIN stored_objects o ON o.hash=i.object_hash WHERE i.job_hash=?', hash);
@@ -167,7 +168,7 @@ export class ImportStore {
   async state(hash: string, state: 'running' | 'paused' | 'completed') {
     await this.db.withExclusiveTransactionAsync(async tx => {
       check(await tx.getFirstAsync('SELECT hash FROM import_jobs WHERE hash=?', hash));
-      if (state === 'completed') check(!(await tx.getFirstAsync('SELECT ordinal FROM import_items WHERE job_hash=? AND state=\'pending\' LIMIT 1', hash)));
+      if (state === 'completed') check(!(await tx.getFirstAsync('SELECT ordinal FROM import_items i WHERE job_hash=? AND state=\'pending\' AND NOT EXISTS(SELECT 1 FROM memory_deletions d WHERE d.memory_id=i.memory_id) LIMIT 1', hash)));
       await tx.runAsync('UPDATE import_jobs SET state=? WHERE hash=?', state, hash);
     });
   }
@@ -175,6 +176,7 @@ export class ImportStore {
     validateReceipt(receipt);
     await this.db.withExclusiveTransactionAsync(async tx => {
       const item = await tx.getFirstAsync<ImportItem>('SELECT * FROM import_items WHERE job_hash=? AND ordinal=?', hash, ordinal); check(item);
+      if (await tx.getFirstAsync('SELECT 1 FROM memory_deletions WHERE memory_id=?', item.memory_id)) return;
       if (item.state === 'done') { check(item.object_hash === receipt.sha256); return; }
       await tx.runAsync('INSERT INTO stored_objects(hash,relative_path,bytes) VALUES (?,?,?) ON CONFLICT(hash) DO NOTHING', receipt.sha256, receipt.relativePath, receipt.bytes);
       const stored = await tx.getFirstAsync<{ bytes: number; relative_path: string }>('SELECT bytes,relative_path FROM stored_objects WHERE hash=?', receipt.sha256);
@@ -183,6 +185,30 @@ export class ImportStore {
       await tx.runAsync('INSERT OR IGNORE INTO memory_objects(memory_id,role,object_hash) VALUES (?,?,?)', item.memory_id, item.role, receipt.sha256);
       await tx.runAsync('UPDATE import_items SET state=\'done\',object_hash=? WHERE job_hash=? AND ordinal=?', receipt.sha256, hash, ordinal);
     });
+  }
+  /** Permanently remove a memory's associations, with a tombstone so resuming its export cannot resurrect it.
+   * The caller holds the native cleanup guard. Files are unlinked only after this transaction commits. */
+  async deleteMemory(id: string): Promise<Receipt[]> {
+    const removable: Receipt[] = [];
+    await this.db.withExclusiveTransactionAsync(async tx => {
+      if (!await tx.getFirstAsync('SELECT 1 FROM memories WHERE id=?', id)) return;
+      const candidates = await tx.getAllAsync<{ sha256: string; relativePath: string; bytes: number }>(`SELECT hash AS sha256,relative_path AS relativePath,bytes FROM stored_objects WHERE hash IN (
+        SELECT object_hash FROM memory_objects WHERE memory_id=? UNION SELECT object_hash FROM import_items WHERE memory_id=? AND object_hash IS NOT NULL)`, id, id);
+      candidates.forEach(validateReceipt);
+      await tx.runAsync('INSERT OR IGNORE INTO memory_deletions(memory_id) VALUES (?)', id);
+      await tx.runAsync('DELETE FROM library_favorites WHERE memory_id=?', id);
+      await tx.runAsync('DELETE FROM memory_objects WHERE memory_id=?', id);
+      // Date evidence belongs to retained source plans, including pending/deleted observations. Keep this derived
+      // index so an explicit restore can recover the dates and conflicts as well as the original bytes.
+      await tx.runAsync('DELETE FROM memories WHERE id=?', id);
+      await tx.runAsync("UPDATE import_items SET state='pending',object_hash=NULL WHERE memory_id=?", id);
+      for (const object of candidates) {
+        const used = await tx.getFirstAsync(`SELECT 1 WHERE EXISTS(SELECT 1 FROM memory_objects WHERE object_hash=?) OR EXISTS(SELECT 1 FROM import_items WHERE object_hash=?)`, object.sha256, object.sha256);
+        if (!used) { await tx.runAsync('DELETE FROM stored_objects WHERE hash=?', object.sha256); removable.push(object); }
+      }
+      await tx.runAsync(`UPDATE import_jobs SET state='completed' WHERE NOT EXISTS(SELECT 1 FROM import_items i WHERE i.job_hash=import_jobs.hash AND i.state='pending' AND NOT EXISTS(SELECT 1 FROM memory_deletions d WHERE d.memory_id=i.memory_id))`);
+    });
+    return removable;
   }
   /** Stable ID order; only committed base objects are visible. Each page is bounded. */
   async page(after = '', limit = 30): Promise<LibraryRow[]> {

@@ -12,6 +12,7 @@ import java.util.regex.Pattern
 
 /** Disposable derivatives only. Originals are confirmed present on cache misses and never changed. */
 class ThumbnailCache(private val files: File, private val cache: File) {
+  @Synchronized fun evict(hash: String) { ThumbnailFiles.evict(cache, hash) }
   private val root = File(cache, "snarchive-thumbnails-v1")
   private var index: LruFileIndex? = null
 

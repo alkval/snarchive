@@ -9,6 +9,8 @@ export type StageCallbacks = {
   /** Shows a transform; `settle` animates to it (end of a gesture). */
   show: (transform: Transform, settle: boolean) => void;
   navigate: (direction: Navigation) => void;
+  vertical?: (direction: 'up' | 'down') => void;
+  locked?: () => boolean;
   now?: () => number;
 };
 
@@ -18,8 +20,8 @@ export type StageCallbacks = {
 export function stageResponderConfig(gestures: StageGestures, callbacks: StageCallbacks) {
   const now = callbacks.now ?? Date.now;
   return {
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponder: () => !callbacks.locked?.(),
+    onMoveShouldSetPanResponder: () => !callbacks.locked?.(),
     // Keep a gesture once it has started, so a pan or pinch is not handed to another view halfway.
     onPanResponderTerminationRequest: () => !gestures.active,
     onPanResponderGrant: (event: StageEvent) => {
@@ -31,8 +33,8 @@ export function stageResponderConfig(gestures: StageGestures, callbacks: StageCa
     onPanResponderEnd: (event: StageEvent) => { gestures.touchesChanged(callbacks.touches(event), now()); callbacks.show(gestures.transform, false); },
     onPanResponderRelease: (_event: StageEvent, state: { vx: number }) => {
       const result = gestures.end(now(), state.vx);
-      callbacks.show(gestures.transform, true);
       if (result.navigate) callbacks.navigate(result.navigate);
+      else { callbacks.show(gestures.transform, true); if (gestures.verticalSwipe) callbacks.vertical?.(gestures.verticalSwipe); }
     },
     onPanResponderTerminate: () => { gestures.cancel(); callbacks.show(gestures.transform, true); },
   };

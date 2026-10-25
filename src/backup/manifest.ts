@@ -35,6 +35,7 @@ export type BackupPreview = {
 export class BackupManifestError extends Error {}
 /** A record that passed every check, for a consumer such as restore. Sources carry the codec-decoded inventory. */
 export type ValidRecord =
+  | { type: 'deleted'; memoryId: string }
   | { type: 'object'; sha256: string; bytes: number }
   | { type: 'source'; archiveSha256: string; saved: SavedPreview; inventory: string }
   | { type: 'preserved'; archiveSha256: string; ordinal: number; memoryId: string; role: 'photo' | 'video' | 'overlay'; sha256: string }
@@ -45,6 +46,7 @@ function check(ok: unknown, code = 'backup-invalid'): asserts ok { if (!ok) thro
 const HASH = /^[a-f0-9]{64}$/;
 const MEMORY = /^[A-Za-z0-9_-]{1,1024}$/;
 const KEYS: Record<string, string> = {
+  deleted: 'memoryId,type',
   header: 'format,type,version', object: 'bytes,relativePath,sha256,type', source: 'archiveSha256,inventory,type',
   preserved: 'archiveSha256,memoryId,ordinal,role,sha256,type', favorite: 'memoryId,type', end: 'objects,originalBytes,records,type',
   folder: 'inventory,inventorySha256,type', 'folder-preserved': 'inventorySha256,memoryId,ordinal,role,sha256,type',
@@ -52,10 +54,10 @@ const KEYS: Record<string, string> = {
 const integer = (value: unknown, max: number) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
 const ROLE_BIT = { photo: 1, video: 2, overlay: 4 } as const;
 
-type Phase = 'header' | 'objects' | 'sources' | 'folders' | 'favorites' | 'ended';
+type Phase = 'header' | 'deletions' | 'objects' | 'sources' | 'folders' | 'favorites' | 'ended';
 type Current = { kind: 'zip' | 'folder'; hash: string; files: { memorySourceId: string; role: string }[]; lastOrdinal: number; preserved: number };
 
-/** Streaming reader for manifest.jsonl, versions 1 and 2 (version 2 adds extracted-folder sources). Text arrives in chunks of any size; at most one record
+/** Streaming reader for manifest.jsonl, versions 1–3 (folders in v2, deletion markers in v3). Text arrives in chunks of any size; at most one record
  * (for a source, one codec inventory) is held as text at a time.
  *
  * State that grows with the permitted record counts: the object catalog (at most 100,000 entries), one entry per
@@ -68,6 +70,9 @@ export class BackupManifestValidator {
   private readonly objects = new Map<string, number>();
   private originalBytes = 0;
   private lastObject = '';
+  private lastDeleted = '';
+  private readonly deleted = new Set<string>();
+  private readonly deletedKnown = new Set<string>();
   private lastSource = '';
   private lastFolder = '';
   private version = 0;
@@ -131,6 +136,7 @@ export class BackupManifestValidator {
     if (type !== 'source' && type !== 'folder') check(line.length <= MAX_RECORD_LINE, 'backup-limit');
     switch (type) {
       case 'header': return this.header(record);
+      case 'deleted': return this.deletion(record);
       case 'object': return this.object(record);
       case 'source': return this.source(record);
       case 'preserved': return this.observation(record, 'zip');
@@ -144,13 +150,22 @@ export class BackupManifestValidator {
   private header(record: Record<string, unknown>) {
     check(this.phase === 'header' && this.records === 1 && record.format === 'snarchive-backup');
     check(Number.isSafeInteger(record.version) && (record.version as number) >= 1);
-    check(record.version === 1 || record.version === BACKUP_FORMAT_VERSION, 'backup-unsupported');
+    check(typeof record.version === 'number' && record.version <= BACKUP_FORMAT_VERSION, 'backup-unsupported');
     this.version = record.version as number;
-    this.phase = 'objects';
+    this.phase = 'deletions';
+  }
+
+  private deletion(record: Record<string, unknown>) {
+    check(this.version >= 3 && this.phase === 'deletions');
+    const id = record.memoryId;
+    check(typeof id === 'string' && MEMORY.test(id) && id > this.lastDeleted);
+    check(this.deleted.size < MAX_BACKUP_OBJECTS, 'backup-limit');
+    this.deleted.add(id); this.lastDeleted = id;
+    if (this.keepRecords) this.validRecords.push({ type: 'deleted', memoryId: id });
   }
 
   private object(record: Record<string, unknown>) {
-    check(this.phase === 'objects');
+    check(this.phase === 'deletions' || this.phase === 'objects'); this.phase = 'objects';
     const hash = record.sha256, bytes = record.bytes;
     check(typeof hash === 'string' && HASH.test(hash) && hash > this.lastObject); // Sorted, so also unique.
     check(record.relativePath === `objects/${hash.slice(0, 2)}/${hash}` && integer(bytes, MAX_OBJECT_BYTES));
@@ -161,7 +176,7 @@ export class BackupManifestValidator {
   }
 
   private source(record: Record<string, unknown>) {
-    check(this.phase === 'objects' || this.phase === 'sources');
+    check(this.phase === 'deletions' || this.phase === 'objects' || this.phase === 'sources');
     const hash = record.archiveSha256;
     check(typeof hash === 'string' && HASH.test(hash) && hash > this.lastSource);
     this.closeSource();
@@ -172,6 +187,7 @@ export class BackupManifestValidator {
     try { saved = decodePreview(text); check(encodePreview(saved) === text); } catch { throw new BackupManifestError('backup-invalid'); }
     check(saved.sourceIds.size === 1 && saved.sourceIds.has(`zip:${hash}`) && saved.preview.sources.length === 1);
     const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
+    for (const file of files) if (this.deleted.has(file.memorySourceId)) this.deletedKnown.add(file.memorySourceId);
     this.current = { kind: 'zip', hash, files, lastOrdinal: -1, preserved: 0 };
     this.lastSource = hash; this.sources++; this.phase = 'sources';
     if (this.keepRecords) this.validRecords.push({ type: 'source', archiveSha256: hash, saved, inventory: text });
@@ -180,7 +196,7 @@ export class BackupManifestValidator {
   /** Version 2: an extracted folder, after every ZIP source, in hash order. Its key must be the hash of its inventory,
    * recomputed here over the inventory as written, so a record can never claim another folder's identity. */
   private folder(record: Record<string, unknown>) {
-    check(this.version === 2 && (this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders'));
+    check(this.version >= 2 && (this.phase === 'deletions' || this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders'));
     const hash = record.inventorySha256;
     check(typeof hash === 'string' && HASH.test(hash) && hash > this.lastFolder);
     this.closeSource();
@@ -193,6 +209,7 @@ export class BackupManifestValidator {
     // folderInventoryHash; records written in listing order (commit 307eda2) also verify, and restore re-keys them.
     check(listedFolderHash(saved.preview.sources[0]!) === hash);
     const files = saved.preview.sources[0]!.files.map(file => ({ memorySourceId: file.memorySourceId, role: file.role }));
+    for (const file of files) if (this.deleted.has(file.memorySourceId)) this.deletedKnown.add(file.memorySourceId);
     this.current = { kind: 'folder', hash, files, lastOrdinal: -1, preserved: 0 };
     this.lastFolder = hash; this.sources++; this.folders++; this.phase = 'folders';
     if (this.keepRecords) this.validRecords.push({ type: 'folder', inventorySha256: hash, saved, inventory: text });
@@ -200,7 +217,7 @@ export class BackupManifestValidator {
 
   private closeSource() {
     if (!this.current) return;
-    this.pendingFiles += this.current.files.length - this.current.preserved;
+    this.pendingFiles += this.current.files.filter(file => !this.deleted.has(file.memorySourceId)).length - this.current.preserved;
     this.current = null;
   }
 
@@ -213,6 +230,7 @@ export class BackupManifestValidator {
     check(integer(ordinal, current.files.length - 1) && (ordinal as number) > current.lastOrdinal);
     const file = current.files[ordinal as number]!;
     check(typeof memoryId === 'string' && MEMORY.test(memoryId) && memoryId === file.memorySourceId && role === file.role);
+    check(!this.deleted.has(memoryId));
     check((role === 'photo' || role === 'video' || role === 'overlay') && typeof hash === 'string' && this.objects.has(hash));
     current.lastOrdinal = ordinal as number; current.preserved++; this.preserved++;
     this.memories.set(memoryId, (this.memories.get(memoryId) ?? 0) | ROLE_BIT[role]);
@@ -227,7 +245,7 @@ export class BackupManifestValidator {
   }
 
   private favorite(record: Record<string, unknown>) {
-    check(this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders' || this.phase === 'favorites');
+    check(this.phase === 'deletions' || this.phase === 'objects' || this.phase === 'sources' || this.phase === 'folders' || this.phase === 'favorites');
     this.closeSource(); this.phase = 'favorites';
     const memoryId = record.memoryId;
     check(typeof memoryId === 'string' && MEMORY.test(memoryId) && memoryId > this.lastFavorite);
@@ -240,6 +258,7 @@ export class BackupManifestValidator {
   private end(record: Record<string, unknown>) {
     check(this.phase !== 'header');
     this.closeSource();
+    check(this.deletedKnown.size === this.deleted.size);
     check(record.records === this.records - 1 && record.objects === this.objects.size && record.originalBytes === this.originalBytes);
     this.phase = 'ended';
   }

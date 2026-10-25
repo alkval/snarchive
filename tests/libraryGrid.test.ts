@@ -74,6 +74,25 @@ async function browser(t: { after(fn: () => void): void }) {
 }
 const favouriteOf = (grid: LibraryGrid<ChronologicalRow>, memory: string) => grid.rows.find(row => row.id === memory)?.favorite;
 
+test('the scrolling feed appends pages once, patches older favourites and removes deleted rows during held reads', async t => {
+  const { store, grid, reads } = await browser(t);
+  await grid.load(); assert.equal(grid.feedRows.length, 30);
+  reads.hold(); const next = grid.nextPage();
+  await store.deleteMemory('f00'); grid.memoryDeleted('f00');
+  grid.favoriteSaved('f01', false);
+  await reads.release(); await next;
+  assert.equal(grid.feedRows.length, 34); assert.equal(new Set(grid.feedRows.map(row => row.id)).size, 34);
+  assert.equal(grid.feedRows.find(row => row.id === 'f01')?.favorite, 0);
+  assert.ok(!grid.feedRows.some(row => row.id === 'f00'));
+  await grid.previousPage(); assert.equal(new Set(grid.feedRows.map(row => row.id)).size, grid.feedRows.length);
+});
+test('a full refresh discards cached pages and deletion masks, so explicitly restored memories can reappear', async t => {
+  const { grid } = await browser(t); await grid.load(); await grid.nextPage();
+  grid.memoryDeleted('f00'); assert.ok(!grid.feedRows.some(row => row.id === 'f00'));
+  await grid.refresh();
+  assert.equal(grid.feedRows.length, 30); assert.equal(grid.feedRows[0]?.id, 'f00'); assert.equal(grid.cursor, null);
+});
+
 test('a save that completes after the viewer closed, before the browser renders again, still reaches the grid', async t => {
   for (const filters of [all, favourites]) {
     const { grid, writes, saves, latest, open } = await browser(t);

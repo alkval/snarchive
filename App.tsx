@@ -1,275 +1,103 @@
-import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
-import { Modal, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, BackHandler, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { inventoryFromSnapshot, mergeSourceInventories, type InventoryPreview } from './src/import/sourceInventory';
-import { scanDirectory, scanArchive, cancelDirectoryScan } from './src/platform/directoryScanner';
-import { InventoryReport } from './src/ui/InventoryReport';
-import { sourceIdentity } from './src/import/sourceIdentity';
-import { en } from './src/i18n/en';
-import { openPreviewStore } from './src/platform/previewDatabase';
-import type { PreviewStore } from './src/storage/previewStore';
-import { openImportStore, originalCopier } from './src/platform/originalImporter';
-import { runImport } from './src/import/runImport';
-import { runFolderImport, FolderImportFailure } from './src/import/runFolderImport';
-import { folderCopier } from './src/platform/folderImporter';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { openImportStore } from './src/platform/originalImporter';
 import type { ImportStore, ImportSummary } from './src/storage/importStore';
 import { LibraryBrowser } from './src/ui/LibraryBrowser';
-import { sourcePicker } from './src/platform/sourcePicker';
+import { ImportScreen } from './src/ui/ImportScreen';
+import { SettingsScreen, type SettingsAction } from './src/ui/SettingsScreen';
 import { BackupScreen } from './src/ui/BackupScreen';
 import { BackupInspectScreen } from './src/ui/BackupInspectScreen';
 import { OriginalsCheckScreen } from './src/ui/OriginalsCheckScreen';
 import { ManageStorageScreen } from './src/ui/ManageStorageScreen';
 import { recoverBackups } from './src/platform/backup';
-import { Group, LargeTitle, Notice, Row, type Tone } from './src/ui/kit';
+import { Button, LargeTitle, Notice } from './src/ui/kit';
 import { space, type, useTheme } from './src/ui/theme';
 import { AppearanceProvider } from './src/ui/AppearanceProvider';
 import { AppearanceScreen } from './src/ui/AppearanceScreen';
 
-export default function App() {
-  return <AppearanceProvider><SnarchiveApp /></AppearanceProvider>;
-}
-
+type Route = 'library' | 'import' | 'settings' | SettingsAction;
+export default function App() { return <SafeAreaProvider><AppearanceProvider><SnarchiveApp /></AppearanceProvider></SafeAreaProvider>; }
 function SnarchiveApp() {
   const t = useTheme();
-  const browserBack = useRef<(() => boolean) | null>(null);
-  const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
-  const [appearanceOpen, setAppearanceOpen] = useState(false);
-  const closeAppearance = useCallback(() => setAppearanceOpen(false), []);
-  const [browsing, setBrowsing] = useState(false);
-  const [backingUp, setBackingUp] = useState(false);
-  const closeBackup = useCallback(() => setBackingUp(false), []);
-  const [inspecting, setInspecting] = useState(false);
-  const [checkingOriginals, setCheckingOriginals] = useState(false);
-  const [managingStorage, setManagingStorage] = useState(false);
-  const refreshLibrary = useCallback(() => {
-    void library.current?.summary().then(summary => { if (mounted.current) setLibrarySummary(summary); }, () => {});
-  }, []);
-  const closeInspection = useCallback(() => { setInspecting(false); refreshLibrary(); }, [refreshLibrary]);
-  const closeOriginalsCheck = useCallback(() => setCheckingOriginals(false), []);
-  const closeStorage = useCallback(() => { setManagingStorage(false); refreshLibrary(); }, [refreshLibrary]);
-  const openRestoredLibrary = useCallback(() => { setInspecting(false); refreshLibrary(); setBrowsing(true); }, [refreshLibrary]);
-  const [ready, setReady] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const store = useRef<PreviewStore | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(en.loading);
-  const [preview, setPreview] = useState<InventoryPreview | null>(null);
-  const library = useRef<ImportStore | null>(null);
-  const [librarySummary, setLibrarySummary] = useState<ImportSummary | null>(null);
-  const sourceIds = useRef(new Map<string, string>());
-  const stopped = useRef(false);
+  const [store, setStore] = useState<ImportStore | null>(null), [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [route, setRoute] = useState<Route>('library'), [initialKind, setInitialKind] = useState<'zip' | 'directory' | undefined>();
+  const [loadAttempt, setLoadAttempt] = useState(0), [failed, setFailed] = useState(false), [warning, setWarning] = useState('');
+  const [revision, setRevision] = useState(0), [toast, setToast] = useState('');
+  const browserBack = useRef<(() => boolean) | null>(null), importBack = useRef<(() => void) | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
-    mounted.current = true;
-    let active = true;
-    setReady(false);
-    setMessage(en.loading);
+    mounted.current = true; let active = true; setFailed(false);
     void (async () => {
       try {
-        const database = await openPreviewStore();
-        const saved = await database.load();
-        const recoveredBackupStaging = await recoverBackups().then(() => true, () => false);
-        const imports = await openImportStore();
-        const summary = await imports.summary();
-        if (!active) return;
-        store.current = database;
-        library.current = imports;
-        setLibrarySummary(summary);
-        sourceIds.current = saved?.sourceIds ?? new Map();
-        setPreview(saved?.preview ?? null);
-        setMessage(recoveredBackupStaging ? (saved ? en.restored : en.empty) : en.stagingNotCleared);
-        setReady(true);
-      } catch {
-        if (active) setMessage(en.loadFailed);
-      }
+        await recoverBackups().catch(() => { if (active) setWarning('Some temporary files could not be cleared. File operations will retry cleanup.'); });
+        const library = await openImportStore(), state = await library.summary();
+        if (active) { setStore(library); setSummary(state); }
+      } catch { if (active) setFailed(true); }
     })();
-    return () => { active = false; mounted.current = false; stopped.current = true; cancelDirectoryScan(); };
+    return () => { active = false; mounted.current = false; };
   }, [loadAttempt]);
-  const picking = useRef(false);
-  async function pick(kind: 'zip' | 'directory') {
-    if (picking.current || !ready || !store.current) return;
-    picking.current = true;
-    setBusy(true);
-    stopped.current = false;
-    setMessage(en.busy);
-    scroll.current?.scrollTo({ y: 0 });
-    let checkpointing = false;
-    try {
-      const sources = kind === 'zip' ? await sourcePicker.selectArchives() : [await sourcePicker.selectDirectory()];
-      if (!mounted.current || stopped.current) { if (mounted.current) setMessage(en.cancelled); return; }
-      if (sources.length === 0) { setMessage(en.pickerClosed); return; }
-      const nextIds = new Map(sourceIds.current);
-      let next = preview;
-      for (const selected of sources) {
-        setMessage(en.scanning);
-        const snapshot = selected.kind === 'zip' ? await scanArchive(selected.uri) : await scanDirectory(selected.uri);
-        if (!mounted.current || stopped.current) { if (mounted.current) setMessage(en.cancelled); return; }
-        const key = sourceIdentity(selected, snapshot);
-        const id = nextIds.get(key) ?? `source-${nextIds.size + 1}`;
-        const source = inventoryFromSnapshot(snapshot, id);
-        next = mergeSourceInventories(next?.sources ?? [], source);
-        nextIds.set(key, id);
-      }
-      if (next) {
-        checkpointing = true;
-        setSaving(true);
-        setMessage(en.saving);
-        await store.current.save({ preview: next, sourceIds: nextIds });
-        if (!mounted.current) return;
-        sourceIds.current = nextIds;
-        setPreview(next);
-        setMessage(en.selected(next.sources.length));
-      }
-    } catch (error) {
-      // Native errors can contain personal paths. Do not log or display their payloads.
-      if (mounted.current) setMessage(checkpointing ? en.saveFailed : stopped.current ? en.cancelled : error instanceof Error && error.message === 'native-build-required' ? en.nativeRequired : error instanceof Error && error.message === 'zip-unavailable-ios' ? en.zipIos : error instanceof Error && error.message === 'insufficient-storage' ? en.storage : error instanceof Error && error.message === 'unsafe-or-unsupported-zip' ? en.zipFailed : en.failed);
-    } finally {
-      picking.current = false;
-      if (mounted.current) { setBusy(false); setSaving(false); }
-    }
-  }
-  async function preserve(hash: string, sourceId: string) {
-    if (picking.current || !ready || !library.current) return;
-    const source = preview?.sources.find(item => item.sourceId === sourceId);
-    if (!source) return;
-    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.importPick); scroll.current?.scrollTo({ y: 0 });
-    try {
-      const selected = await sourcePicker.selectArchives();
-      if (stopped.current || !mounted.current) return;
-      if (selected.length === 0) { setMessage(en.pickerClosed); return; }
-      if (selected.length !== 1) { setMessage(en.importOne); return; }
-      await library.current.plan(hash, source);
-      await runImport(library.current, originalCopier, hash, selected[0]!.uri, () => stopped.current,
-        count => { if (mounted.current) setMessage(en.importProgress(count)); });
-      if (mounted.current) setMessage(en.importComplete);
-    } catch (error) {
-      if (mounted.current) setMessage(error instanceof Error && error.message === 'source-changed' ? en.importChanged
-        : error instanceof Error && error.message === 'native-build-required' ? en.nativeRequired
-        : error instanceof Error && error.message === 'insufficient-storage' ? en.importStorage
-        : error instanceof Error && error.message === 'stored-object-corrupt' ? en.importCorrupt : en.importPaused);
-    } finally {
-      try { const summary = await library.current.summary(); if (mounted.current) setLibrarySummary(summary); }
-      catch { if (mounted.current) setMessage(en.importPaused); }
-      picking.current = false; if (mounted.current) setBusy(false);
-    }
-  }
-  /** Folder preservation (section 21): plan from the saved scan, reselect the folder, then copy what it still matches. */
-  async function preserveFolder(sourceId: string) {
-    if (picking.current || !ready || !library.current) return;
-    const source = preview?.sources.find(item => item.sourceId === sourceId);
-    if (!source) return;
-    picking.current = true; stopped.current = false; setBusy(true); setMessage(en.folderPick); scroll.current?.scrollTo({ y: 0 });
-    try {
-      const hash = await library.current.planFolder(source);
-      let selected;
-      try { selected = await sourcePicker.selectDirectory(); } catch { if (mounted.current) setMessage(en.pickerClosed); return; }
-      if (stopped.current || !mounted.current) return;
-      const outcome = await runFolderImport(library.current, folderCopier, hash, selected.uri, () => stopped.current,
-        count => { if (mounted.current) setMessage(en.importProgress(count)); });
-      const done = outcome.preserved + outcome.confirmed;
-      const left = outcome.skipped.missing + outcome.skipped.changed + outcome.skipped.unreadable;
-      if (mounted.current) setMessage([outcome.complete ? en.folderComplete(done) : en.folderPartial(done, left),
-        outcome.changedSincePreserved ? en.folderChangedSince(outcome.changedSincePreserved) : '',
-        outcome.storeCleanupFailed ? en.folderStoreCleanup : ''].filter(Boolean).join(' '));
-    } catch (error) {
-      const code = error instanceof Error ? error.message : '';
-      const main = code === 'cancelled' || stopped.current ? en.folderCancelled : code === 'folder-changed' ? en.folderChanged
-        : code === 'folder-access-denied' ? en.folderAccess : code === 'folder-unreadable' ? en.folderUnreadable
-        : code === 'native-build-required' ? en.nativeRequired : code === 'insufficient-storage' ? en.folderStorage
-        : code === 'stored-object-corrupt' ? en.importCorrupt : code === 'store-staging-cleanup-failed' ? en.restoreErrors['store-staging-cleanup-failed']! : en.folderPaused;
-      const cleanup = error instanceof FolderImportFailure && error.storeCleanupFailed && code !== 'store-staging-cleanup-failed';
-      if (mounted.current) setMessage(cleanup ? `${main} ${en.folderStoreCleanup}` : main);
-    } finally {
-      try { const summary = await library.current.summary(); if (mounted.current) setLibrarySummary(summary); } catch {}
-      picking.current = false; if (mounted.current) setBusy(false);
-    }
-  }
-  const tone = toneFor(message);
-  const closeBrowser = () => { if (!browserBack.current?.()) setBrowsing(false); };
-  const zipSources = [...sourceIds.current].filter(([key]) => key.startsWith('zip:'));
-  const folderSources = [...sourceIds.current].filter(([key]) => key.startsWith('directory:'));
-  if (backingUp) return <SafeAreaProvider><BackupScreen onClose={closeBackup} /></SafeAreaProvider>;
-  if (managingStorage) return <SafeAreaProvider><ManageStorageScreen onClose={closeStorage} /></SafeAreaProvider>;
-  if (checkingOriginals) return <SafeAreaProvider><OriginalsCheckScreen onClose={closeOriginalsCheck} /></SafeAreaProvider>;
-  if (inspecting) return <SafeAreaProvider><BackupInspectScreen onClose={closeInspection} onChanged={refreshLibrary} onOpenLibrary={openRestoredLibrary} /></SafeAreaProvider>;
-  return (
-    <SafeAreaProvider>
-      <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
-        <StatusBar style={t.dark ? 'light' : 'dark'} />
-        <Modal visible={appearanceOpen} animationType="slide" onRequestClose={closeAppearance}>
-          {appearanceOpen && <AppearanceScreen onClose={closeAppearance} />}
-        </Modal>
-        <Modal visible={browsing} animationType="slide" onRequestClose={closeBrowser}>
-          {browsing && library.current && <LibraryBrowser store={library.current} onClose={() => setBrowsing(false)} backHandler={browserBack} />}
-        </Modal>
-        <ScrollView ref={scroll} contentContainerStyle={styles.content}>
-          <LargeTitle title={en.title} subtitle={en.promise} />
-          {tone && <Notice tone={tone} message={message}
-            action={busy && !saving ? { label: en.cancel, onPress: () => { stopped.current = true; cancelDirectoryScan(); setMessage(en.cancelled); } }
-              : !ready && message === en.loadFailed ? { label: en.retry, onPress: () => setLoadAttempt(value => value + 1) } : undefined} />}
-          {librarySummary && <View style={styles.section}>
-            <View style={[styles.hero, { backgroundColor: t.surface }]}>
-              <View accessible accessibilityLabel={`${librarySummary.memories} ${en.libraryHeadline(librarySummary.memories)}. ${en.libraryStats(librarySummary.objects, librarySummary.files)}`}>
-                <Text style={[type.figure, { color: t.text }]}>{librarySummary.memories.toLocaleString()}</Text>
-                <Text style={[type.headline, { color: t.text }]}>{en.libraryHeadline(librarySummary.memories)}</Text>
-                <Text style={[type.footnote, styles.heroStats, { color: t.secondary }]}>{en.libraryStats(librarySummary.objects, librarySummary.files)}</Text>
-              </View>
-              {librarySummary.unfinished > 0 && <Text style={[type.footnote, { color: t.warning }]}>{en.libraryUnfinished(librarySummary.unfinished)}</Text>}
-              {librarySummary.conflicts > 0 && <Text style={[type.footnote, { color: t.secondary }]}>{en.libraryConflicts(librarySummary.conflicts)}</Text>}
-            </View>
-            <Group inset={52}>
-              <Row icon="images-outline" title={en.libraryBrowse} detail={en.libraryBrowseDetail} disabled={!ready || busy} onPress={() => setBrowsing(true)} />
-              {Platform.OS === 'android' && <Row icon="archive-outline" title={en.backupOpen} detail={en.backupOpenDetail} disabled={!ready || busy} onPress={() => setBackingUp(true)} />}
-              {Platform.OS === 'android' && <Row icon="shield-checkmark-outline" title={en.inspectOpen} detail={en.inspectOpenDetail} disabled={!ready || busy} onPress={() => setInspecting(true)} />}
-              {Platform.OS === 'android' && <Row icon="pulse-outline" title={en.originalsOpen} detail={en.originalsOpenDetail} disabled={!ready || busy} onPress={() => setCheckingOriginals(true)} />}
-              {Platform.OS === 'android' && <Row icon="server-outline" title={en.storageOpen} detail={en.storageOpenDetail} disabled={!ready || busy} onPress={() => setManagingStorage(true)} />}
-            </Group>
-          </View>}
-          <Group header={en.heading} footer={`${en.explanation} ${en.zipNote}`} inset={52}>
-            <Row icon="file-tray-full-outline" title={en.zip} detail={en.zipDetail} disabled={busy || !ready} onPress={() => void pick('zip')} />
-            <Row icon="folder-open-outline" title={en.folder} detail={en.folderDetail} disabled={busy || !ready} onPress={() => void pick('directory')} />
-          </Group>
-          {librarySummary && <Group header={en.originals} footer={Platform.OS === 'android' ? en.importNote : en.importIos} inset={52}>
-            {Platform.OS === 'android' && zipSources.map(([key, id]) => (
-              <Row key={key} icon="download-outline" title={en.importZip(id)} detail={en.importZipDetail} disabled={busy || !ready} onPress={() => void preserve(key.slice(4), id)} />
-            ))}
-            {Platform.OS === 'android' && folderSources.map(([key, id]) => (
-              <Row key={key} icon="folder-outline" title={en.importFolder(id)} detail={en.importFolderDetail} disabled={busy || !ready} onPress={() => void preserveFolder(id)} />
-            ))}
-          </Group>}
-          {preview && <InventoryReport preview={preview} footer={`${en.previewNote} ${en.savedNote}`} />}
-          <Group inset={52}>
-            <Row icon="color-palette-outline" title={en.appearanceTitle} detail={en.appearanceDetail} disabled={busy} onPress={() => setAppearanceOpen(true)} />
-          </Group>
-          <Text style={[type.footnote, styles.footer, { color: t.secondary }]}>{en.prototype}</Text>
-        </ScrollView>
-      </SafeAreaView>
-    </SafeAreaProvider>
-  );
+  useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 3500); return () => clearTimeout(timer); }, [toast]);
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (route === 'import') { importBack.current?.(); return true; }
+      if (route === 'settings') { setRoute('library'); return true; }
+      return route === 'library' && !!browserBack.current?.();
+    });
+    return () => subscription.remove();
+  }, [route]);
+  const refresh = useCallback(async (reloadGrid = true) => {
+    if (!store) return;
+    const next = await store.summary().catch(() => null);
+    if (!next) { if (mounted.current) setWarning('The library could not be refreshed. Close and reopen Snarchive to try again.'); return; }
+    if (mounted.current) { setSummary(next); if (reloadGrid) setRevision(value => value + 1); }
+  }, [store]);
+  const finishImport = async (message: string) => { await refresh(); if (mounted.current) { setRoute('library'); setToast(message); } };
+  const closeImport = () => { void refresh(); setRoute('library'); };
+  const add = (kind?: 'zip' | 'directory') => { setInitialKind(kind); setRoute('import'); };
+  const settings = useCallback(() => setRoute('settings'), []);
+  const changed = useCallback(() => { void refresh(); }, [refresh]);
+  const finishTool = useCallback(() => { setRoute('settings'); void refresh(); }, [refresh]);
+  const showLibrary = useCallback(() => { setRoute('library'); void refresh(); }, [refresh]);
+  if (!store || !summary) return <SafeAreaView style={[styles.center, { backgroundColor: t.ground }]}>
+    {failed ? <Notice tone="error" message="Your library could not be opened. Its files have not been changed." action={{ label: 'Try again', onPress: () => setLoadAttempt(value => value + 1) }} />
+      : <ActivityIndicator size="large" color={t.accent} accessibilityLabel="Opening library" />}
+  </SafeAreaView>;
+  return <View style={[styles.root, { backgroundColor: t.ground }]}>
+    <StatusBar style={t.dark ? 'light' : 'dark'} />
+    <View style={styles.root} pointerEvents={route === 'library' ? 'auto' : 'none'} importantForAccessibility={route === 'library' ? 'auto' : 'no-hide-descendants'} accessibilityElementsHidden={route !== 'library'}>
+    {summary.memories > 0 ? <LibraryBrowser store={store} onClose={() => {}} backHandler={browserBack}
+      onAdd={() => add()} onSettings={() => setRoute('settings')} refreshToken={revision} onLibraryChanged={() => void refresh(false)} onNotice={setToast} />
+      : <SafeAreaView style={styles.root}>
+        <View style={styles.emptyBar}><Text style={[type.headline, { color: t.text }]}>Snarchive</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Settings" onPress={() => setRoute('settings')} style={styles.iconButton}><Ionicons name="settings-outline" size={24} color={t.text} /></Pressable>
+        </View>
+        <View style={styles.empty}>
+          <Image source={require('./assets/icon.png')} style={styles.logo} accessibilityIgnoresInvertColors />
+          <LargeTitle title="Your memories, together" subtitle="Add your Snapchat exports to start your library." />
+          <Button label="Add ZIP files" icon="add" onPress={() => add('zip')} />
+          <Button label="Add an extracted folder" variant="secondary" icon="folder-open-outline" onPress={() => add('directory')} />
+        </View>
+      </SafeAreaView>}
+    </View>
+    {!!toast && route === 'library' && <View style={[styles.toast, { backgroundColor: t.text }]} pointerEvents="none"><Text accessibilityLiveRegion="polite" style={[type.body, { color: t.ground }]}>{toast}</Text></View>}
+    {route !== 'library' && <View style={[StyleSheet.absoluteFill, { backgroundColor: t.ground }]}>
+      {route === 'import' && <ImportScreen store={store} initialKind={initialKind} close={closeImport} complete={finishImport} backHandler={importBack} />}
+      {route === 'settings' && <SettingsScreen close={() => setRoute('library')} open={setRoute} warning={warning} />}
+      {route === 'appearance' && <AppearanceScreen onClose={settings} />}
+      {route === 'backup' && <BackupScreen onClose={settings} />}
+      {route === 'restore' && <BackupInspectScreen onClose={finishTool} onChanged={changed} onOpenLibrary={showLibrary} />}
+      {route === 'check' && <OriginalsCheckScreen onClose={settings} />}
+      {route === 'storage' && <ManageStorageScreen onClose={finishTool} />}
+    </View>}
+  </View>;
 }
-
-/** Which kind of notice a status message is. Idle guidance needs no card. */
-function toneFor(message: string): Tone | null {
-  if ([en.loading, en.busy, en.scanning, en.saving, en.importPick, en.folderPick].includes(message) || /copied or verified\. Keep Snarchive open/.test(message)) return 'progress';
-  // Folder results can carry extra sentences (changed files, a leftover part), so they are matched by how they start.
-  if (/Every file in its scan is preserved/.test(message) && !message.includes(en.folderStoreCleanup)) return 'success';
-  if (/left for later|Every file in its scan is preserved/.test(message)) return 'warning';
-  if ([en.folderChanged, en.folderAccess, en.folderUnreadable, en.folderPaused, en.folderStorage, en.restoreErrors['store-staging-cleanup-failed']!].some(text => message.startsWith(text))) return 'warning';
-  if (message.startsWith(en.folderCancelled)) return message === en.folderCancelled ? 'info' : 'warning';
-  if (message.startsWith(en.importCorrupt)) return 'error';
-  if (message === en.importComplete || /scanned and saved/.test(message)) return 'success';
-  if ([en.loadFailed, en.importCorrupt].includes(message)) return 'error';
-  if ([en.saveFailed, en.failed, en.zipFailed, en.zipIos, en.storage, en.nativeRequired, en.importOne, en.importChanged, en.importPaused, en.importStorage, en.stagingNotCleared].includes(message)) return 'warning';
-  if ([en.cancelled, en.pickerClosed].includes(message)) return 'info';
-  return null;
-}
-const styles = StyleSheet.create({
-  root: { flex: 1 },
-  content: { paddingHorizontal: space.gutter, paddingBottom: 48, gap: space.section, width: '100%', maxWidth: 640, alignSelf: 'center' },
-  section: { gap: 12 },
-  hero: { borderRadius: space.radius, padding: 20, gap: 6 },
-  heroStats: { marginTop: 4 },
-  footer: { marginHorizontal: 4 },
+const styles = StyleSheet.create({ root: { flex: 1 }, center: { flex: 1, justifyContent: 'center', padding: 24 },
+  emptyBar: { minHeight: 56, paddingHorizontal: space.gutter, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  iconButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+  empty: { flex: 1, justifyContent: 'center', padding: 24, paddingBottom: 64, gap: 20, maxWidth: 600, width: '100%', alignSelf: 'center' },
+  logo: { width: 88, height: 88, borderRadius: 24 },
+  toast: { position: 'absolute', bottom: 32, left: 20, right: 20, borderRadius: 18, padding: 16, alignItems: 'center', elevation: 4 },
 });

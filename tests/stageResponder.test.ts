@@ -25,6 +25,24 @@ function stage(zoomable = true) {
 const one = (x: number, y = 0): Finger => ({ id: 1, x, y });
 const two = (x: number, y = 0): Finger => ({ id: 2, x, y });
 
+test('a released horizontal swipe hands its last offset to the page animation before any reset is drawn', () => {
+  const { gestures, config, shown, navigated } = stage();
+  config.onPanResponderGrant(event(one(0))); config.onPanResponderMove(event(one(-200)));
+  const count = shown.length; config.onPanResponderRelease(event(), { vx: -1 });
+  assert.deepEqual(navigated, ['next']); assert.equal(shown.length, count);
+  assert.equal(gestures.active, false);
+});
+test('vertical details/back gestures travel through the installed adapter; locked transitions claim no touches', () => {
+  const gestures = new StageGestures(false), vertical: string[] = [];
+  gestures.layout({ width: 400, height: 800 }, null);
+  let locked = false;
+  const config = stageResponderConfig(gestures, { touches: e => e.nativeEvent.touches.map(t => ({ id: t.identifier, x: t.pageX, y: t.pageY })),
+    show() {}, navigate() { throw new Error('not horizontal'); }, vertical: direction => vertical.push(direction), locked: () => locked });
+  for (const y of [-150, 150]) { config.onPanResponderGrant(event(one(0))); config.onPanResponderMove(event(one(0, y))); config.onPanResponderRelease(event(), { vx: 0 }); }
+  assert.deepEqual(vertical, ['up', 'down']);
+  locked = true; assert.equal(config.onStartShouldSetPanResponder(), false); assert.equal(config.onMoveShouldSetPanResponder(), false);
+});
+
 test('the stage installs start and end handlers alongside grant, move, release and terminate', () => {
   const { config } = stage();
   for (const name of ['onPanResponderGrant', 'onPanResponderStart', 'onPanResponderMove', 'onPanResponderEnd', 'onPanResponderRelease', 'onPanResponderTerminate'] as const)

@@ -156,7 +156,7 @@ test('a stopping error or cancellation lists what was not attempted; a repair th
 
 test('an invalid or unreadable backup repairs nothing and always closes the session', async t => {
   const { db } = await library(t); const text = await manifestOf(db);
-  const invalid = new Repairer(text.replace('"version":1', '"version":3'));
+  const invalid = new Repairer(text.replace('"version":1', '"version":4'));
   await assert.rejects(runBackupRepair(invalid, 'u', [problem('shared')], () => false, () => {}), (e: Error) => e instanceof RepairFailure && e.message === 'backup-unsupported');
   assert.ok(!invalid.calls.some(c => c.startsWith('repair'))); assert.equal(invalid.calls.at(-1), 'end');
   const tampered = new Repairer(text.replace(/"bytes":(\d+)/, (_, n) => `"bytes":${Number(n) + 1}`));
@@ -180,9 +180,9 @@ test('a second backup can be tried for what remains, and a partial repair leaves
   assert.deepEqual(second.calls.filter(c => c.startsWith('repair')), remaining.map(p => `repair:${p.hash.slice(0, 4)}`), 'only what remained');
 });
 
-test('wording: repair points to Check originals, keeps export advice and offers all exact-copy sources', () => {
+test('wording: repair points to Check saved files in Settings, keeps export advice and offers all exact-copy sources', () => {
   for (const text of [en.importCorrupt, en.restoreErrors['stored-object-corrupt']!, en.backupErrors['stored-object-corrupt']!]) {
-    assert.match(text, /Check originals/); assert.doesNotMatch(text, /not available yet/);
+    assert.match(text, /Settings → Troubleshooting → Check saved files/); assert.doesNotMatch(text, /not available yet/);
   }
   assert.match(en.importCorrupt, /Keep your source exports/); assert.match(en.restoreErrors['stored-object-corrupt']!, /Keep your exports/);
   assert.match(en.originalsRepairScopeDetail, /backup/); assert.match(en.originalsRepairScopeDetail, /export ZIP/); assert.match(en.originalsRepairScopeDetail, /extracted folder/);

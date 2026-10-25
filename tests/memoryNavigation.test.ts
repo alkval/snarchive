@@ -8,6 +8,21 @@ import { MemorySequence, keyOf, type Direction } from '../src/domain/memoryNavig
 import { defaultFilters, matchesFilters, type LibraryFilters } from '../src/domain/libraryFilters.ts';
 import type { SqlDatabase, SqlConnection } from '../src/storage/previewStore.ts';
 
+test('deleting the open row selects the next, then previous, then closes an empty sequence', async () => {
+  const rows = ['a', 'b', 'c'].map(id => ({ id, sortDay: '', sortTime: '' }));
+  const sequence = new MemorySequence(rows, 1, async () => []);
+  assert.equal((await sequence.remove('b'))?.id, 'c'); assert.deepEqual(sequence.ids(), ['a', 'c']);
+  assert.equal((await sequence.remove('c'))?.id, 'a'); assert.deepEqual(sequence.ids(), ['a']);
+  assert.equal(await sequence.remove('a'), null); assert.deepEqual(sequence.ids(), []);
+  sequence.prepare(); assert.equal(await sequence.move('next'), 'end');
+});
+test('deleting an edge uses its strict cursor to fetch the next surviving memory', async () => {
+  const a = { id: 'a', sortDay: '', sortTime: '' }, b = { ...a, id: 'b' };
+  const anchors: string[] = [];
+  const sequence = new MemorySequence([a], 0, async (anchor, direction) => { anchors.push(anchor.id); return direction === 'next' && anchor.id === 'a' ? [b] : []; });
+  assert.equal((await sequence.remove('a'))?.id, 'b'); assert.ok(anchors.includes('a')); assert.deepEqual(sequence.ids(), ['b']);
+});
+
 class DB implements SqlDatabase {
   raw = new DatabaseSync(':memory:'); queries = 0; largest = 0;
   async execAsync(sql: string) { this.raw.exec(sql); }

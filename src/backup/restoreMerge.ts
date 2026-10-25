@@ -43,6 +43,7 @@ export class RestoreMerge {
   private objectRows: [string, number][] = [];
   private associations: [string, string, string][] = [];
   private favorites: string[] = [];
+  private hasDeletions = false;
 
   constructor(tx: SqlConnection) { this.tx = tx; }
 
@@ -62,11 +63,17 @@ export class RestoreMerge {
     check(version?.user_version === LIBRARY_SCHEMA_VERSION, 'restore-schema-unsupported');
     this.before = await this.counts();
     this.doneBefore = await this.donePerJob();
+    this.hasDeletions = !!await this.tx.getFirstAsync("SELECT 1 FROM memory_deletions LIMIT 1");
   }
 
   async apply(record: ValidRecord): Promise<void> {
     check(this.before, 'restore-failed');
     switch (record.type) {
+      case 'deleted':
+        this.hasDeletions = true;
+        // Additive restore: a backup's deletion must not remove a memory already live on this device.
+        await this.tx.runAsync('INSERT OR IGNORE INTO memory_deletions(memory_id) SELECT ? WHERE NOT EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=?)', record.memoryId, record.memoryId);
+        return;
       case 'object':
         this.objectRows.push([record.sha256, record.bytes]);
         if (this.objectRows.length >= BATCH) await this.flushObjects();
@@ -148,7 +155,15 @@ export class RestoreMerge {
   private async closeSource() {
     const source = this.current; this.current = null;
     if (!source) return;
-    const pending = source.items.some(item => item.state === 'pending');
+    await this.flushAssociations();
+    let pending = source.items.some(item => item.state === 'pending');
+    const candidates = source.items.filter(item => item.state === 'pending');
+    if (this.hasDeletions) pending = false;
+    for (let index = 0; this.hasDeletions && index < candidates.length; index += BATCH) {
+      const slice = candidates.slice(index, index + BATCH);
+      const deleted = new Set((await this.tx.getAllAsync<{ memory_id: string }>(`SELECT memory_id FROM memory_deletions WHERE memory_id IN (${slice.map(() => '?').join(',')})`, ...slice.map(item => item.memoryId))).map(row => row.memory_id));
+      if (slice.some(item => !deleted.has(item.memoryId))) { pending = true; break; }
+    }
     const done = source.items.some(item => item.state === 'done');
     if (source.isNew) {
       const state = !pending ? 'completed' : done ? 'paused' : 'planned';
@@ -171,6 +186,8 @@ export class RestoreMerge {
     const rows = this.associations; this.associations = [];
     if (!rows.length) return;
     const memories = [...new Set(rows.map(([memory]) => memory))];
+    // Explicitly restoring an older backup can recover a previously deleted memory. Re-importing an export cannot.
+    if (this.hasDeletions) await this.tx.runAsync(`DELETE FROM memory_deletions WHERE memory_id IN (${memories.map(() => '?').join(',')})`, ...memories);
     await this.tx.runAsync(`INSERT OR IGNORE INTO memories(id) VALUES ${memories.map(() => '(?)').join(',')}`, ...memories);
     await this.tx.runAsync(`INSERT OR IGNORE INTO memory_objects(memory_id,role,object_hash) VALUES ${rows.map(() => '(?,?,?)').join(',')}`, ...rows.flat());
   }
@@ -208,6 +225,7 @@ export class RestoreMerge {
       SELECT 1 FROM memory_objects m WHERE m.memory_id=f.memory_id AND m.role!='overlay') LIMIT 1`), 'restore-failed');
     check(!await this.tx.getFirstAsync(`SELECT 1 FROM import_items i WHERE i.state='done' AND NOT EXISTS (
       SELECT 1 FROM stored_objects o WHERE o.hash=i.object_hash) LIMIT 1`), 'restore-failed');
+    check(!await this.tx.getFirstAsync('SELECT 1 FROM memory_deletions d JOIN memory_objects m ON m.memory_id=d.memory_id LIMIT 1'), 'restore-failed');
     const after = await this.counts(), before = this.before;
     return {
       memoriesAdded: after.base - before.base, associationsAdded: after.associations - before.associations,

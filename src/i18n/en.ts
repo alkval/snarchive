@@ -11,7 +11,7 @@ export const en = {
   detailsTitle: 'Memory details',
   detailsSelected: (section: string) => `${section} · selected`,
   detailsSections: { originals: 'Stored originals', dates: 'Recorded dates', sources: 'Export file records' },
-  detailsNote: 'Library records only. Opening details does not check file integrity or access your exports. Use Check originals on the home screen to verify stored files.',
+  detailsNote: 'Library records only. Opening details does not check file integrity or access your exports. Use Settings → Troubleshooting → Check saved files to verify stored files.',
   detailsDateNote: 'Distinct dates indexed from export metadata (UTC) and filenames (inferred). These are recorded evidence, not an editable capture date. Repeated evidence is shown once; unknown dates have no entry.',
   detailsSourceNote: 'Paths are relative to the recorded ZIP or extracted folder root. A pending record has not been preserved by that import. Source identities describe recorded imports; access to those exports is not checked.',
   detailsEmpty: 'No records in this section.',
@@ -85,7 +85,7 @@ export const en = {
   importChanged: 'That ZIP does not match this preview. Choose the original ZIP, or scan the changed archive as a new source.',
   importPaused: 'The import stopped. Completed files were kept. Choose the same ZIP again to continue.',
   importStorage: 'Not enough free storage to continue. Completed files were kept. Free some space, then choose the same ZIP to resume.',
-  importCorrupt: 'A stored original could not be verified. The import stopped without replacing it. Use Check originals on the home screen to repair it from a backup or a recorded export. Keep your source exports.',
+  importCorrupt: 'A stored original could not be verified. The import stopped without replacing it. Use Settings → Troubleshooting → Check saved files to repair it from a backup or a recorded export. Keep your source exports.',
   importComplete: 'Original files are preserved. Open the library to see your memories, and keep an independent backup.',
   importProgress: (count: number) => `${plural(count, 'file', 'files')} copied or verified. Keep Snarchive open.`,
   folderPick: 'Choose the same folder again to preserve or resume its original files.',
@@ -120,7 +120,7 @@ export const en = {
   thumbnailMissing: 'No preview',
   libraryVariants: 'This memory has competing base files. All of them were kept; choosing a version is not available yet.',
   libraryVideoFailed: 'This video could not be verified or played. Its record and original file have been kept.',
-  libraryPhotoFailed: 'This photo could not be verified or displayed. Its record has been kept. Use Check originals on the home screen to check it and, if needed, repair its exact bytes. Keep your source exports.',
+  libraryPhotoFailed: 'This photo could not be verified or displayed. Its record has been kept. Use Settings → Troubleshooting → Check saved files to check it and, if needed, repair its exact bytes. Keep your source exports.',
   libraryOverlayVariants: 'Several overlays were preserved, so none is shown automatically.',
   libraryOverlaySize: 'The overlay has a different shape from the photo. It is preserved, but hidden so it is not stretched.',
   libraryOverlayFailed: 'The overlay could not be verified or shown. The original is still available.',
@@ -158,11 +158,11 @@ export const en = {
   filterEmpty: 'No memories match these filters.',
 
   // Backup
-  backupTitle: 'Back up library', backupSubtitle: 'A portable ZIP of everything preserved in Snarchive.',
+  backupTitle: 'Save a backup', backupSubtitle: 'A portable ZIP of everything preserved in Snarchive.',
   backupUnencrypted: 'Not encrypted', backupUnencryptedDetail: 'Contains your photos, videos, overlays and metadata, including any saved locations. Choose a location you trust.',
   backupDirect: 'Saved where you choose', backupDirectDetail: 'Written directly to that location, which needs room for a copy of your library.',
   backupOpenApp: 'Keep Snarchive open', backupOpenAppDetail: 'If the app is closed while saving, an incomplete ZIP may remain there. Delete it before trying again.',
-  backupFooter: 'Only files already preserved are included; pending files stay pending. Restore it from Check or restore a backup on the home screen (Android).',
+  backupFooter: 'Only files already preserved are included; pending files stay pending. Restore it from Settings → Restore a backup.',
   backupStart: 'Create backup', backupCancel: 'Cancel backup', backupCancelling: 'Cancelling…',
   backupStage: { snapshot: 'Preparing library records…', choose: 'Choose where to save the backup.', save: 'Checking originals, writing the backup and checking the saved file…' },
   backupSaved: 'Backup saved and checked', backupSavedDetail: 'Keep your original exports too: resuming unfinished imports still needs them.',
@@ -172,7 +172,7 @@ export const en = {
     'backup-unverified': 'The backup was written, but the chosen location could not hand it back for checking (some cloud services are still uploading). It was kept, but it has not been checked. Do not rely on it as your only copy.',
     'backup-saved-cleanup-failed': 'Backup saved and checked, but temporary files could not be cleared. Reopen the app before another backup.',
     'backup-cleanup-failed': 'Temporary backup files could not be cleared. Reopen the app before trying again.',
-    'stored-object-corrupt': 'An original is missing or damaged, so no backup was saved. Use Check originals on the home screen to repair it from an earlier backup or a recorded export. Keep your source exports.',
+    'stored-object-corrupt': 'An original is missing or damaged, so no backup was saved. Use Settings → Troubleshooting → Check saved files to repair it from an earlier backup or a recorded export. Keep your source exports.',
     'insufficient-storage': 'Not enough space to create the backup. Free some space and try again.',
     'backup-schema-unsupported': 'This version of the app cannot back up this library yet. Update the app and try again.',
     'native-build-required': 'Install the latest Android development build to save backups.',
@@ -185,7 +185,7 @@ export const en = {
   storageOpen: 'Manage storage', storageOpenDetail: 'Review leftover files and kept damaged copies',
 
   // Manage storage (Android, section 24)
-  storageTitle: 'Manage storage', storageSubtitle: 'Review files Snarchive keeps that no memory uses, and remove the ones you choose.',
+  storageTitle: 'Free up unused space', storageSubtitle: 'Review files Snarchive keeps that no memory uses, and remove the ones you choose.',
   storageReviewOnly: 'Reviewing changes nothing', storageReviewOnlyDetail: 'Snarchive lists the files and you choose what to remove. Nothing is selected for you.',
   storageProtected: 'Your library is protected', storageProtectedDetail: 'Originals the library records are never listed, and are checked again just before each removal. Memories, sources and favorites are never removed.',
   storageEstimate: 'Sizes are estimates', storageEstimateDetail: 'Removing a file may free less space than its size, for example when the system shares its storage with another file.',
@@ -230,7 +230,7 @@ export const en = {
   storageReviewAgain: 'Review again', storageDone: 'Done',
 
   // Check originals and repair from a backup (Android, section 22)
-  originalsTitle: 'Check originals', originalsSubtitle: 'Find originals in your library that are missing or damaged.',
+  originalsTitle: 'Check saved files', originalsSubtitle: 'Find originals in your library that are missing or damaged.',
   originalsFull: 'Every file is read', originalsFullDetail: 'Each original is read in full and compared with the checksum recorded when it was preserved. This can take a while for a large library.',
   originalsReadOnly: 'Checking changes nothing', originalsReadOnlyDetail: 'The check only reads. Repair is a separate step that you start.',
   originalsRepairScope: 'Repair needs an exact copy', originalsRepairScopeDetail: 'Choose a Snarchive backup, the original export ZIP, or an extracted folder. Only files matching the library’s recorded checksum and length can repair an original. Keep your exports and independent backups.',
@@ -243,7 +243,7 @@ export const en = {
   originalsExportValidating: 'Opening and checking the export…',
   originalsPickerClosed: 'No repair source was chosen.',
   originalsSourceCleanup: 'The selected source could not be fully closed or its temporary files could not be cleared. Reopen the app before trying again. Snarchive retries temporary-copy cleanup at startup or when opening another ZIP.',
-  originalsStart: 'Check originals', originalsCancel: 'Cancel check', originalsCancelling: 'Cancelling…',
+  originalsStart: 'Check saved files', originalsCancel: 'Cancel check', originalsCancelling: 'Cancelling…',
   originalsProgress: (checked: number, total: number) => `Checking originals: ${checked.toLocaleString()} of ${total.toLocaleString()}.`,
   originalsAllGood: (total: number) => total === 0 ? 'There are no originals in your library yet.' : `All ${total.toLocaleString()} originals match their recorded checksums.`,
   originalsAllGoodTitle: 'Originals verified',
@@ -292,7 +292,7 @@ export const en = {
     ? `${plural(count, 'repaired original', 'repaired originals')} kept an old cached thumbnail that could not be removed; it may still look damaged in the grid. The original itself is repaired.`
     : `${plural(count, 'repaired original is', 'repaired originals are')} in place, but the system could not confirm the change was written to storage. Check again later.`,
   originalsUnknownDay: 'Date unknown', originalsRole: { photo: 'photo', video: 'video', overlay: 'overlay' } as const,
-  inspectTitle: 'Check a backup', inspectSubtitle: 'Verify a Snarchive backup and see what it contains. Checking changes nothing; restoring is a separate step.',
+  inspectTitle: 'Restore a backup', inspectSubtitle: 'Verify a Snarchive backup and see what it contains. Checking changes nothing; restoring is a separate step.',
   inspectFull: 'Reads every original', inspectFullDetail: 'Every photo and video in the backup is read and checked against its recorded size and checksum, so a large backup takes a while. Keep Snarchive open.',
   inspectReadOnly: 'Read-only', inspectReadOnlyDetail: 'Your library, favorites and import jobs are not touched, and the backup file is not changed.',
   inspectLater: 'Restore only when you choose', inspectLaterDetail: 'After a successful check you can restore the backup into your library. Nothing changes until you choose Restore.',
@@ -325,7 +325,7 @@ export const en = {
   inspectErrors: {
     'busy': 'Another Snarchive task is running. Wait for it to finish, then try again.',
     'unsafe-or-unsupported-zip': 'This file is not a readable ZIP archive, or it uses ZIP features Snarchive does not accept.',
-    'backup-not-snarchive': 'This ZIP is not a Snarchive backup. To add a Snapchat export, use Scan ZIP files on the home screen.',
+    'backup-not-snarchive': 'This ZIP is not a Snarchive backup. To add a Snapchat export, use Add memories and choose ZIP files.',
     'backup-invalid': 'This backup’s records are malformed or inconsistent, so it cannot be trusted.',
     'backup-unsupported': 'This backup was made by a newer version of Snarchive. Update the app to check it.',
     'backup-damaged': 'Part of this backup is missing or damaged: a file did not match its recorded size or checksum.',
@@ -364,7 +364,7 @@ export const en = {
   restoreNotChanged: 'Your library was not changed. Originals that were already checked may stay in Snarchive’s storage, unused, and a later restore reuses them.',
   restoreErrors: {
     'restore-conflict': 'This backup disagrees with an export already in your library: the same export, with different contents or different preserved files. Nothing was restored.',
-    'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Use Check originals on the home screen to repair it from a backup or a recorded export, then restore again. Keep your exports.',
+    'stored-object-corrupt': 'An original already in your library is damaged, so nothing was restored and that file was left untouched. Use Settings → Troubleshooting → Check saved files to repair it from a backup or a recorded export, then restore again. Keep your exports.',
     'restore-schema-unsupported': 'This library uses a version Snarchive cannot restore into. Update the app and try again.',
     'restore-failed': 'The restore could not be completed safely.',
     'store-staging-cleanup-failed': 'A partly written original in Snarchive’s storage could not be removed, so the restore stopped. Your backup is unchanged. Snarchive tries to remove it again the next time you restore a backup or preserve originals; try again later.',

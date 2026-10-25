@@ -458,6 +458,17 @@ class SnarchiveSourcesModule : Module() {
       val code = storageReviews.finish()
       if (code == null) mapOf("ok" to true) else mapOf("ok" to false, "code" to code)
     }
+    AsyncFunction("evictStorageThumbnail") { hash: String ->
+      val result = storageReviews.run {
+        try {
+          require(hash.matches(Regex("[a-f0-9]{64}")))
+          val context = requireNotNull(appContext.reactContext)
+          val cache = synchronized(this) { thumbnails ?: com.alkval.snarchive.sources.storage.ThumbnailCache(context.filesDir, context.cacheDir).also { thumbnails = it } }
+          cache.evict(hash); true
+        } catch (_: Exception) { false }
+      }
+      mapOf("ok" to (result.value == true), "code" to if (result.value == true) null else "thumbnail-eviction-failed")
+    }
     AsyncFunction("scanDirectory") { uriString: String ->
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
