@@ -67,3 +67,48 @@ test('media drags are ignored while open; sheet drags are ignored unless open', 
   model.sheetDrag(-30); assert.equal(state.offset, 0, 'never above the open position');
   model.sheetDrag(120); model.sheetRelease(true); finish(); assert.equal(state.mounted, false);
 });
+
+test('Back during a media drag cancels that drag: its later moves and release neither reopen details nor close the viewer', () => {
+  const { model, state, finish } = sheet();
+  model.stageDrag(-150); assert.equal(model.phase, 'dragging');
+  model.close(); // Back while the finger is still on the media.
+  model.stageDrag(-300); assert.equal(model.phase, 'closed', 'later moves are ignored');
+  assert.equal(model.release('up'), true, 'its release is consumed, not reopening and not closing the viewer');
+  model.stageDrag(null); finish();
+  assert.deepEqual(state, { offset: 800, mounted: false, open: false });
+  assert.equal(model.phase, 'closed');
+});
+
+test('after the cancelled drag ends, a new gesture may interrupt the close and open details again', () => {
+  const { model, state, finish } = sheet();
+  model.stageDrag(-150); model.close(); model.stageDrag(-200); model.stageDrag(null);
+  model.stageDrag(-100); assert.equal(model.phase, 'dragging', 'a genuinely new drag takes over the closing sheet');
+  finish(); assert.equal(state.mounted, true, 'the stopped close does not unmount it');
+  assert.equal(model.release('up'), true); model.stageDrag(null); finish();
+  assert.deepEqual(state, { offset: 0, mounted: true, open: true });
+  model.release('down'); // A plain release down is not consumed after the cancelled drag ended.
+  assert.equal(new DetailsSheet({ set() {}, animate() {}, stop() {}, mount() {}, opened() {} }, 800).release('down'), false);
+});
+
+test('Done while the media drag that opened the sheet is still settling does not let it reopen', () => {
+  const { model, state, finish } = sheet();
+  model.stageDrag(-400); model.release('up'); // Opened by release; the end of that drag is reported next.
+  model.close(); model.stageDrag(null); finish();
+  assert.deepEqual(state, { offset: 800, mounted: false, open: false });
+});
+
+test('rotation during a close retargets it to the new screen height, so it never unmounts part-way on screen', () => {
+  const { model, state, finish } = sheet(400); // Landscape.
+  model.open(); finish(); model.close();
+  model.resize(900); // Portrait: the old target (400) would stop short of the new bottom.
+  finish();
+  assert.deepEqual(state, { offset: 900, mounted: false, open: false });
+});
+
+test('rotation keeps a dragged sheet at the same distance from the new bottom and leaves an open sheet open', () => {
+  const { model, state, finish } = sheet(800);
+  model.stageDrag(-200); assert.equal(state.offset, 600);
+  model.resize(400); assert.equal(state.offset, 200);
+  model.release('up'); model.stageDrag(null); finish(); model.resize(800);
+  assert.deepEqual(state, { offset: 0, mounted: true, open: true });
+});

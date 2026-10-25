@@ -108,7 +108,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
     mount: setDetails, opened: setDetailsOpen,
   }, height);
   const detailsSheet = sheetModel.current;
-  detailsSheet.height = height;
+  useEffect(() => detailsSheet.resize(height), [height, detailsSheet]);
   const openDetails = () => { if (deleting) return; stage.current?.cancel(); detailsSheet.open(); };
   const dragDetails = (dy: number | null) => { if (!deleting) detailsSheet.stageDrag(dy); };
   const vertical = (direction: 'up' | 'down') => {
