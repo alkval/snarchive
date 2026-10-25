@@ -3,8 +3,8 @@ import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, ty
 import { ActivityIndicator, AppState, Image, Pressable, SectionList, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import type { ImportStore, ChronologicalRow } from '../storage/importStore';
-import { thumbnail } from '../platform/originalImporter';
+import type { ImportStore, ChronologicalRow, LibraryMonth } from '../storage/importStore';
+import { memoryThumbnail } from '../platform/originalImporter';
 import { pageThumbnails } from '../storage/pageThumbnails';
 import { librarySections } from '../domain/librarySections';
 import { LibraryFilterForm } from './LibraryFilters';
@@ -15,6 +15,7 @@ import { FavoriteWrites } from '../domain/favoriteWrites';
 import { LibraryGrid, favoriteSavedHandler } from '../domain/libraryGrid';
 import { ThumbnailWindow, visibleThumbnailRows } from '../domain/thumbnailWindow';
 import { gridLayout, GRID_COLUMNS, GRID_GAP } from '../domain/gridLayout';
+import { MonthScrollbar } from './MonthScrollbar';
 import { utcDay, watchUTCDate } from '../domain/onThisDay';
 import { Button, Notice } from './kit';
 import { space, type, useTheme } from './theme';
@@ -41,10 +42,15 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const [listHeaderHeight, setListHeaderHeight] = useState(0);
   const [editingFilters, setEditingFilters] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [monthRevision, monthsChanged] = useReducer((value: number) => value + 1, 0);
+  const [timeline, setTimeline] = useState<{ key: string; months: LibraryMonth[] }>({ key: '', months: [] });
+  const [visibleMonth, setVisibleMonth] = useState('');
+  const [feedEpoch, setFeedEpoch] = useState(0);
+  const jumpRequest = useRef(0);
   const [, thumbnailChanged] = useReducer((value: number) => value + 1, 0);
   const thumbnails = useMemo(() => new ThumbnailWindow<ChronologicalRow>(async row => {
     let uri: string | null = null;
-    await pageThumbnails([row], store, thumbnail, () => false, (_id, value) => { uri = value; });
+    await pageThumbnails([row], store, memoryThumbnail, () => false, (_id, value) => { uri = value; });
     return uri;
   }), [store]);
   useEffect(() => thumbnails.subscribe(thumbnailChanged), [thumbnails]);
@@ -66,10 +72,20 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write. A completed
    * save always reaches the grid, whichever viewer started it and whenever it finishes; the open sequence, if it has
    * that memory loaded, is updated too. */
-  const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite),
-    favoriteSavedHandler(grid, () => latest.current)), [store, grid]);
+  const writes = useMemo(() => {
+    const saved = favoriteSavedHandler(grid, () => latest.current);
+    return new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite), (id, favorite) => {
+      saved(id, favorite); if (grid.filters.favorites) monthsChanged();
+    });
+  }, [store, grid]);
   const feed = useMemo(() => grid.feedRows, [grid, gridVersion]), filters = grid.filters;
   const filterKey = JSON.stringify(filters);
+  useEffect(() => {
+    let active = true;
+    void store.chronologicalMonths(filters).then(months => { if (active) setTimeline({ key: filterKey, months }); },
+      () => { if (active) setTimeline({ key: filterKey, months: [] }); });
+    return () => { active = false; };
+  }, [store, filterKey, refreshToken, monthRevision]);
   // A refresh (an import closed, a restore) reads the library again from its first page. Until that read lands, keep the
   // rows already shown rather than blanking the grid to a spinner and back; they cannot be opened meanwhile.
   const held = useRef({ key: '', rows: [] as ChronologicalRow[] });
@@ -91,6 +107,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     // Visibility is an observation, not React state. Updating state here feeds list layout back into another
     // render and another visibility update. Once these thumbnails are cached, this callback causes no renders.
     visibleIds.current = ids;
+    if (visible[0]) setVisibleMonth(visible[0].sortDay.slice(0, 7));
     thumbnailRef.current.setRows(window);
   }).current;
   const previousRevision = useRef(refreshToken);
@@ -111,6 +128,17 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   const openRef = useRef(open); openRef.current = open;
   const openTile = useCallback((row: ChronologicalRow) => openRef.current(row), []);
   const failThumbnail = useCallback((id: string, uri: string) => thumbnails.failed(id, uri), [thumbnails]);
+  const jump = async (month: string) => {
+    const request = ++jumpRequest.current;
+    if (await grid.jumpToMonth(month) && jumpRequest.current === request) {
+      visibleIds.current = []; setVisibleMonth(month); setFeedEpoch(value => value + 1);
+    }
+  };
+  const newest = async () => {
+    const request = ++jumpRequest.current;
+    await grid.refresh();
+    if (jumpRequest.current === request) { visibleIds.current = []; setFeedEpoch(value => value + 1); }
+  };
   /** Keep the grid's earlier rows and original scroll position; append towards the last viewed memory in bounded
    * batches. Never jump to a middle-only feed: it has no Previous button to recover omitted rows. */
   const closeViewer = (last: ChronologicalRow) => {
@@ -130,13 +158,15 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   });
   const grouped = useMemo(() => sections(rows), [rows]);
   const chips = en.filterChips(filters.media, filters.favorites, filters.month, filters.onThisDay);
+  const hasHeader = chips.length > 0 || grid.jumped;
   const layout = useMemo(() => gridLayout(grouped.map(section => section.data.length), listWidth, screen.fontScale,
-    chips.length ? listHeaderHeight : 0), [grouped, listWidth, screen.fontScale, chips.length, listHeaderHeight]);
+    hasHeader ? listHeaderHeight : 0), [grouped, listWidth, screen.fontScale, hasHeader, listHeaderHeight]);
 
-  const header = chips.length > 0 ? <View style={styles.header} onLayout={event => setListHeaderHeight(event.nativeEvent.layout.height)}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
+  const header = hasHeader ? <View style={styles.header} onLayout={event => setListHeaderHeight(event.nativeEvent.layout.height)}>
+    {chips.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
       {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
-    </Pressable>
+    </Pressable>}
+    {grid.jumped && <Button label="Back to newest" variant="plain" onPress={() => void newest()} />}
   </View> : null;
   const empty = grid.loading ? <View style={styles.centered}><ActivityIndicator color={t.secondary} accessibilityLabel={en.libraryLoading} /></View>
     : grid.failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => void grid.retry() }} /></View>
@@ -171,7 +201,8 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
         <Ionicons name="settings-outline" size={23} color={t.text} />
       </Pressable>
     </View>
-    <SectionList key={filterKey} sections={grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
+    <View style={styles.root}>
+    <SectionList key={`${filterKey}:${feedEpoch}`} sections={grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
       ListHeaderComponent={header ?? undefined} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
       onEndReachedThreshold={0.5} onEndReached={() => { if (!grid.loading && !grid.failed && grid.hasNext) void grid.nextPage(); }}
       onViewableItemsChanged={viewability} viewabilityConfig={viewabilityConfig} initialNumToRender={12} windowSize={7}
@@ -187,6 +218,8 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
           onOpen={openTile} onFailed={failThumbnail} />)}
         {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
       </View>} />
+    {timeline.key === filterKey && timeline.months.length > 1 && <MonthScrollbar key={filterKey} months={timeline.months} month={visibleMonth} select={month => void jump(month)} />}
+    </View>
   </SafeAreaView>
     </View>
     {editingFilters && <View style={StyleSheet.absoluteFill}>
@@ -194,7 +227,7 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
     </View>}
     {sequence && <View style={StyleSheet.absoluteFill}>
       <MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} onBusy={setDeleting}
-        onDeleted={(id, cleanupFailed) => { grid.memoryDeleted(id); onLibraryChanged?.(); onNotice?.(cleanupFailed ? 'Deleted. Some unused files could not be cleared; you can retry from Settings.' : 'Deleted'); }} />
+        onDeleted={(id, cleanupFailed) => { grid.memoryDeleted(id); monthsChanged(); onLibraryChanged?.(); onNotice?.(cleanupFailed ? 'Deleted. Some unused files could not be cleared; you can retry from Settings.' : 'Deleted'); }} />
     </View>}
   </View>;
 }

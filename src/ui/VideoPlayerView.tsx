@@ -9,6 +9,7 @@ import { en } from '../i18n/en';
 import { MediaButton } from './kit';
 import { GestureStage } from './GestureStage';
 import { ViewerChrome } from './ViewerChrome';
+import { OverlayImage } from './OverlayImage';
 import type { Navigation } from '../domain/viewerGestures';
 import { type, useTheme } from './theme';
 
@@ -135,7 +136,9 @@ export function VideoPlayerView({ video, row, store, onNavigate, covered = false
       {status === 'error' ? <View style={styles.loading}><Text accessibilityLiveRegion="polite" style={[type.body, styles.centerText, { color: t.onMedia }]}>{en.libraryVideoFailed}</Text></View> : <>
       <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" surfaceType="textureView" nativeControls={false} fullscreenOptions={{ enable: false }} allowsPictureInPicture={false} allowsVideoFrameAnalysis={false} />
       {!ready && poster && <Image accessible={false} fadeDuration={0} source={{ uri: poster }} resizeMode="contain" style={StyleSheet.absoluteFill} />}
-      {overlay && showOverlay && <Image pointerEvents="none" accessible={false} fadeDuration={0} source={{ uri: overlay }} resizeMode="contain" style={StyleSheet.absoluteFill} onError={() => { setOverlay(null); setNote(en.libraryOverlayFailed); }} />}
+      {overlay && showOverlay && videoDisplaySize(video.width, video.height, video.rotation) &&
+        <OverlayImage uri={overlay} media={videoDisplaySize(video.width, video.height, video.rotation)!}
+          onError={() => { setOverlay(null); setNote(en.libraryOverlayFailed); }} />}
       {!ready && <View style={styles.loading}><ActivityIndicator color={t.onMediaSecondary} accessibilityLabel={en.videoLoading} /></View>}
       </>}
     </GestureStage>

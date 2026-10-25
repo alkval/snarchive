@@ -7,6 +7,11 @@ test('overlay alignment accepts proportional resolutions without stretching', ()
   assert.equal(matchingAspect({ width: 0, height: 800 }, { width: 300, height: 400 }), false);
   assert.equal(matchingAspect({ width: Infinity, height: 800 }, { width: 300, height: 400 }), false);
 });
+test('small export rounding differences work in either orientation, while genuine canvas mismatches stay hidden', () => {
+  assert.equal(matchingAspect({ width: 1080, height: 1920 }, { width: 720, height: 1276 }), true);
+  assert.equal(matchingAspect({ width: 1920, height: 1080 }, { width: 1276, height: 720 }), true);
+  assert.equal(matchingAspect({ width: 1080, height: 1920 }, { width: 600, height: 800 }), false);
+});
 
 import { videoDisplaySize, seekTarget, videoControlsReady } from '../src/domain/photoGeometry.ts';
 test('video geometry applies container rotations before comparing overlays', () => {

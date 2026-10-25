@@ -167,6 +167,18 @@ public final class StorageReview implements Closeable {
   }
 
   /** Releases the writer lock (cleanup sessions) once. */
+  public boolean clearLibraryFiles() throws IOException {
+    if (closed || writerLock == null) throw fail("invalid-entry");
+    boolean ok = true;
+    // The database was committed empty first. Keep writer.lock itself and hold it until all cleanup is finished.
+    for (String name : new String[] { "objects", "quarantine", "staging" }) {
+      try { store.fault("before-reset-" + name); ok = PrivateFiles.deleteTree(new File(store.rootDirectory(), name)) && ok; }
+      catch (IOException | RuntimeException failure) { ok = false; }
+    }
+    try { store.sync(store.rootDirectory(), "sync-reset-directory"); } catch (IOException | RuntimeException failure) { ok = false; }
+    return ok;
+  }
+
   @Override public void close() throws IOException {
     if (closed) return; closed = true;
     if (writerLock != null) writerLock.close();

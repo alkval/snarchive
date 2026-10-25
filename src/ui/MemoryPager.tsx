@@ -7,6 +7,8 @@ import type { ChronologicalRow, ImportStore } from '../storage/importStore';
 import type { Direction, MemorySequence } from '../domain/memoryNavigation';
 import type { FavoriteWrites } from '../domain/favoriteWrites';
 import { MemoryViewer } from './MemoryViewer';
+import { OverlayImage } from './OverlayImage';
+import { videoDisplaySize } from '../domain/photoGeometry';
 
 /** Shows the open memory of a sequence and moves through it. Each memory gets a fresh viewer (keyed by ID); whether
  * the viewer's bars are shown is kept here, so it carries over as you swipe. Favourite writes belong to the library
@@ -64,8 +66,9 @@ export function MemoryPager({ sequence, store, writes, onClose, onDeleted, onBus
  * overlay are never seen apart. */
 function MediaPreview({ media }: { media?: ViewerMedia }) {
   const uri = media?.base?.uri ?? media?.poster;
+  const size = media?.base?.size ?? (media?.video ? videoDisplaySize(media.video.width, media.video.height, media.video.rotation) : null);
   return uri ? <View style={StyleSheet.absoluteFill}>
     <Image accessible={false} fadeDuration={0} source={{ uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />
-    {media?.overlay && <Image accessible={false} fadeDuration={0} source={{ uri: media.overlay.uri }} resizeMode="contain" style={StyleSheet.absoluteFill} />}
+    {media?.overlay && size && <OverlayImage uri={media.overlay.uri} media={size} />}
   </View> : null;
 }

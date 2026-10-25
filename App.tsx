@@ -17,6 +17,7 @@ import { Button, LargeTitle, Notice } from './src/ui/kit';
 import { space, type, useTheme } from './src/ui/theme';
 import { AppearanceProvider } from './src/ui/AppearanceProvider';
 import { AppearanceScreen } from './src/ui/AppearanceScreen';
+import { clearLibrary } from './src/platform/storageCleanup';
 
 type Route = 'library' | 'import' | 'settings' | SettingsAction;
 export default function App() { return <SafeAreaProvider><AppearanceProvider><SnarchiveApp /></AppearanceProvider></SafeAreaProvider>; }
@@ -26,6 +27,8 @@ function SnarchiveApp() {
   const [route, setRoute] = useState<Route>('library'), [initialKind, setInitialKind] = useState<'zip' | 'directory' | undefined>();
   const [loadAttempt, setLoadAttempt] = useState(0), [failed, setFailed] = useState(false), [warning, setWarning] = useState('');
   const [revision, setRevision] = useState(0), [toast, setToast] = useState('');
+  const [resetting, setResetting] = useState(false);
+  const resetRunning = useRef(false);
   const browserBack = useRef<(() => boolean) | null>(null), importBack = useRef<(() => void) | null>(null);
   const mounted = useRef(true);
   useEffect(() => {
@@ -42,12 +45,13 @@ function SnarchiveApp() {
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 3500); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (resetting) return true;
       if (route === 'import') { importBack.current?.(); return true; }
       if (route === 'settings') { setRoute('library'); return true; }
       return route === 'library' && !!browserBack.current?.();
     });
     return () => subscription.remove();
-  }, [route]);
+  }, [route, resetting]);
   const refresh = useCallback(async (reloadGrid = true) => {
     if (!store) return;
     const next = await store.summary().catch(() => null);
@@ -61,6 +65,18 @@ function SnarchiveApp() {
   const changed = useCallback(() => { void refresh(); }, [refresh]);
   const finishTool = useCallback(() => { setRoute('settings'); void refresh(); }, [refresh]);
   const showLibrary = useCallback(() => { setRoute('library'); void refresh(); }, [refresh]);
+  const reset = async () => {
+    if (resetRunning.current) return;
+    resetRunning.current = true; setResetting(true);
+    try {
+      const result = await clearLibrary();
+      const state = await store?.summary().catch(() => null);
+      setSummary(state ?? { files: 0, objects: 0, memories: 0, unfinished: 0, conflicts: 0 });
+      setRevision(value => value + 1); setRoute('library');
+      setWarning(result.cleanupFailed ? 'The reset finished, but storage cleanup could not be confirmed. Retry Delete all Snarchive media from Settings.' : '');
+      setToast(result.cleanupFailed ? 'Library cleared. Storage cleanup could not be completed; retry Delete all in Settings.' : 'Library cleared. You can import your exports again.');
+    } finally { resetRunning.current = false; setResetting(false); }
+  };
   if (!store || !summary) return <SafeAreaView style={[styles.center, { backgroundColor: t.ground }]}>
     {failed ? <Notice tone="error" message="Your library could not be opened. Its files have not been changed." action={{ label: 'Try again', onPress: () => setLoadAttempt(value => value + 1) }} />
       : <ActivityIndicator size="large" color={t.accent} accessibilityLabel="Opening library" />}
@@ -68,7 +84,7 @@ function SnarchiveApp() {
   return <View style={[styles.root, { backgroundColor: t.ground }]}>
     <StatusBar style={t.dark ? 'light' : 'dark'} />
     <View style={styles.root} pointerEvents={route === 'library' ? 'auto' : 'none'} importantForAccessibility={route === 'library' ? 'auto' : 'no-hide-descendants'} accessibilityElementsHidden={route !== 'library'}>
-    {summary.memories > 0 ? <LibraryBrowser store={store} onClose={() => {}} backHandler={browserBack}
+    {!resetting && summary.memories > 0 ? <LibraryBrowser store={store} onClose={() => {}} backHandler={browserBack}
       onAdd={() => add()} onSettings={() => setRoute('settings')} refreshToken={revision} onLibraryChanged={() => void refresh(false)} onNotice={setToast} />
       : <SafeAreaView style={styles.root}>
         <View style={styles.emptyBar}><Text style={[type.headline, { color: t.text }]}>Snarchive</Text>
@@ -85,7 +101,7 @@ function SnarchiveApp() {
     {!!toast && route === 'library' && <View style={[styles.toast, { backgroundColor: t.text }]} pointerEvents="none"><Text accessibilityLiveRegion="polite" style={[type.body, { color: t.ground }]}>{toast}</Text></View>}
     {route !== 'library' && <View style={[StyleSheet.absoluteFill, { backgroundColor: t.ground }]}>
       {route === 'import' && <ImportScreen store={store} initialKind={initialKind} close={closeImport} complete={finishImport} backHandler={importBack} />}
-      {route === 'settings' && <SettingsScreen close={() => setRoute('library')} open={setRoute} warning={warning} />}
+      {route === 'settings' && <SettingsScreen close={() => setRoute('library')} open={setRoute} warning={warning} reset={reset} resetting={resetting} />}
       {route === 'appearance' && <AppearanceScreen onClose={settings} />}
       {route === 'backup' && <BackupScreen onClose={settings} />}
       {route === 'restore' && <BackupInspectScreen onClose={finishTool} onChanged={changed} onOpenLibrary={showLibrary} />}

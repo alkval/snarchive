@@ -38,6 +38,7 @@ export class PreviewStore {
     });
     return result;
   }
+  async clear(): Promise<void> { await this.db.runAsync('DELETE FROM preview_checkpoint'); }
   async save(saved: SavedPreview): Promise<void> {
     const payload = encodePreview(saved);
     await this.db.withExclusiveTransactionAsync(async tx => {

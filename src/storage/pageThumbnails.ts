@@ -3,7 +3,7 @@ import type { ImportStore, LibraryRow, LibraryObject } from './importStore.ts';
 /** One page, one active decode, no automatic retries for failed media. */
 export async function pageThumbnails(
   rows: readonly LibraryRow[], store: Pick<ImportStore, 'objects'>,
-  create: (object: LibraryObject, video: boolean) => Promise<string>,
+  create: (object: LibraryObject, video: boolean, overlay?: LibraryObject) => Promise<string>,
   stopped: () => boolean, publish: (id: string, uri: string | null) => void,
 ): Promise<void> {
   const results = new Map<string, string | null>();
@@ -12,12 +12,14 @@ export async function pageThumbnails(
     if (row.photos + row.videos !== 1) { publish(row.id, null); continue; }
     let uri: string | null = null;
     try {
-      const object = (await store.objects(row.id)).find(item => item.role !== 'overlay');
+      const objects = await store.objects(row.id);
+      const object = objects.find(item => item.role !== 'overlay');
+      const overlay = row.overlays === 1 ? objects.find(item => item.role === 'overlay') : undefined;
       if (stopped()) return;
       if (object) {
-        const key = `${object.sha256}:${object.role}`;
+        const key = `${object.sha256}:${object.role}:${overlay?.sha256 ?? 'none'}`;
         if (!results.has(key)) {
-          try { results.set(key, await create(object, object.role === 'video')); }
+          try { results.set(key, await create(object, object.role === 'video', overlay)); }
           catch { results.set(key, null); }
         }
         uri = results.get(key) ?? null;

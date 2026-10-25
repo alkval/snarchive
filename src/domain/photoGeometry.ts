@@ -2,7 +2,10 @@ export type ImageSize = { width: number; height: number };
 export function matchingAspect(base: ImageSize, overlay: ImageSize): boolean {
   const values = [base.width, base.height, overlay.width, overlay.height];
   if (values.some(value => !Number.isFinite(value) || value <= 0)) return false;
-  return Math.abs(base.width / base.height - overlay.width / overlay.height) <= 0.001;
+  // Export encoders round dimensions independently. Compare relative error so portrait and landscape get the
+  // same tolerance; a different canvas such as 4:3 versus 9:16 still fails.
+  const ratio = (base.width / base.height) / (overlay.width / overlay.height);
+  return Math.abs(Math.log(ratio)) <= Math.log(1.01);
 }
 
 /** Container rotation describes display orientation, not encoded frame dimensions. */

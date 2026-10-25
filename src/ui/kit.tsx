@@ -21,11 +21,11 @@ export function PressScale({ style, children, disabled, onPressIn, onPressOut, .
 }
 
 export function Button({ label, onPress, variant = 'primary', icon, disabled = false, busy = false }: {
-  label: string; onPress: () => void; variant?: 'primary' | 'secondary' | 'plain'; icon?: IconName; disabled?: boolean; busy?: boolean;
+  label: string; onPress: () => void; variant?: 'primary' | 'secondary' | 'plain' | 'destructive'; icon?: IconName; disabled?: boolean; busy?: boolean;
 }) {
   const t = useTheme();
-  const fill = variant === 'primary' ? t.primary : variant === 'secondary' ? t.raised : 'transparent';
-  const ink = variant === 'primary' ? t.onPrimary : variant === 'secondary' ? t.text : t.accent;
+  const fill = variant === 'destructive' ? t.negative : variant === 'primary' ? t.primary : variant === 'secondary' ? t.raised : 'transparent';
+  const ink = variant === 'destructive' ? '#FFFFFF' : variant === 'primary' ? t.onPrimary : variant === 'secondary' ? t.text : t.accent;
   return <PressScale accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled, busy }} disabled={disabled} onPress={onPress}
     style={[styles.button, variant === 'plain' && styles.plain, { backgroundColor: fill, opacity: disabled ? 0.4 : 1 }]}>
     {busy ? <ActivityIndicator color={ink} /> : icon ? <Ionicons name={icon} size={20} color={ink} /> : null}

@@ -3,6 +3,11 @@ package com.alkval.snarchive.sources.storage
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import kotlin.math.abs
+import kotlin.math.ln
 import android.media.ExifInterface
 import android.media.MediaMetadataRetriever
 import android.os.Build
@@ -14,47 +19,65 @@ import java.util.regex.Pattern
 class ThumbnailCache(private val files: File, private val cache: File) {
   @Synchronized fun evict(hash: String) { ThumbnailFiles.evict(cache, hash) }
   private val root = File(cache, "snarchive-thumbnails-v1")
-  private var index: LruFileIndex? = null
+  private var retiredLegacy = false
+  private val composedRoot = File(cache, ThumbnailFiles.COMPOSED_DIRECTORY)
+  private var composedIndex: LruFileIndex? = null
 
-  @Synchronized fun create(hash: String, bytes: Long, video: Boolean): File {
-    require(hash.matches(Regex("[a-f0-9]{64}")))
-    require(bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT)
-    check(root.isDirectory || root.mkdirs())
-    // Sized to keep a whole library's grid cached: ~8,000 memories at 20-30 KiB per 320px JPEG
-    // is about 200 MiB. The OS may still clear cacheDir; everything here is rebuildable.
-    val lru = index ?: LruFileIndex(root, NAME, MAX_FILES, MAX_BYTES).also { index = it }
-    val name = "$hash-${if (video) "video" else "photo"}.jpg"
+  @Synchronized fun create(hash: String, bytes: Long, video: Boolean): File = composed(hash, bytes, video, "", 0)
+
+  /** A new cache namespace makes existing previews rebuild without any re-import. Identity includes BOTH objects. */
+  @Synchronized fun composed(hash: String, bytes: Long, isVideo: Boolean, layerHash: String, layerBytes: Long): File {
+    require(hash.matches(Regex("[a-f0-9]{64}")) && (layerHash.isEmpty() || layerHash.matches(Regex("[a-f0-9]{64}"))))
+    require(bytes in 0..OriginalStore.MAX_OBJECT && layerBytes in 0..OriginalStore.MAX_OBJECT)
+    if (!retiredLegacy) { PrivateFiles.deleteTree(root); retiredLegacy = true }
+    check(composedRoot.isDirectory || composedRoot.mkdirs())
+    val lru = composedIndex ?: LruFileIndex(composedRoot, COMPOSED_NAME, MAX_FILES, MAX_BYTES).also { composedIndex = it }
+    val name = "$hash-${layerHash.ifEmpty { "none" }}-${if (isVideo) "video" else "photo"}.jpg"
     lru.hit(name)?.let { return it }
-    // Presence and length only. Decoding detects unreadable media; a full rehash per miss
-    // made scrolling a large library re-read gigabytes of originals.
-    val source = OriginalStore(File(files, "snarchive-originals")).confirm(hash, bytes)
-    var bitmap: Bitmap? = null
+    val store = OriginalStore(File(files, "snarchive-originals"))
+    var base: Bitmap? = null
     try {
-      bitmap = if (video) video(source) else photo(source)
-      val scale = minOf(1.0, 320.0 / maxOf(bitmap.width, bitmap.height))
-      if (scale < 1) {
-        val resized = Bitmap.createScaledBitmap(bitmap, maxOf(1, (bitmap.width * scale).toInt()), maxOf(1, (bitmap.height * scale).toInt()), true)
-        if (resized !== bitmap) bitmap.recycle()
-        bitmap = resized
-      }
-      val part = File(root, "thumbnail.part")
-      val target = File(root, name)
+      val frame = if (isVideo) video(store.confirm(hash, bytes), 512) else Frame(photo(store.confirm(hash, bytes), 1024), true)
+      base = frame.bitmap
+      val scale = minOf(1.0, 512.0 / maxOf(base.width, base.height))
+      val output = Bitmap.createBitmap(maxOf(1, (base.width * scale).toInt()), maxOf(1, (base.height * scale).toInt()), Bitmap.Config.ARGB_8888)
       try {
-        FileOutputStream(part).use { check(bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it)) }
-        check(part.length() in 1..MAX_FILE)
-        lru.reserve(part.length())
-        check(part.renameTo(target))
-        lru.added(name, target.length())
-      } finally { part.delete() }
-      return target
-    } finally { bitmap?.recycle() }
+        val canvas = Canvas(output)
+        val bounds = RectF(0f, 0f, output.width.toFloat(), output.height.toFloat())
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(base, null, bounds, paint)
+        if (layerHash.isNotEmpty() && frame.geometryKnown) {
+          var layer: Bitmap? = null
+          try {
+            layer = photo(store.confirm(layerHash, layerBytes), 1024)
+            val ratio = (base.width.toDouble() / base.height) / (layer.width.toDouble() / layer.height)
+            if (abs(ln(ratio)) <= ln(1.01)) canvas.drawBitmap(layer, null, bounds, paint)
+          } catch (_: Exception) { /* An unavailable overlay must not hide a readable base thumbnail. */ }
+          finally { layer?.recycle() }
+        }
+        val part = File(composedRoot, "thumbnail.part")
+        val target = File(composedRoot, name)
+        try {
+          FileOutputStream(part).use { check(output.compress(Bitmap.CompressFormat.JPEG, 92, it)) }
+          check(part.length() in 1..MAX_FILE); lru.reserve(part.length())
+          check(part.renameTo(target)); lru.added(name, target.length()); return target
+        } finally { part.delete() }
+      } finally { output.recycle() }
+    } finally { base?.recycle() }
   }
-  private fun photo(file: File): Bitmap {
+
+  @Synchronized fun clear(): Boolean {
+    val ok = PrivateFiles.deleteTree(root) and PrivateFiles.deleteTree(composedRoot)
+    composedIndex = null
+    return ok
+  }
+
+  private fun photo(file: File, maximum: Int = 640): Bitmap {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.path, bounds)
     require(bounds.outWidth > 0 && bounds.outHeight > 0 && bounds.outWidth.toLong() * bounds.outHeight <= 200_000_000)
     var sample = 1
-    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 640) sample *= 2
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > maximum) sample *= 2
     val original = requireNotNull(BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample }))
     try {
       val orientation = ExifInterface(file.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
@@ -73,16 +96,34 @@ class ThumbnailCache(private val files: File, private val cache: File) {
       return result
     } catch (error: Exception) { original.recycle(); throw error }
   }
-  private fun video(file: File): Bitmap {
-    require(Build.VERSION.SDK_INT >= 27) // Older devices retain a video placeholder; never decode a full-size frame.
+  private data class Frame(val bitmap: Bitmap, val geometryKnown: Boolean)
+  private fun video(file: File, maximum: Int): Frame {
+    require(Build.VERSION.SDK_INT >= 27)
     val reader = MediaMetadataRetriever()
     try {
       reader.setDataSource(file.path)
-      return requireNotNull(reader.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 320))
+      val width = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+      val height = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+      val rotation = reader.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: -1
+      val raw = requireNotNull(reader.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, maximum, maximum))
+      val known = width > 0 && height > 0 && rotation in setOf(0, 90, 180, 270)
+      val swapped = rotation == 90 || rotation == 270
+      val wanted = if (swapped) height.toDouble() / maxOf(1, width) else width.toDouble() / maxOf(1, height)
+      // Frame retrieval normally applies rotation. Only correct a demonstrable axes mismatch; never guess
+      // another turn for 180-degree or square frames, which would double-rotate an already oriented picture.
+      val needsRotation = known && swapped && width != height && abs(ln((raw.width.toDouble() / raw.height) / wanted)) > ln(1.01)
+      if (!needsRotation) return Frame(raw, known)
+      try {
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        val turned = Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, matrix, true)
+        if (turned !== raw) raw.recycle()
+        return Frame(turned, true)
+      } catch (error: Exception) { raw.recycle(); throw error }
     } finally { reader.release() }
   }
   private companion object {
     val NAME: Pattern = Pattern.compile("[a-f0-9]{64}-(photo|video)\\.jpg")
+    val COMPOSED_NAME: Pattern = Pattern.compile("[a-f0-9]{64}-([a-f0-9]{64}|none)-(photo|video)\\.jpg")
     const val MAX_FILES = 20_000
     const val MAX_BYTES = 256L * 1024 * 1024
     const val MAX_FILE = 1024L * 1024

@@ -13,6 +13,7 @@ import { GestureStage, type GestureStageHandle } from './GestureStage';
 import { ViewerChrome } from './ViewerChrome';
 import { MemoryDetailsSheet } from './MemoryDetailsSheet';
 import { DetailsSheet, releaseDetailsGesture } from '../domain/detailsSheet';
+import { OverlayImage } from './OverlayImage';
 import type { Direction, NeighbourState } from '../domain/memoryNavigation';
 import { type, useReducedMotion, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -133,8 +134,9 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
   const stageContent = base ? <View style={StyleSheet.absoluteFill}>
     <Image accessibilityLabel={en.libraryPhoto} fadeDuration={0} source={{ uri: base.uri }} resizeMode="contain" style={StyleSheet.absoluteFill}
       onError={() => { setBase(null); setOverlay(null); setStatus(en.libraryPhotoFailed); }} />
-    {overlay && <Animated.Image accessible={false} fadeDuration={0} source={{ uri: overlay.uri }} resizeMode="contain" style={[StyleSheet.absoluteFill, { opacity: overlayOpacity }]}
-      onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />}
+    {overlay && <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: overlayOpacity }]}>
+      <OverlayImage uri={overlay.uri} media={base.size} onError={() => { setOverlay(null); setOverlayStatus(en.libraryOverlayFailed); }} />
+    </Animated.View>}
   </View> : <View style={styles.centred}>
     {loading && <ActivityIndicator color={t.onMediaSecondary} accessibilityLabel={en.libraryLoading} />}
     {!!status && <Text accessibilityLiveRegion="polite" style={[type.body, styles.status, { color: t.onMedia }]}>{status}</Text>}

@@ -122,7 +122,7 @@ export const en = {
   libraryVideoFailed: 'This video could not be verified or played. Its record and original file have been kept.',
   libraryPhotoFailed: 'This photo could not be verified or displayed. Its record has been kept. Use Settings → Troubleshooting → Check saved files to check it and, if needed, repair its exact bytes. Keep your source exports.',
   libraryOverlayVariants: 'Several overlays were preserved, so none is shown automatically.',
-  libraryOverlaySize: 'The overlay has a different shape from the photo. It is preserved, but hidden so it is not stretched.',
+  libraryOverlaySize: 'This overlay has different proportions from the photo or video. It is kept, but hidden to avoid stretching or misplacing it.',
   libraryOverlayFailed: 'The overlay could not be verified or shown. The original is still available.',
   viewerStep: (direction: 'next' | 'previous') => direction === 'next' ? 'Next memory' : 'Previous memory',
   viewerNone: (direction: 'next' | 'previous') => direction === 'next' ? 'No next memory' : 'No previous memory',

@@ -285,6 +285,40 @@ public class StorageReviewTest {
       }
     });
 
+    test("confirmed library reset removes only owned trees without following links and keeps its writer lock", () -> {
+      File root = root(); OriginalStore store = new OriginalStore(root);
+      String hash = put(store, bytes(20, 1)); quarantine(root, hash, 7);
+      Files.write(new File(root, "staging/leftover.part").toPath(), bytes(5, 2));
+      File outside = root(); Files.write(new File(outside, "export.jpg").toPath(), bytes(8, 3));
+      Files.createSymbolicLink(new File(root, "objects/export-link").toPath(), outside.toPath());
+      Files.write(new File(root, "unrelated.txt").toPath(), bytes(1, 1));
+      try (StorageReview scan = StorageReview.scan(store)) { fails("invalid-entry", scan::clearLibraryFiles); }
+      try (StorageReview reset = StorageReview.cleanup(store)) {
+        check(reset.clearLibraryFiles(), "cleared"); check(reset.clearLibraryFiles(), "absent is success");
+        check(!new File(root, "objects").exists() && !new File(root, "quarantine").exists() && !new File(root, "staging").exists(), "all media trees gone");
+        check(new File(root, "writer.lock").isFile() && new File(root, "unrelated.txt").isFile(), "other root files retained");
+        check(new File(outside, "export.jpg").isFile(), "link target unchanged");
+        fails("storage-busy", () -> StorageReview.cleanup(new OriginalStore(root)));
+      }
+      check(put(new OriginalStore(root), bytes(20, 1)).equals(hash), "can import again");
+    });
+    test("failed reset cleanup reports leftovers and can be retried", () -> {
+      File root = root(); String hash = put(new OriginalStore(root), bytes(20, 1));
+      OriginalStore failing = new OriginalStore(root, File::getUsableSpace, p -> { if (p.equals("before-reset-objects")) throw new IOException("injected"); });
+      try (StorageReview reset = StorageReview.cleanup(failing)) { check(!reset.clearLibraryFiles(), "failure reported"); }
+      check(new File(root, objectPath(hash)).isFile(), "failed subtree kept");
+      try (StorageReview retry = StorageReview.cleanup(new OriginalStore(root))) { check(retry.clearLibraryFiles(), "retry succeeds"); }
+    });
+    test("repair eviction invalidates composite thumbnails by base OR overlay, keeping unrelated derivatives", () -> {
+      File cache = root(), composed = new File(cache, ThumbnailFiles.COMPOSED_DIRECTORY); composed.mkdirs();
+      String a = sha(bytes(1, 1)), b = sha(bytes(1, 2)), c = sha(bytes(1, 3));
+      String[] names = { a + "-" + b + "-photo.jpg", c + "-" + a + "-video.jpg", c + "-none-photo.jpg", "notes.txt" };
+      for (String name : names) Files.write(new File(composed, name).toPath(), new byte[] { 1 });
+      ThumbnailFiles.evict(cache, a);
+      check(!new File(composed, names[0]).exists() && !new File(composed, names[1]).exists(), "both dependencies evicted");
+      check(new File(composed, names[2]).isFile() && new File(composed, names[3]).isFile(), "unrelated kept");
+    });
+
     System.out.println(passed + " storage review tests passed");
   }
 

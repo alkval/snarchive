@@ -19,6 +19,7 @@ export function validateReceipt(value: Receipt): void {
 export type LibraryRow = { id: string; day: string | null; instant: string | null; dateConflict: number; photos: number; videos: number; overlays: number };
 export type LibraryCursor = { day: string; time: string; id: string };
 export type ChronologicalRow = LibraryRow & { favorite: number; sortDay: string; sortTime: string };
+export type LibraryMonth = { month: string; count: number };
 export type LibraryObject = Receipt & { role: 'photo' | 'video' | 'overlay' };
 /** Derives date-index rows from a source's evidence. Shared by planning and restore, so both index alike. */
 export async function indexDates(tx: SqlConnection, source: SourceInventory) {
@@ -229,6 +230,22 @@ export class ImportStore {
   }
   async chronologicalPage(after: LibraryCursor | null = null, limit = 30, filters: LibraryFilters = defaultFilters): Promise<ChronologicalRow[]> {
     return this.chronological(after, 'next', limit, filters);
+  }
+  /** One row per resolved month, plus an undated/conflicting bucket. Same membership as chronologicalPage. */
+  async chronologicalMonths(filters: LibraryFilters = defaultFilters): Promise<LibraryMonth[]> {
+    check(validFilters(filters));
+    return this.db.getAllAsync<LibraryMonth>(`WITH facts AS MATERIALIZED (
+      SELECT m.id,
+        (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
+        (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS conflict
+      FROM memories m WHERE EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role!='overlay')
+        AND (?='all' OR (?='photos' AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role='photo')) OR (?='videos' AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role='video')))
+        AND (?=0 OR EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id))
+    ) SELECT CASE WHEN conflict=0 THEN substr(coalesce(day,''),1,7) ELSE '' END AS month, count(*) AS count FROM facts
+      WHERE (?='' OR (conflict=0 AND substr(day,1,7)=?))
+        AND (?='' OR (conflict=0 AND substr(day,6,5)=substr(?,6,5) AND substr(day,1,4)<substr(?,1,4)))
+      GROUP BY month ORDER BY month DESC`, filters.media, filters.media, filters.media, filters.favorites ? 1 : 0,
+      filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '');
   }
   /** The memories next to a position in the grid's order (sortDay DESC, sortTime DESC, id ASC), nearest first, under
    * the same filters. The anchor is a sort key, not a membership test: it need not itself match the filters (for

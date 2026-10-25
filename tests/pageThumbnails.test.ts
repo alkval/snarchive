@@ -21,3 +21,11 @@ test('leaving a page stops publication and subsequent decoding', async () => {
   await pageThumbnails([row('a'), row('b')], { objects: async id => [object(id)] }, async () => { calls++; stop = true; return 'file:///cache'; }, () => stop, () => publications++);
   assert.equal(calls, 1); assert.equal(publications, 0);
 });
+test('preview identities include the unique overlay and ambiguous overlays are never chosen', async () => {
+  const base = object('shared'), layers = [ { ...object('layer-a'), role: 'overlay' as const }, { ...object('layer-b'), role: 'overlay' as const } ];
+  const seen: string[] = [];
+  await pageThumbnails([{ ...row('a'), overlays: 1 }, { ...row('b'), overlays: 1 }, { ...row('c'), overlays: 2 }],
+    { objects: async id => [base, ...id === 'a' ? [layers[0]!] : id === 'b' ? [layers[1]!] : layers] },
+    async (_base, _video, overlay) => { seen.push(overlay?.sha256 ?? 'none'); return 'file://preview'; }, () => false, () => {});
+  assert.deepEqual(seen, ['layer-a', 'layer-b', 'none']);
+});

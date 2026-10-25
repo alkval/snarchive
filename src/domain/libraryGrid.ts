@@ -27,6 +27,7 @@ export class LibraryGrid<T extends GridRow> {
   history: (SequenceKey | null)[] = [];
   loading = true;
   failed = false;
+  jumped = false;
   private page: T[] = [];
   private more = false;
   private saved = new Map<string, boolean>();
@@ -92,7 +93,16 @@ export class LibraryGrid<T extends GridRow> {
   }
 
   memoryDeleted(id: string): void { this.removed.add(id); this.saves++; this.changed(); if (!this.loading && !this.rows.length) void this.load(); }
-  refresh(): Promise<void> { this.pages.clear(); this.removed.clear(); this.saved.clear(); this.cursor = null; this.history = []; return this.load(); }
+  refresh(): Promise<void> { this.jumped = false; this.pages.clear(); this.removed.clear(); this.saved.clear(); this.cursor = null; this.history = []; return this.load(); }
+  /** A timeline jump starts a new bounded feed at this month's first row. The index can reach newer months again. */
+  async jumpToMonth(month: string): Promise<boolean> {
+    if (month !== '' && !/^(?!0000)\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('invalid-month');
+    this.pages.clear(); this.history = []; this.jumped = true;
+    this.cursor = { day: month ? `${month}-32` : '', time: '', id: '' };
+    const expected = this.request + 1;
+    await this.load();
+    return this.request === expected && !this.failed;
+  }
   setFilters(filters: LibraryFilters): Promise<void> { this.filters = { ...filters }; return this.refresh(); }
   /** Refresh only an active On this day scope. The UI defers this while fullscreen is open, then calls it on Back. */
   refreshDay(day: string): Promise<void> | null {

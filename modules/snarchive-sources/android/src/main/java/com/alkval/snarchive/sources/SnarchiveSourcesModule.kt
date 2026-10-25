@@ -227,6 +227,15 @@ class SnarchiveSourcesModule : Module() {
         mapOf("ok" to true, "uri" to Uri.fromFile(cache.create(hash, bytes.toLong(), video)).toString())
       } catch (_: Exception) { mapOf("ok" to false, "code" to "thumbnail-unavailable") }
     }
+    AsyncFunction("memoryThumbnail") { hash: String, bytes: Double, video: Boolean, overlay: String, overlayBytes: Double ->
+      try {
+        require(bytes.isFinite() && bytes >= 0 && bytes <= OriginalStore.MAX_OBJECT && bytes % 1.0 == 0.0)
+        require(overlayBytes.isFinite() && overlayBytes >= 0 && overlayBytes <= OriginalStore.MAX_OBJECT && overlayBytes % 1.0 == 0.0)
+        val context = requireNotNull(appContext.reactContext)
+        val cache = synchronized(this) { thumbnails ?: com.alkval.snarchive.sources.storage.ThumbnailCache(context.filesDir, context.cacheDir).also { thumbnails = it } }
+        mapOf("ok" to true, "uri" to Uri.fromFile(cache.composed(hash, bytes.toLong(), video, overlay, overlayBytes.toLong())).toString())
+      } catch (_: Exception) { mapOf("ok" to false, "code" to "thumbnail-unavailable") }
+    }
     AsyncFunction("scanArchive") { uriString: String ->
       if (importing() || !busy.compareAndSet(false, true)) return@AsyncFunction mapOf("ok" to false, "code" to "busy")
       cancelled.set(false)
@@ -453,6 +462,18 @@ class SnarchiveSourcesModule : Module() {
       val result = storageReviews.run { it.remove(kind, path, identity) { cancelled.get() } }
       result.value?.let { mapOf("ok" to true, "outcome" to it.outcome, "reason" to it.reason, "warning" to it.warning) }
         ?: mapOf("ok" to false, "code" to (result.code ?: "storage-review-failed"))
+    }
+    AsyncFunction("clearLibraryFiles") {
+      val result = storageReviews.run { session ->
+        val context = requireNotNull(appContext.reactContext)
+        var ok = session.clearLibraryFiles()
+        val cache = synchronized(this) { thumbnails ?: com.alkval.snarchive.sources.storage.ThumbnailCache(context.filesDir, context.cacheDir).also { thumbnails = it } }
+        ok = cache.clear() && ok
+        ok = com.alkval.snarchive.sources.storage.PrivateFiles.deleteTree(previewRoot()) && ok
+        ok = com.alkval.snarchive.sources.storage.PrivateFiles.deleteTree(backupRoot()) && ok
+        ok
+      }
+      if (result.code == null) mapOf("ok" to (result.value == true)) else mapOf("ok" to false, "code" to result.code)
     }
     AsyncFunction("endStorageReview") {
       val code = storageReviews.finish()
