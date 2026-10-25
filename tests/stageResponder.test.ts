@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { StageGestures, IDENTITY, type Navigation } from '../src/domain/viewerGestures.ts';
 import { stageAccessibility, stageResponderConfig, type StageEvent } from '../src/ui/stageResponder.ts';
+import { DetailsSheet, releaseDetailsGesture } from '../src/domain/detailsSheet.ts';
 
 type Finger = { id: number; x: number; y: number };
 const event = (...fingers: Finger[]): StageEvent => {
@@ -133,4 +134,59 @@ test('hidden viewer controls can be shown again through a screen-reader action o
   const none = stageAccessibility(undefined, handlers); calls.length = 0; none.perform('toggleControls');
   assert.deepEqual(calls, [], 'a stage without toggleable controls offers no such action');
   assert.ok(!none.actions.some(action => action.name === 'toggleControls'));
+});
+
+test('a photo release after Back consumes the cancelled drag before stage cancellation reports its end', () => {
+  const gestures = new StageGestures(true);
+  gestures.layout({ width: 400, height: 800 }, { width: 400, height: 800 });
+  const state = { offset: 800, mounted: false, open: false, viewerClosed: false };
+  let finish: (() => void) | undefined;
+  const sheet = new DetailsSheet({
+    set: offset => { state.offset = offset; finish = undefined; },
+    animate: (offset, done) => { finish = () => { state.offset = offset; done?.(); }; },
+    stop: () => { finish = undefined; },
+    mount: mounted => { state.mounted = mounted; },
+    opened: open => { state.open = open; },
+  }, 800);
+  // GestureStage.show forwards a changed vertical distance, including null from its imperative cancel().
+  let lastOffset: number | null = null;
+  const show = () => {
+    if (gestures.verticalOffset !== lastOffset) {
+      lastOffset = gestures.verticalOffset;
+      sheet.stageDrag(lastOffset);
+    }
+  };
+  const cancelStage = () => { gestures.cancel(); show(); };
+  let time = 0;
+  const config = stageResponderConfig(gestures, {
+    touches: e => e.nativeEvent.touches.map(t => ({ id: t.identifier, x: t.pageX, y: t.pageY })),
+    show, navigate() { throw new Error('not horizontal'); }, now: () => (time += 16),
+    vertical: direction => {
+      if (!releaseDetailsGesture(sheet, direction, cancelStage)) state.viewerClosed = true;
+    },
+  });
+  const dragUp = () => {
+    config.onPanResponderGrant(event(one(0)));
+    config.onPanResponderMove(event(one(0, -150)));
+  };
+  const releaseUp = () => config.onPanResponderRelease(event(), { vx: 0, vy: -1 });
+
+  dragUp(); sheet.close(); // Back while the photo is still being dragged.
+  releaseUp(); finish?.();
+  assert.deepEqual(state, { offset: 800, mounted: false, open: false, viewerClosed: false });
+
+  dragUp(); releaseUp(); finish?.();
+  assert.deepEqual(state, { offset: 0, mounted: true, open: true, viewerClosed: false }, 'the next drag can open details');
+
+  sheet.close(); finish?.();
+  dragUp(); config.onPanResponderTerminate(); finish?.();
+  assert.equal(state.mounted, false, 'a terminated drag drops the sheet');
+  dragUp(); releaseUp(); finish?.();
+  assert.equal(state.open, true, 'termination does not block a later drag');
+
+  sheet.close(); finish?.();
+  config.onPanResponderGrant(event(one(0)));
+  config.onPanResponderMove(event(one(0, 150)));
+  config.onPanResponderRelease(event(), { vx: 0, vy: 1 });
+  assert.equal(state.viewerClosed, true, 'an ordinary downward release still closes the viewer');
 });

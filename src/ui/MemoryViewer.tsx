@@ -12,7 +12,7 @@ import { MediaButton } from './kit';
 import { GestureStage, type GestureStageHandle } from './GestureStage';
 import { ViewerChrome } from './ViewerChrome';
 import { MemoryDetailsSheet } from './MemoryDetailsSheet';
-import { DetailsSheet } from '../domain/detailsSheet';
+import { DetailsSheet, releaseDetailsGesture } from '../domain/detailsSheet';
 import type { Direction, NeighbourState } from '../domain/memoryNavigation';
 import { type, useReducedMotion, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -113,8 +113,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
   const dragDetails = (dy: number | null) => { if (!deleting) detailsSheet.stageDrag(dy); };
   const vertical = (direction: 'up' | 'down') => {
     if (deleting) return;
-    if (direction === 'up') stage.current?.cancel();
-    if (!detailsSheet.release(direction)) onBack();
+    if (!releaseDetailsGesture(detailsSheet, direction, () => stage.current?.cancel())) onBack();
   };
   const askDelete = () => {
     if (deleting) return;

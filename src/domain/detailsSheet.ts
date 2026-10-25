@@ -19,6 +19,14 @@ export type SheetEffects = {
   opened(open: boolean): void;
 };
 
+/** Consume the release before cancelling the photo stage: cancel reports stageDrag(null), which clears the flag
+ * that keeps an earlier Back/Done from being undone by this gesture. Videos may have no stage to cancel. */
+export function releaseDetailsGesture(sheet: DetailsSheet, direction: 'up' | 'down', cancelStage: () => void): boolean {
+  const handled = sheet.release(direction);
+  if (direction === 'up') cancelStage();
+  return handled;
+}
+
 export class DetailsSheet {
   phase: SheetPhase = 'closed';
   height: number;
