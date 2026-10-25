@@ -1,5 +1,5 @@
 // Host-adapter tests: they drive the exact handler object GestureStage passes to PanResponder.create with synthetic
-// responder events. They do not run React Native's PanResponder or a renderer; device checks are in section-25.md.
+// responder events. They do not run React Native's PanResponder or a renderer; device checks are in docs/testing.md.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { StageGestures, IDENTITY, type Navigation } from '../src/domain/viewerGestures.ts';

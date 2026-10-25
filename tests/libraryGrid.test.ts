@@ -1,6 +1,6 @@
 // Host-adapter integration tests for the library browser's state: they wire LibraryGrid, FavoriteWrites,
 // favoriteSavedHandler and MemorySequence exactly as LibraryBrowser does, over real SQLite, and hold page reads and
-// saves back to recreate the timings. No React renderer is involved; device checks are listed in section-25.md.
+// saves back to recreate the timings. No React renderer is involved; device checks are listed in docs/testing.md.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

@@ -1,5 +1,5 @@
 // The gesture rules as plain state. These tests do not prove that native touch delivery works on a device; see
-// docs/section-25.md for what was checked on the emulator.
+// docs/testing.md for what was checked on the emulator.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DOUBLE_TAP_SCALE, IDENTITY, MAX_SCALE, StageGestures, SWIPE, TAP, VERTICAL, clampTransform, containedSize, isZoomed, swipeDecision, verticalDecision, zoomAbout, type Touch } from '../src/domain/viewerGestures.ts';
