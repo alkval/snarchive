@@ -131,7 +131,7 @@ export function VideoPlayerView({ video, row, store, onNavigate, covered = false
     </>}
   </>;
   return <View style={styles.root}>
-    <GestureStage zoomable={false} content={null} onNavigate={onNavigate} onVertical={onVertical} onVerticalDrag={onVerticalDrag} onTap={onTap} previousPreview={previousPreview} nextPreview={nextPreview} canNavigate={canNavigate}>
+    <GestureStage zoomable={false} content={null} onNavigate={onNavigate} onVertical={onVertical} onVerticalDrag={onVerticalDrag} onTap={onTap} controlsShown={chrome.visible} previousPreview={previousPreview} nextPreview={nextPreview} canNavigate={canNavigate}>
       {status === 'error' ? <View style={styles.loading}><Text accessibilityLiveRegion="polite" style={[type.body, styles.centerText, { color: t.onMedia }]}>{en.libraryVideoFailed}</Text></View> : <>
       <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" surfaceType="textureView" nativeControls={false} fullscreenOptions={{ enable: false }} allowsPictureInPicture={false} allowsVideoFrameAnalysis={false} />
       {!ready && poster && <Image accessible={false} fadeDuration={0} source={{ uri: poster }} resizeMode="contain" style={StyleSheet.absoluteFill} />}

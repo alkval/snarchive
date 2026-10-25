@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
 import { Animated, Easing, PanResponder, StyleSheet, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
-import { stageResponderConfig, type StageEvent } from './stageResponder';
+import { stageAccessibility, stageResponderConfig, type StageEvent } from './stageResponder';
 import { IDENTITY, StageGestures, TAP, isZoomed, type Navigation, type Size, type Touch, type Transform } from '../domain/viewerGestures';
 import { useReducedMotion } from './theme';
 
@@ -12,7 +12,9 @@ type Props = {
   /** Follows an unzoomed vertical drag: its distance (negative is up) while it lasts, then null when it ends. */
   onVerticalDrag?: (dy: number | null) => void;
   /** A single tap. On a zoomable photo it waits out the double-tap interval, so a double tap (zoom) never also taps. */
-  onTap?: () => void; resetToken?: number; children: ReactNode;
+  onTap?: () => void;
+  /** Whether the viewer's controls are shown, when a tap toggles them; adds a screen-reader action that does the same. */
+  controlsShown?: boolean; resetToken?: number; children: ReactNode;
 };
 
 /** The fullscreen media area: one-finger swipes navigate at fit; when `zoomable` (a photo of size `content`), pinch,
@@ -21,7 +23,7 @@ type Props = {
  *
  * The stage fills the window, so it starts at the window size: a newly mounted memory is drawn at its final size in its
  * first frame instead of after a layout pass (a blank frame on every swipe). */
-export const GestureStage = forwardRef<GestureStageHandle, Props>(function GestureStage({ zoomable, content, onNavigate, onZoomChange, onVertical, onVerticalDrag, onTap, previousPreview, nextPreview, canNavigate, resetToken = 0, children }, handle) {
+export const GestureStage = forwardRef<GestureStageHandle, Props>(function GestureStage({ zoomable, content, onNavigate, onZoomChange, onVertical, onVerticalDrag, onTap, controlsShown, previousPreview, nextPreview, canNavigate, resetToken = 0, children }, handle) {
   const reduced = useReducedMotion();
   const screen = useWindowDimensions();
   const gestures = useRef(new StageGestures(zoomable)).current;
@@ -88,10 +90,10 @@ export const GestureStage = forwardRef<GestureStageHandle, Props>(function Gestu
     gestures.layout(size.current, content); show(gestures.transform, false);
     view.current?.measure((_x, _y, _w, _h, pageX, pageY) => { origin.current = { x: pageX, y: pageY }; });
   };
+  const a11y = stageAccessibility(controlsShown, { navigate, details: () => latest.current.onVertical?.('up'), toggleControls: () => latest.current.onTap?.() });
   return <View ref={view} onLayout={layout} style={styles.stage} {...responder.panHandlers}
-    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint="Use the next or previous memory actions to browse. Activate to open details."
-    accessibilityActions={[{ name: 'increment', label: 'Next memory' }, { name: 'decrement', label: 'Previous memory' }, { name: 'activate', label: 'Memory details' }]}
-    onAccessibilityAction={event => { if (event.nativeEvent.actionName === 'activate') latest.current.onVertical?.('up'); else if (event.nativeEvent.actionName === 'increment' || event.nativeEvent.actionName === 'decrement') navigate(event.nativeEvent.actionName === 'increment' ? 'next' : 'previous'); }}>
+    accessible accessibilityRole="adjustable" accessibilityLabel="Memory" accessibilityHint={a11y.hint} accessibilityActions={a11y.actions}
+    onAccessibilityAction={event => a11y.perform(event.nativeEvent.actionName)}>
     <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { width: width * 3, left: -width, right: undefined, transform: [{ translateX: values.swipe }] }]}>
       <View style={[StyleSheet.absoluteFill, { width, right: undefined }]}>{previousPreview}</View>
       <Animated.View style={[StyleSheet.absoluteFill, { width, left: width, right: undefined, transform: [

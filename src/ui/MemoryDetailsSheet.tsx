@@ -14,22 +14,23 @@ import { space, type, useTheme } from './theme';
 const CLOSE = { distance: 96, flickDistance: 24, flickVelocity: 0.5 };
 const DRAG = 6; // px of mostly vertical movement before the sheet takes a drag from its content.
 
-/** Memory details as a sheet over the viewer, drawn `offset` px below its open position. The viewer owns the offset, so
- * the sheet follows a swipe up on the media before it opens (`open` once it has); here a drag down moves it and closes
- * it (`close`) or puts it back (`restore`). Mounted only while shown: closing invalidates reads and paging state.
+/** Memory details as a sheet over the viewer, drawn `offset` px below its open position. The viewer owns the offset
+ * (see DetailsSheet), so the sheet follows a swipe up on the media before it opens (`open` once it has). Here a drag
+ * down is reported (`drag`, then `release`), and the viewer moves, closes or restores the sheet; a close already under
+ * way (Back, Done) ignores the rest of that drag. Mounted only while shown: closing invalidates reads and paging state.
  *
  * Android's scroll view claims every vertical drag on it, even at its top. So while the content is at its top, native
  * scrolling is off and this sheet takes the drag: down moves the sheet, up scrolls the content by hand. Once scrolled,
  * the content scrolls natively until it is back at the top. A drag on the header always moves the sheet. With a screen
  * reader on, the content always scrolls natively; Done and Back close the sheet. */
-export function MemoryDetailsSheet({ id, store, offset, open, close, restore }: {
-  id: string; store: ImportStore; offset: Animated.Value; open: boolean; close(): void; restore(): void;
+export function MemoryDetailsSheet({ id, store, offset, open, close, drag: dragTo, release }: {
+  id: string; store: ImportStore; offset: Animated.Value; open: boolean; close(): void; drag(dy: number): void; release(leave: boolean): void;
 }) {
   const t = useTheme(), insets = useSafeAreaInsets();
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   const [atTop, setAtTop] = useState(true), [screenReader, setScreenReader] = useState(false);
   const state = useRef({ y: 0, top: true, header: 0, screenReader: false, mode: null as 'sheet' | 'scroll' | null, start: 0 });
-  const latest = useRef({ close, restore }); latest.current = { close, restore };
+  const latest = useRef({ close, dragTo, release }); latest.current = { close, dragTo, release };
   state.current.screenReader = screenReader;
   useEffect(() => {
     let active = true;
@@ -57,18 +58,17 @@ export function MemoryDetailsSheet({ id, store, offset, open, close, restore }: 
     onPanResponderTerminationRequest: () => false,
     onPanResponderMove: (_event, gesture) => {
       const s = state.current;
-      if (s.mode === 'sheet') offset.setValue(Math.max(0, gesture.dy));
+      if (s.mode === 'sheet') latest.current.dragTo(gesture.dy);
       else if (s.mode === 'scroll') scroll.current?.scrollTo({ y: Math.max(0, s.start - gesture.dy), animated: false });
     },
     onPanResponderRelease: (_event, gesture) => {
       const s = state.current, mode = s.mode;
       s.mode = null;
       if (mode === 'sheet') {
-        const leave = gesture.dy >= CLOSE.distance || (gesture.dy >= CLOSE.flickDistance && gesture.vy >= CLOSE.flickVelocity);
-        if (leave) latest.current.close(); else latest.current.restore();
+        latest.current.release(gesture.dy >= CLOSE.distance || (gesture.dy >= CLOSE.flickDistance && gesture.vy >= CLOSE.flickVelocity));
       } else if (mode === 'scroll') scroll.current?.scrollTo({ y: Math.max(0, s.start - gesture.dy - gesture.vy * 250), animated: true });
     },
-    onPanResponderTerminate: () => { if (state.current.mode === 'sheet') latest.current.restore(); state.current.mode = null; },
+    onPanResponderTerminate: () => { if (state.current.mode === 'sheet') latest.current.release(false); state.current.mode = null; },
   })).current;
   const [model] = useState(() => new MemoryDetails((section, anchor, direction) => readMemoryDetails(store.database, id, section, anchor, direction)));
   const [, render] = useReducer((n: number) => n + 1, 0);

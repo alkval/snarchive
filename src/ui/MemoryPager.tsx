@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { Image, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Image, StyleSheet, View } from 'react-native';
 import { ViewerMediaCache } from '../domain/viewerMediaCache';
 import { loadViewerMedia, type ViewerMedia } from '../platform/viewerMedia';
 import { deleteMemory } from '../platform/storageCleanup';
@@ -18,6 +18,15 @@ export function MemoryPager({ sequence, store, writes, onClose, onDeleted, onBus
   const [, render] = useReducer((value: number) => value + 1, 0);
   const [failed, setFailed] = useState<Direction | null>(null);
   const [chrome, setChrome] = useState(true);
+  // A screen reader cannot tap the media to bring hidden controls back (the stage's Show controls action can), so the
+  // controls are shown whenever a screen reader is or becomes active.
+  useEffect(() => {
+    let active = true;
+    const show = (enabled: boolean) => { if (active && enabled) setChrome(true); };
+    void AccessibilityInfo.isScreenReaderEnabled().then(show, () => {});
+    const subscription = AccessibilityInfo.addEventListener('screenReaderChanged', show);
+    return () => { active = false; subscription.remove(); };
+  }, []);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => sequence.subscribe(render), [sequence]);

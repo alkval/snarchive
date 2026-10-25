@@ -12,6 +12,7 @@ import { MediaButton } from './kit';
 import { GestureStage, type GestureStageHandle } from './GestureStage';
 import { ViewerChrome } from './ViewerChrome';
 import { MemoryDetailsSheet } from './MemoryDetailsSheet';
+import { DetailsSheet } from '../domain/detailsSheet';
 import type { Direction, NeighbourState } from '../domain/memoryNavigation';
 import { type, useReducedMotion, useTheme } from './theme';
 import { en } from '../i18n/en';
@@ -92,36 +93,28 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
     return () => { active = false; };
   }, [id]);
 
-  // The details sheet sits `sheet` px below its open position; the screen height is closed. `details` mounts it (while
-  // dragged, opening, open or closing); `sheetState` is what the last gesture or control asked for.
+  // The details sheet sits `sheet` px below its open position; the screen height is closed. `details` mounts it while
+  // it is dragged, opening, open or closing. DetailsSheet decides which drags, releases and controls apply.
   const { height } = useWindowDimensions();
-  const heightRef = useRef(height); heightRef.current = height;
   const sheet = useRef(new Animated.Value(height)).current;
-  const sheetState = useRef<'closed' | 'dragging' | 'open'>('closed');
   const [details, setDetails] = useState(false), [detailsOpen, setDetailsOpen] = useState(false);
-  const moveSheet = (toValue: number, done?: () => void) => Animated.timing(sheet, { toValue, duration: reduced ? 0 : 260, easing: EASE_OUT, useNativeDriver: true })
-    .start(({ finished }) => { if (finished) done?.(); });
-  const openDetails = () => {
-    if (deleting) return;
-    sheetState.current = 'open'; stage.current?.cancel(); setDetails(true); setDetailsOpen(true); moveSheet(0);
-  };
-  const closeDetails = () => {
-    sheetState.current = 'closed'; setDetailsOpen(false);
-    moveSheet(heightRef.current, () => { if (alive.current && sheetState.current === 'closed') setDetails(false); });
-  };
-  const dragDetails = (dy: number | null) => {
-    if (deleting || sheetState.current === 'open') return;
-    if (dy === null) { if (sheetState.current === 'dragging') closeDetails(); return; }
-    if (sheetState.current !== 'dragging') {
-      if (dy >= 0) return; // A drag down closes the viewer on release; nothing follows it.
-      sheetState.current = 'dragging'; sheet.stopAnimation(); setDetails(true);
-    }
-    sheet.setValue(Math.min(heightRef.current, Math.max(0, heightRef.current + dy)));
-  };
-  // Released: up opens details; down drops a sheet being dragged, or else closes the viewer.
+  const reducedRef = useRef(reduced); reducedRef.current = reduced;
+  const sheetModel = useRef<DetailsSheet | null>(null);
+  sheetModel.current ??= new DetailsSheet({
+    set: offset => sheet.setValue(offset),
+    animate: (toValue, done) => Animated.timing(sheet, { toValue, duration: reducedRef.current ? 0 : 260, easing: EASE_OUT, useNativeDriver: true })
+      .start(({ finished }) => { if (finished && alive.current) done?.(); }),
+    stop: () => sheet.stopAnimation(),
+    mount: setDetails, opened: setDetailsOpen,
+  }, height);
+  const detailsSheet = sheetModel.current;
+  detailsSheet.height = height;
+  const openDetails = () => { if (deleting) return; stage.current?.cancel(); detailsSheet.open(); };
+  const dragDetails = (dy: number | null) => { if (!deleting) detailsSheet.stageDrag(dy); };
   const vertical = (direction: 'up' | 'down') => {
     if (deleting) return;
-    if (direction === 'up') openDetails(); else if (sheetState.current === 'dragging') closeDetails(); else onBack();
+    if (direction === 'up') stage.current?.cancel();
+    if (!detailsSheet.release(direction)) onBack();
   };
   const askDelete = () => {
     if (deleting) return;
@@ -161,7 +154,7 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
   const trash = deleting ? <View style={styles.slot}><ActivityIndicator color={t.onMedia} accessibilityLabel="Deleting memory" /></View>
     : <MediaButton icon="trash-outline" label="Delete memory" onPress={askDelete} />;
   const noteText = note ? <Text pointerEvents="none" accessibilityLiveRegion="polite" style={[type.footnote, styles.note, { color: t.onMediaSecondary }]}>{note}</Text> : null;
-  const shared = { onNavigate: navigate, previousPreview, nextPreview, onVertical: vertical, onVerticalDrag: dragDetails, onTap: onToggleChrome, canNavigate };
+  const shared = { onNavigate: navigate, previousPreview, nextPreview, onVertical: vertical, onVerticalDrag: dragDetails, onTap: onToggleChrome, controlsShown: chrome, canNavigate };
   return <View style={[styles.root, { backgroundColor: t.media }]}>
     <StatusBar style="light" hidden={!chrome} />
     <View style={StyleSheet.absoluteFill} importantForAccessibility={details ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={details}>
@@ -179,7 +172,8 @@ export function MemoryViewer({ row, store, onBack, favorite, navigation, initial
         </>}
     </View>
     {details && <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: t.media, opacity: sheet.interpolate({ inputRange: [0, height], outputRange: [0.6, 0], extrapolate: 'clamp' }) }]} />}
-    {details && <MemoryDetailsSheet id={id} store={store} offset={sheet} open={detailsOpen} close={closeDetails} restore={() => moveSheet(0)} />}
+    {details && <MemoryDetailsSheet id={id} store={store} offset={sheet} open={detailsOpen} close={() => detailsSheet.close()}
+      drag={dy => detailsSheet.sheetDrag(dy)} release={leave => detailsSheet.sheetRelease(leave)} />}
   </View>;
 }
 

@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { StageGestures, IDENTITY, type Navigation } from '../src/domain/viewerGestures.ts';
-import { stageResponderConfig, type StageEvent } from '../src/ui/stageResponder.ts';
+import { stageAccessibility, stageResponderConfig, type StageEvent } from '../src/ui/stageResponder.ts';
 
 type Finger = { id: number; x: number; y: number };
 const event = (...fingers: Finger[]): StageEvent => {
@@ -119,4 +119,18 @@ test('a release reports the vertical decision before settling, then any tap with
   calls.length = 0;
   for (let i = 0; i < 2; i++) { config.onPanResponderGrant(event(one(10))); config.onPanResponderRelease(event(), { vx: 0 }); }
   assert.deepEqual(calls.filter(call => call.startsWith('tap')), ['tap:false', 'tap:true']);
+});
+
+test('hidden viewer controls can be shown again through a screen-reader action on the stage', () => {
+  const calls: string[] = [];
+  const handlers = { navigate: (direction: Navigation) => calls.push(direction), details: () => calls.push('details'), toggleControls: () => calls.push('toggle') };
+  const hidden = stageAccessibility(false, handlers);
+  assert.ok(hidden.actions.some(action => action.name === 'toggleControls' && action.label === 'Show controls'));
+  assert.match(hidden.hint, /Show controls/);
+  for (const name of ['toggleControls', 'magicTap', 'activate', 'increment', 'decrement']) hidden.perform(name);
+  assert.deepEqual(calls, ['toggle', 'toggle', 'details', 'next', 'previous']);
+  assert.equal(stageAccessibility(true, handlers).actions.find(action => action.name === 'toggleControls')?.label, 'Hide controls');
+  const none = stageAccessibility(undefined, handlers); calls.length = 0; none.perform('toggleControls');
+  assert.deepEqual(calls, [], 'a stage without toggleable controls offers no such action');
+  assert.ok(!none.actions.some(action => action.name === 'toggleControls'));
 });

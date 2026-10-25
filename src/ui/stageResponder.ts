@@ -43,3 +43,20 @@ export function stageResponderConfig(gestures: StageGestures, callbacks: StageCa
     onPanResponderTerminate: () => { gestures.cancel(); callbacks.show(gestures.transform, true); },
   };
 }
+
+/** What assistive technology can do on the stage: browse, open details and, when the viewer has controls that a tap
+ * hides (`controlsShown` given), show or hide them. Hidden controls are out of the accessibility tree, so this action
+ * is the screen-reader way back to them. */
+export function stageAccessibility(controlsShown: boolean | undefined, handlers: { navigate(direction: Navigation): void; details(): void; toggleControls(): void }) {
+  const controls = controlsShown === undefined ? null : controlsShown ? 'Hide controls' : 'Show controls';
+  return {
+    hint: `Use the next or previous memory actions to browse. Activate to open details.${controls ? ` Use ${controls} for the memory's buttons.` : ''}`,
+    actions: [{ name: 'increment', label: 'Next memory' }, { name: 'decrement', label: 'Previous memory' }, { name: 'activate', label: 'Memory details' },
+      ...(controls ? [{ name: 'toggleControls', label: controls }, { name: 'magicTap', label: controls }] : [])],
+    perform(name: string) {
+      if (name === 'activate') handlers.details();
+      else if (name === 'increment' || name === 'decrement') handlers.navigate(name === 'increment' ? 'next' : 'previous');
+      else if (controls && (name === 'toggleControls' || name === 'magicTap')) handlers.toggleControls();
+    },
+  };
+}
