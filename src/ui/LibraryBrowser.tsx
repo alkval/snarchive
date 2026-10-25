@@ -1,53 +1,43 @@
 import { StatusBar } from 'expo-status-bar';
-import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
-import { ActivityIndicator, AppState, Image, Pressable, SectionList, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type MutableRefObject } from 'react';
+import { ActivityIndicator, AppState, Image, Pressable, FlatList, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import type { ImportStore, ChronologicalRow, LibraryMonth } from '../storage/importStore';
+import type { ImportStore, ChronologicalRow } from '../storage/importStore';
 import { memoryThumbnail } from '../platform/originalImporter';
 import { pageThumbnails } from '../storage/pageThumbnails';
-import { librarySections } from '../domain/librarySections';
 import { LibraryFilterForm } from './LibraryFilters';
 import { dayTitle, memoryDate } from './MemoryViewer';
 import { MemoryPager } from './MemoryPager';
 import { MemorySequence } from '../domain/memoryNavigation';
 import { FavoriteWrites } from '../domain/favoriteWrites';
-import { LibraryGrid, favoriteSavedHandler } from '../domain/libraryGrid';
-import { ThumbnailWindow, visibleThumbnailRows } from '../domain/thumbnailWindow';
-import { gridLayout, GRID_COLUMNS, GRID_GAP } from '../domain/gridLayout';
+import { favoriteSavedHandler } from '../domain/libraryGrid';
+import { ThumbnailWindow } from '../domain/thumbnailWindow';
+import { GRID_COLUMNS, GRID_GAP } from '../domain/gridLayout';
 import { MonthScrollbar } from './MonthScrollbar';
 import { utcDay, watchUTCDate } from '../domain/onThisDay';
-import { Button, Notice } from './kit';
+import { Notice } from './kit';
 import { space, type, useTheme } from './theme';
 import { en } from '../i18n/en';
 
-const COLUMNS = GRID_COLUMNS, GAP = GRID_GAP;
-type Section = { key: string; title: string; count: number; data: ChronologicalRow[][] };
+import { LibraryTimeline } from '../domain/libraryTimeline';
+import { timelineLayout, TimelinePosition, clampFraction, restoredTimelineOffset, type TimelineCell } from '../domain/timelineLayout';
 
-function sections(rows: ChronologicalRow[]): Section[] {
-  return librarySections(rows).map(section => ({
-    key: section.key, count: section.rows.length,
-    title: section.group === 'conflict' ? en.sectionConflict : section.group === 'unknown' ? en.sectionUnknown : dayTitle(section.group),
-    data: Array.from({ length: Math.ceil(section.rows.length / COLUMNS) }, (_, index) => section.rows.slice(index * COLUMNS, index * COLUMNS + COLUMNS)),
-  }));
-}
+const COLUMNS = GRID_COLUMNS, GAP = GRID_GAP;
 
 export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings, refreshToken = 0, onLibraryChanged, onNotice }: {
   store: ImportStore; onClose(): void; backHandler: MutableRefObject<(() => boolean) | null>;
   onAdd?(): void; onSettings?(): void; refreshToken?: number; onLibraryChanged?(): void; onNotice?(message: string): void;
 }) {
-  const t = useTheme();
-  const screen = useWindowDimensions();
-  const [listWidth, setListWidth] = useState(screen.width);
-  const [listHeaderHeight, setListHeaderHeight] = useState(0);
-  const [editingFilters, setEditingFilters] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [monthRevision, monthsChanged] = useReducer((value: number) => value + 1, 0);
-  const [timeline, setTimeline] = useState<{ key: string; months: LibraryMonth[] }>({ key: '', months: [] });
-  const [visibleMonth, setVisibleMonth] = useState<{ key: string; month: string } | null>(null);
-  const [feedEpoch, setFeedEpoch] = useState(0);
-  const jumpRequest = useRef(0);
-  const [, thumbnailChanged] = useReducer((value: number) => value + 1, 0);
+  const t = useTheme(), screen = useWindowDimensions();
+  const [listWidth, setListWidth] = useState(screen.width - 32), [viewport, setViewport] = useState(0);
+  const [editingFilters, setEditingFilters] = useState(false), [deleting, setDeleting] = useState(false);
+  const [, render] = useReducer(n => n + 1, 0), [, thumbnailChanged] = useReducer(n => n + 1, 0);
+  const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
+  const latest = useRef(sequence), list = useRef<FlatList<TimelineCell>>(null), scrollY = useRef(0);
+  const position = useMemo(() => new TimelinePosition(), []);
+  const grid = useMemo(() => new LibraryTimeline<ChronologicalRow>(filters => store.chronologicalIndex(filters), ids => store.chronologicalRows(ids)), [store]);
+  useEffect(() => { const stop = grid.subscribe(render); void grid.load(); return () => { stop(); grid.dispose(); }; }, [grid]);
   const thumbnails = useMemo(() => new ThumbnailWindow<ChronologicalRow>(async row => {
     let uri: string | null = null;
     await pageThumbnails([row], store, memoryThumbnail, () => false, (_id, value) => { uri = value; });
@@ -55,183 +45,134 @@ export function LibraryBrowser({ store, onClose, backHandler, onAdd, onSettings,
   }), [store]);
   useEffect(() => thumbnails.subscribe(thumbnailChanged), [thumbnails]);
   useEffect(() => { thumbnails.reset(); }, [thumbnails, refreshToken]);
-  const [sequence, setSequence] = useState<MemorySequence<ChronologicalRow> | null>(null);
-  /** Page, filters, history and every completed favourite save (see LibraryGrid). */
-  const grid = useMemo(() => new LibraryGrid<ChronologicalRow>(
-    (cursor, filters) => store.chronologicalPage(cursor, 31, filters)), [store]);
-  const [gridVersion, render] = useReducer((value: number) => value + 1, 0);
-  useEffect(() => { const stop = grid.subscribe(render); void grid.load(); return stop; }, [grid]);
-  // Updated at the event boundary, so midnight/foreground callbacks need not wait for a React render.
-  const latest = useRef(sequence);
-  // Keep a viewer's date scope fixed. Refresh the grid at UTC midnight or on foreground when no viewer is open.
   useEffect(() => {
     const clock = watchUTCDate(day => { if (!latest.current) void grid.refreshDay(day); });
     const subscription = AppState.addEventListener('change', state => { if (state === 'active') clock.refresh(); });
     return () => { clock.stop(); subscription.remove(); };
   }, [grid]);
-  /** Favourite writes outlive each viewer (and the viewer itself), so a revisit shows a pending write. A completed
-   * save always reaches the grid, whichever viewer started it and whenever it finishes; the open sequence, if it has
-   * that memory loaded, is updated too. */
-  const writes = useMemo(() => {
-    const saved = favoriteSavedHandler(grid, () => latest.current);
-    return new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite), (id, favorite) => {
-      saved(id, favorite); if (grid.filters.favorites) monthsChanged();
+  const writes = useMemo(() => new FavoriteWrites((id, favorite) => store.setFavorite(id, favorite),
+    favoriteSavedHandler<ChronologicalRow>(grid, () => latest.current)), [store, grid]);
+  const filters = grid.filters, filterKey = JSON.stringify(filters);
+  const layout = useMemo(() => timelineLayout(grid.entries, listWidth, screen.fontScale), [grid.entries, listWidth, screen.fontScale]);
+  const maxScroll = Math.max(0, layout.total - viewport);
+  const anchor = useRef<{ id: string; within: number; at: number } | null>(null);
+  const shownFilter = useRef(filterKey);
+  // Retain the visible memory across a favourite/deletion refresh or rotation. New filter scopes start at the top.
+  useLayoutEffect(() => {
+    const previous = anchor.current;
+    const newScope = shownFilter.current !== filterKey; shownFilter.current = filterKey;
+    if (newScope) anchor.current = null;
+    if (!layout.cells.length) anchor.current = null;
+    const offset = restoredTimelineOffset(layout, previous, viewport, scrollY.current, newScope);
+    scrollY.current = offset;
+    list.current?.scrollToOffset({ offset, animated: false });
+    position.set(maxScroll ? offset / maxScroll : 0, layout.cellAt(offset)?.group ?? '');
+  }, [layout, viewport, filterKey, maxScroll, position]);
+  const observe = (y: number) => {
+    const offset = Math.max(0, Math.min(maxScroll, y)); scrollY.current = offset;
+    const cell = layout.cellAt(offset);
+    const at = cell ? cell.index : -1;
+    const row = cell?.entries.length ? cell : layout.cells[at + 1];
+    if (row?.entries[0]) anchor.current = { id: row.entries[0].id, within: offset - row.offset, at: Math.max(0, at) };
+    position.set(maxScroll ? offset / maxScroll : 0, cell?.group ?? '');
+  };
+  const seek = (fraction: number) => {
+    const offset = clampFraction(fraction) * maxScroll;
+    list.current?.scrollToOffset({ offset, animated: false }); observe(offset);
+    const cell = layout.cellAt(offset), at = cell ? cell.index : -1;
+    grid.show((cell?.entries.length ? cell : layout.cells[at + 1])?.entries.map(entry => entry.id) ?? []);
+    if (!latest.current) thumbnails.setRows(grid.visibleRows);
+  };
+  const marks = useMemo(() => {
+    const seen = new Set<string>();
+    return layout.cells.flatMap(cell => {
+      const month = /^\d{4}-\d{2}/.test(cell.group) ? cell.group.slice(0, 7) : '';
+      if (seen.has(month)) return []; seen.add(month);
+      return [{ month, fraction: maxScroll ? Math.min(1, cell.offset / maxScroll) : 0 }];
     });
-  }, [store, grid]);
-  const feed = useMemo(() => grid.feedRows, [grid, gridVersion]), filters = grid.filters;
-  const filterKey = JSON.stringify(filters);
-  useEffect(() => {
-    let active = true;
-    void store.chronologicalMonths(filters).then(months => { if (active) setTimeline({ key: filterKey, months }); },
-      () => { if (active) setTimeline({ key: filterKey, months: [] }); });
-    return () => { active = false; };
-  }, [store, filterKey, refreshToken, monthRevision]);
-  // A refresh (an import closed, a restore) reads the library again from its first page. Until that read lands, keep the
-  // rows already shown rather than blanking the grid to a spinner and back; they cannot be opened meanwhile.
-  const held = useRef({ key: '', rows: [] as ChronologicalRow[] });
-  const holding = grid.loading && !feed.length && held.current.key === filterKey && held.current.rows.length > 0;
-  if (!holding) held.current = { key: filterKey, rows: feed };
-  const rows = holding ? held.current.rows : feed;
-  const rowsRef = useRef(rows); rowsRef.current = rows;
-  const thumbnailRef = useRef(thumbnails); thumbnailRef.current = thumbnails;
-  const visibleIds = useRef<readonly string[]>([]);
-  const visibleScope = useRef(filterKey);
-  if (visibleScope.current !== filterKey) { visibleScope.current = filterKey; visibleIds.current = []; }
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10, minimumViewTime: 80 }).current;
-  const viewability = useRef(({ viewableItems }: { viewableItems: { item: unknown }[] }) => {
+  }, [layout, maxScroll]);
+  const viewRef = useRef({ grid, thumbnails }); viewRef.current = { grid, thumbnails };
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 10, minimumViewTime: 50 }).current;
+  const viewability = useRef(({ viewableItems }: { viewableItems: { item: TimelineCell }[] }) => {
     if (latest.current) return;
-    const visible = viewableItems.flatMap(token => Array.isArray(token.item) ? token.item as ChronologicalRow[] : []);
-    const ids = visible.map(row => row.id);
-    const window = visibleThumbnailRows(rowsRef.current, ids);
-    if (!window) return;
-    // Visibility is an observation, not React state. Updating state here feeds list layout back into another
-    // render and another visibility update. Once these thumbnails are cached, this callback causes no renders.
-    visibleIds.current = ids;
-    if (visible[0]) {
-      const key = visibleScope.current, month = visible[0].sortDay.slice(0, 7);
-      setVisibleMonth(previous => previous?.key === key && previous.month === month ? previous : { key, month });
-    }
-    thumbnailRef.current.setRows(window);
+    const { grid, thumbnails } = viewRef.current;
+    grid.show(viewableItems.flatMap(token => token.item.entries.map(entry => entry.id)));
+    thumbnails.setRows(grid.visibleRows);
   }).current;
+  useEffect(() => { thumbnails.setRows(sequence ? [] : grid.visibleRows); });
+  useEffect(() => () => { thumbnails.setRows([]); }, [thumbnails]);
   const previousRevision = useRef(refreshToken);
   useEffect(() => { if (previousRevision.current !== refreshToken) { previousRevision.current = refreshToken; void grid.refresh(); } }, [refreshToken, grid]);
-  useEffect(() => {
-    thumbnails.setRows(sequence ? [] : visibleThumbnailRows(rows, visibleIds.current) ?? rows.slice(0, 30));
-    return () => { thumbnails.setRows([]); };
-  }, [rows, sequence, thumbnails]);
   const open = (row: ChronologicalRow) => {
-    if (holding || grid.refreshDay(utcDay())) return;
-    const index = rows.findIndex(item => item.id === row.id);
-    if (index < 0) return;
-    const current = filters;
-    const next = new MemorySequence(rows, index, (anchor, direction, limit) => store.chronologicalAdjacent(anchor, direction, limit, current));
-    latest.current = next;
-    setSequence(next);
+    if (grid.loading || grid.failed || grid.refreshDay(utcDay())) return;
+    // Sparse display caches need not be adjacent. Start from the selected row and fetch strict neighbours.
+    const current = { ...filters };
+    const next = new MemorySequence([row], 0, (key, direction, limit) => store.chronologicalAdjacent(key, direction, limit, current));
+    latest.current = next; setSequence(next);
   };
   const openRef = useRef(open); openRef.current = open;
   const openTile = useCallback((row: ChronologicalRow) => openRef.current(row), []);
   const failThumbnail = useCallback((id: string, uri: string) => thumbnails.failed(id, uri), [thumbnails]);
-  const jump = async (month: string) => {
-    const request = ++jumpRequest.current;
-    if (await grid.jumpToMonth(month) && jumpRequest.current === request) {
-      visibleIds.current = []; setVisibleMonth({ key: filterKey, month }); setFeedEpoch(value => value + 1);
-    }
-  };
-  const newest = async () => {
-    const request = ++jumpRequest.current;
-    await grid.refresh();
-    if (jumpRequest.current === request) { visibleIds.current = []; setFeedEpoch(value => value + 1); }
-  };
-  /** Keep the grid's earlier rows and original scroll position; append towards the last viewed memory in bounded
-   * batches. Never jump to a middle-only feed: it has no Previous button to recover omitted rows. */
-  const closeViewer = (last: ChronologicalRow) => {
-    latest.current = null; setSequence(null);
-    const refreshed = grid.refreshDay(utcDay());
-    if (!refreshed) void grid.extendFeedTo(last);
-  };
-  // System Back steps out of the viewer or filters before it leaves the library.
+  const closeViewer = () => { latest.current = null; setSequence(null); void grid.refreshDay(utcDay()); };
   useEffect(() => {
     backHandler.current = () => {
       if (deleting) return true;
-      if (sequence) { if (sequence.current) closeViewer(sequence.current); else setSequence(null); return true; }
+      if (sequence) { closeViewer(); return true; }
       if (editingFilters) { setEditingFilters(false); return true; }
       return false;
     };
     return () => { backHandler.current = null; };
   });
-  const grouped = useMemo(() => sections(rows), [rows]);
   const chips = en.filterChips(filters.media, filters.favorites, filters.month, filters.onThisDay);
-  const hasHeader = chips.length > 0 || grid.jumped;
-  const layout = useMemo(() => gridLayout(grouped.map(section => section.data.length), listWidth, screen.fontScale,
-    hasHeader ? listHeaderHeight : 0), [grouped, listWidth, screen.fontScale, hasHeader, listHeaderHeight]);
-
-  const header = hasHeader ? <View style={styles.header} onLayout={event => setListHeaderHeight(event.nativeEvent.layout.height)}>
-    {chips.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
-      {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
-    </Pressable>}
-    {grid.jumped && <Button label="Back to newest" variant="plain" onPress={() => void newest()} />}
-  </View> : null;
   const empty = grid.loading ? <View style={styles.centered}><ActivityIndicator color={t.secondary} accessibilityLabel={en.libraryLoading} /></View>
-    : grid.failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => void grid.retry() }} /></View>
-    : <View style={styles.centered}>
-      <Ionicons name={chips.length ? 'funnel-outline' : 'images-outline'} size={40} color={t.secondary} />
-      <Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{filters.onThisDay ? en.onThisDayEmpty : chips.length ? en.filterEmpty : en.libraryEmpty}</Text>
-    </View>;
-  const footer = <View style={styles.footer}>
-    <View style={styles.loadingSlot}>
-      {grid.loading && rows.length > 0 && <ActivityIndicator color={t.accent} accessibilityLabel="Loading more memories" />}
-    </View>
-    {grid.failed && rows.length > 0 && <Button label="Try loading more again" variant="plain" onPress={() => void grid.retry()} />}
-    {!grid.loading && !rows.length && grid.hasNext && <Button label="Load more" onPress={() => void grid.nextPage()} />}
-  </View>;
-  // Keep the grid mounted and laid out for scroll retention, but exclude it from drawing, input and accessibility under
-  // the viewer or filters. Remounting it would lose the scroll position and redraw every thumbnail.
+    : grid.failed ? <View style={styles.pad}><Notice tone="error" message={en.libraryFailed} action={{ label: en.libraryRetry, onPress: () => void grid.load() }} /></View>
+    : <View style={styles.centered}><Text style={[type.body, styles.emptyText, { color: t.secondary }]}>{filters.onThisDay ? en.onThisDayEmpty : chips.length ? en.filterEmpty : en.libraryEmpty}</Text></View>;
   const covered = !!sequence || editingFilters;
   return <View style={styles.root}>
     <View collapsable={false} style={[styles.root, covered && styles.hiddenGrid]} pointerEvents={covered ? 'none' : 'auto'}
       importantForAccessibility={covered ? 'no-hide-descendants' : 'auto'} accessibilityElementsHidden={covered}>
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.root, { backgroundColor: t.ground }]}>
-    <StatusBar style={t.dark ? 'light' : 'dark'} />
-    <View style={styles.topBar}>
-      <Text accessibilityRole="header" style={[type.title, { color: t.text, flex: 1 }]}>Snarchive</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="Add memories" onPress={onAdd} style={[styles.addButton, { backgroundColor: t.accent }]}>
-        <Ionicons name="add" size={22} color="#FFFFFF" /><Text style={[type.headline, { color: '#FFFFFF' }]}>Add</Text>
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel={en.filterButton} onPress={() => setEditingFilters(true)} hitSlop={4} style={styles.iconButton}>
-        <Ionicons name={chips.length ? 'options' : 'options-outline'} size={23} color={t.text} />
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="Settings" onPress={onSettings} hitSlop={4} style={styles.iconButton}>
-        <Ionicons name="settings-outline" size={23} color={t.text} />
-      </Pressable>
+      <StatusBar style={t.dark ? 'light' : 'dark'} />
+      <View style={styles.topBar}>
+        <Text accessibilityRole="header" style={[type.title, { color: t.text, flex: 1 }]}>Snarchive</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel="Add memories" onPress={onAdd} style={[styles.addButton, { backgroundColor: t.accent }]}>
+          <Ionicons name="add" size={22} color="#FFFFFF" /><Text style={[type.headline, { color: '#FFFFFF' }]}>Add</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel={en.filterButton} onPress={() => setEditingFilters(true)} style={styles.iconButton}>
+          <Ionicons name={chips.length ? 'options' : 'options-outline'} size={23} color={t.text} />
+        </Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Settings" onPress={onSettings} style={styles.iconButton}>
+          <Ionicons name="settings-outline" size={23} color={t.text} />
+        </Pressable>
+      </View>
+      {chips.length > 0 && <Pressable accessibilityRole="button" accessibilityLabel={`${en.filterButton}: ${chips.join(', ')}`} onPress={() => setEditingFilters(true)} style={styles.chips}>
+        {chips.map(chip => <View key={chip} style={[styles.chip, { backgroundColor: t.accentTint }]}><Text style={[type.caption, { color: t.accent }]}>{chip}</Text></View>)}
+      </Pressable>}
+      {grid.entries.length > 0 && (grid.failed || grid.rowsFailed) && <Notice tone="error" message={en.libraryFailed}
+        action={{ label: en.libraryRetry, onPress: () => grid.failed ? void grid.load() : grid.retryRows() }} />}
+      <View style={[styles.root, { flexDirection: 'row' }]}>
+        <FlatList ref={list} style={styles.root} key={filterKey} data={layout.cells} stickyHeaderIndices={layout.headers} extraData={grid.visibleRows}
+          keyExtractor={cell => cell.key} ListEmptyComponent={empty} ListFooterComponent={grid.entries.length ? <View style={{ height: 48 }} /> : undefined}
+          initialNumToRender={12} windowSize={7} removeClippedSubviews={false} showsVerticalScrollIndicator={false}
+          onLayout={event => { setListWidth(event.nativeEvent.layout.width); setViewport(event.nativeEvent.layout.height); }}
+          getItemLayout={(_data, index) => ({ index, offset: layout.cells[index]!.offset, length: layout.cells[index]!.length })}
+          onScroll={event => observe(event.nativeEvent.contentOffset.y)} scrollEventThrottle={16}
+          onViewableItemsChanged={viewability} viewabilityConfig={viewabilityConfig}
+          renderItem={({ item }) => item.entries.length ? <View style={[styles.tileRow, { height: layout.tile }]}>
+            {item.entries.map(entry => { const row = grid.row(entry.id); return row ? <LibraryTile key={entry.id} row={row} uri={thumbnails.get(row.id)} disabled={grid.loading || grid.failed}
+              onOpen={openTile} onFailed={failThumbnail} /> : <View key={entry.id} style={[styles.tile, { backgroundColor: t.raised }]} />; })}
+            {Array.from({ length: COLUMNS - item.entries.length }, (_, index) => <View key={index} style={styles.spacer} />)}
+          </View> : <View style={[styles.sectionHeader, { backgroundColor: t.ground, height: item.length }]} accessibilityRole="header">
+            <Text numberOfLines={1} style={[type.headline, { color: t.text, flex: 1 }]}>{item.group === 'conflict' ? en.sectionConflict : item.group === 'unknown' ? en.sectionUnknown : dayTitle(item.group)}</Text>
+            <Text style={[type.footnote, { color: t.secondary }]}>{item.count}</Text>
+          </View>} />
+        {maxScroll > 0 ? <MonthScrollbar position={position} marks={marks} seek={seek} /> : <View style={{ width: 32 }} />}
+      </View>
+    </SafeAreaView>
     </View>
-    <View style={[styles.root, { flexDirection: 'row' }]}>
-    <SectionList style={styles.root} key={`${filterKey}:${feedEpoch}`} sections={grouped} keyExtractor={(item, index) => item[0]?.id ?? String(index)}
-      ListHeaderComponent={header ?? undefined} ListEmptyComponent={empty} ListFooterComponent={footer} stickySectionHeadersEnabled
-      onEndReachedThreshold={0.5} onEndReached={() => { if (!grid.loading && !grid.failed && grid.hasNext) void grid.nextPage(); }}
-      onViewableItemsChanged={viewability} viewabilityConfig={viewabilityConfig} initialNumToRender={12} windowSize={7}
-      removeClippedSubviews={false}
-      onLayout={event => setListWidth(event.nativeEvent.layout.width)}
-      getItemLayout={(_data, index) => layout.cells[index]!}
-      renderSectionHeader={({ section }) => <View style={[styles.sectionHeader, { backgroundColor: t.ground, height: layout.heading }]} accessibilityRole="header">
-        <Text numberOfLines={1} style={[type.headline, { color: t.text, flex: 1 }]}>{section.title}</Text>
-        <Text style={[type.footnote, { color: t.secondary, fontVariant: ['tabular-nums'] }]}>{section.count}</Text>
-      </View>}
-      renderItem={({ item }) => <View style={[styles.tileRow, { height: layout.tile }]}>
-        {item.map(row => <LibraryTile key={row.id} row={row} uri={thumbnails.get(row.id)} disabled={holding}
-          onOpen={openTile} onFailed={failThumbnail} />)}
-        {Array.from({ length: COLUMNS - item.length }, (_, index) => <View key={index} style={styles.spacer} />)}
-      </View>} />
-    {timeline.key === filterKey && timeline.months.length > 1 && <MonthScrollbar key={filterKey} months={timeline.months} month={visibleMonth?.key === filterKey ? visibleMonth.month : null} select={month => void jump(month)} />}
-    </View>
-  </SafeAreaView>
-    </View>
-    {editingFilters && <View style={StyleSheet.absoluteFill}>
-      <LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)} apply={value => { void grid.setFilters(value); setEditingFilters(false); }} />
-    </View>}
-    {sequence && <View style={StyleSheet.absoluteFill}>
-      <MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} onBusy={setDeleting}
-        onDeleted={(id, cleanupFailed) => { grid.memoryDeleted(id); monthsChanged(); onLibraryChanged?.(); onNotice?.(cleanupFailed ? 'Deleted. Some unused files could not be cleared; you can retry from Settings.' : 'Deleted'); }} />
-    </View>}
+    {editingFilters && <View style={StyleSheet.absoluteFill}><LibraryFilterForm current={filters} cancel={() => setEditingFilters(false)} apply={value => { void grid.setFilters(value); setEditingFilters(false); }} /></View>}
+    {sequence && <View style={StyleSheet.absoluteFill}><MemoryPager sequence={sequence} store={store} writes={writes} onClose={closeViewer} onBusy={setDeleting}
+      onDeleted={(id, cleanupFailed) => { grid.memoryDeleted(id); onLibraryChanged?.(); onNotice?.(cleanupFailed ? 'Deleted. Some unused files could not be cleared; you can retry from Settings.' : 'Deleted'); }} /></View>}
   </View>;
 }
 

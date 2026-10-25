@@ -139,7 +139,7 @@ export class LibraryGrid<T extends GridRow> {
 /** What the library browser runs when a favourite save completes: the grid always records it, whichever viewer
  * started it and whether or not one is still open; the open sequence (read at call time, so a viewer that just
  * closed is fine either way) updates its loaded row. */
-export function favoriteSavedHandler<T extends GridRow>(grid: LibraryGrid<T>, openSequence: () => MemorySequence<T> | null) {
+export function favoriteSavedHandler<T extends GridRow>(grid: { filters: LibraryFilters; favoriteSaved(id: string, favorite: boolean): void }, openSequence: () => MemorySequence<T> | null) {
   return (id: string, favorite: boolean) => {
     grid.favoriteSaved(id, favorite);
     const open = openSequence(), loaded = open?.row(id);

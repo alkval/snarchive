@@ -1,56 +1,58 @@
-import { useMemo, useRef, useState, type ComponentRef } from 'react';
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { PanResponder, StyleSheet, Text, View } from 'react-native';
-import { monthActionIndex, monthAtFraction, monthDragStarts, monthFraction, monthTitle, type MonthBucket } from '../domain/monthScroll';
+import { monthDragStarts, monthTitle } from '../domain/monthScroll';
+import { draggedTimelineFraction, type TimelinePosition } from '../domain/timelineLayout';
 import { type, useTheme } from './theme';
 
 const HANDLE = 44;
-/** Drag previews dates locally. Release performs a single paginated jump, rather than querying on every move. */
-export function MonthScrollbar({ months, month, select }: { months: readonly MonthBucket[]; month: string | null; select(month: string): void }) {
-  const t = useTheme();
-  const track = useRef<ComponentRef<typeof View>>(null), top = useRef(0), height = useRef(1);
-  const [trackHeight, setTrackHeight] = useState(1);
-  const lastY = useRef(0);
-  const [drag, setDrag] = useState<{ month: string; fraction: number } | null>(null);
-  const latest = useRef({ months, select }); latest.current = { months, select };
-  const gesture = useRef<{ month: string; fraction: number } | null>(null);
-  const move = (pageY: number) => {
-    lastY.current = pageY;
-    const fraction = Math.max(0, Math.min(1, (pageY - top.current - HANDLE / 2) / Math.max(1, height.current - HANDLE)));
-    const index = monthAtFraction(latest.current.months, fraction);
-    if (index < 0) return;
-    gesture.current = { month: latest.current.months[index]!.month, fraction }; setDrag(gesture.current);
-  };
+export function MonthScrollbar({ position, marks, seek }: {
+  position: TimelinePosition; marks: readonly { month: string; fraction: number }[]; seek(fraction: number): void;
+}) {
+  const t = useTheme(), [, render] = useReducer(n => n + 1, 0);
+  useEffect(() => position.subscribe(render), [position]);
+  const height = useRef(1);
+  const [trackHeight, setTrackHeight] = useState(1), [drag, setDrag] = useState<number | null>(null);
+  const latest = useRef({ position, seek }); latest.current = { position, seek };
+  const gesture = useRef<{ x: number; y: number; start: number; active: boolean } | null>(null);
   const responder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => false,
+    onStartShouldSetPanResponder: event => {
+      const handleTop = latest.current.position.fraction * Math.max(0, height.current - HANDLE);
+      return event.nativeEvent.locationY >= handleTop && event.nativeEvent.locationY <= handleTop + HANDLE;
+    },
     onMoveShouldSetPanResponder: (_event, state) => monthDragStarts(state.dx, state.dy),
     onPanResponderTerminationRequest: () => false,
     onPanResponderGrant: event => {
-      const y = event.nativeEvent.pageY;
-      move(y);
-      track.current?.measureInWindow((_x, measuredTop) => { top.current = measuredTop; if (gesture.current) move(lastY.current); });
+      gesture.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY, start: latest.current.position.fraction, active: false };
     },
-    onPanResponderMove: (_event, state) => move(state.moveY),
-    onPanResponderRelease: (_event, state) => { const selected = monthDragStarts(state.dx, state.dy) ? gesture.current : null; gesture.current = null; setDrag(null); if (selected) latest.current.select(selected.month); },
+    onPanResponderMove: event => {
+      const active = gesture.current; if (!active) return;
+      const dy = event.nativeEvent.pageY - active.y;
+      if (!active.active && !monthDragStarts(event.nativeEvent.pageX - active.x, dy)) return;
+      active.active = true;
+      const fraction = draggedTimelineFraction(active.start, dy, height.current);
+      setDrag(fraction); latest.current.seek(fraction);
+    },
+    onPanResponderRelease: () => { gesture.current = null; setDrag(null); },
     onPanResponderTerminate: () => { gesture.current = null; setDrag(null); },
   }), []);
-  const fraction = drag?.fraction ?? monthFraction(months, month);
-  const index = Math.max(0, months.findIndex(item => item.month === month));
-  return <View ref={track} collapsable={false} {...responder.panHandlers} style={styles.track}
-    onLayout={event => { height.current = event.nativeEvent.layout.height; setTrackHeight(height.current); track.current?.measureInWindow((_x, y) => { top.current = y; }); }}
-    accessible accessibilityRole="adjustable" accessibilityLabel="Scroll by month and year"
-    accessibilityHint="Drag up or down, then release to jump. Increase for older months; decrease for newer months."
-    accessibilityValue={{ min: 0, max: Math.max(0, months.length - 1), now: index, text: month === null ? 'Date position not yet available' : monthTitle(month) }}
+  const fraction = drag ?? position.fraction;
+  const month = position.month;
+  return <View collapsable={false} {...responder.panHandlers} style={styles.track}
+    onLayout={event => { height.current = event.nativeEvent.layout.height; setTrackHeight(height.current); }}
+    accessible accessibilityRole="adjustable" accessibilityLabel="Scroll through your library"
+    accessibilityHint="Drag to move quickly through the same timeline. Increase for older months; decrease for newer months."
+    accessibilityValue={{ min: 0, max: 100, now: Math.round(fraction * 100), text: monthTitle(month) }}
     accessibilityActions={[{ name: 'increment', label: 'Older month' }, { name: 'decrement', label: 'Newer month' }]}
     onAccessibilityAction={event => {
       const action = event.nativeEvent.actionName;
-      if (action !== 'increment' && action !== 'decrement') return;
-      const target = monthActionIndex(months, month, action === 'increment');
-      if (months[target]) select(months[target]!.month);
+      const target = action === 'increment' ? marks.find(mark => mark.fraction > position.fraction + .000001)
+        : action === 'decrement' ? [...marks].reverse().find(mark => mark.fraction < position.fraction - .000001) : undefined;
+      if (target) seek(target.fraction);
     }}>
-    <View pointerEvents="none" style={[styles.rail, { backgroundColor: t.secondary, opacity: drag ? 0.35 : 0.16 }]} />
-    <View pointerEvents="none" style={[styles.handle, { top: fraction * Math.max(0, trackHeight - HANDLE), backgroundColor: drag ? t.accent : t.secondary }]} />
-    {drag && <View pointerEvents="none" style={[styles.bubble, { top: fraction * Math.max(0, trackHeight - HANDLE), backgroundColor: t.text }]}>
-      <Text numberOfLines={1} style={[type.headline, { color: t.ground }]}>{monthTitle(drag.month)}</Text>
+    <View pointerEvents="none" style={[styles.rail, { backgroundColor: t.secondary, opacity: drag === null ? 0.16 : 0.35 }]} />
+    <View pointerEvents="none" style={[styles.handle, { top: fraction * Math.max(0, trackHeight - HANDLE), backgroundColor: drag === null ? t.secondary : t.accent }]} />
+    {drag !== null && <View pointerEvents="none" style={[styles.bubble, { top: fraction * Math.max(0, trackHeight - HANDLE), backgroundColor: t.text }]}>
+      <Text numberOfLines={1} style={[type.headline, { color: t.ground }]}>{monthTitle(month)}</Text>
     </View>}
   </View>;
 }

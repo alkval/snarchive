@@ -19,6 +19,7 @@ export function validateReceipt(value: Receipt): void {
 export type LibraryRow = { id: string; day: string | null; instant: string | null; dateConflict: number; photos: number; videos: number; overlays: number };
 export type LibraryCursor = { day: string; time: string; id: string };
 export type ChronologicalRow = LibraryRow & { favorite: number; sortDay: string; sortTime: string };
+export type LibraryIndexEntry = { id: string; group: string };
 export type LibraryMonth = { month: string; count: number };
 export type LibraryObject = Receipt & { role: 'photo' | 'video' | 'overlay' };
 /** Derives date-index rows from a source's evidence. Shared by planning and restore, so both index alike. */
@@ -257,6 +258,15 @@ export class ImportStore {
   private async chronological(anchor: LibraryCursor | null, direction: 'next' | 'previous', limit: number, filters: LibraryFilters): Promise<ChronologicalRow[]> {
     check(Number.isInteger(limit) && limit >= 1 && limit <= 100);
     check(validFilters(filters));
+    return JSON.parse(await this.chronologicalData(anchor, direction, limit, filters)) as ChronologicalRow[];
+  }
+  /** Whole-library positions contain only IDs and date groups. Images and full display facts stay paged. */
+  async chronologicalIndex(filters: LibraryFilters = defaultFilters): Promise<LibraryIndexEntry[]> {
+    check(validFilters(filters));
+    const entries = JSON.parse(await this.chronologicalData(null, 'next', null, filters)) as [string, string][];
+    return entries.map(([id, group]) => ({ id, group }));
+  }
+  private async chronologicalData(anchor: LibraryCursor | null, direction: 'next' | 'previous', limit: number | null, filters: LibraryFilters): Promise<string> {
     // "previous" is the same strict order reversed, so the nearest earlier row comes first and ties never repeat or skip.
     const [newer, older, before, order] = direction === 'next' ? ['<', '<', '>', 'sortDay DESC,sortTime DESC,id ASC'] : ['>', '>', '<', 'sortDay ASC,sortTime ASC,id DESC'];
     // Materialize only date facts after cheap candidate checks, avoiding repeated correlated date work during sort.
@@ -276,17 +286,34 @@ export class ImportStore {
     ), ordered AS (
       SELECT *, CASE WHEN dateConflict=0 THEN coalesce(day,'') ELSE '' END AS sortDay,
         CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts
-    ) SELECT json_group_array(json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
+    ) SELECT json_group_array(${limit === null ? "json_array(id,CASE WHEN dateConflict=1 THEN 'conflict' ELSE coalesce(day,substr(instant,1,10),'unknown') END)" : `json_object('id',id,'day',day,'instant',instant,'dateConflict',dateConflict,
       'favorite',EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=page.id),
       'photos',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='photo'),
       'videos',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='video'),
-      'overlays',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='overlay'),'sortDay',sortDay,'sortTime',sortTime)) AS data FROM (
+      'overlays',(SELECT count(*) FROM memory_objects WHERE memory_id=page.id AND role='overlay'),'sortDay',sortDay,'sortTime',sortTime)`}) AS data FROM (
       SELECT * FROM ordered WHERE (?1=1 OR sortDay${newer}?2 OR (sortDay=?3 AND sortTime${older}?4) OR (sortDay=?5 AND sortTime=?6 AND id${before}?7))
         AND (?12='' OR (dateConflict=0 AND substr(day,1,7)=?13))
         AND (?14='' OR (dateConflict=0 AND substr(day,6,5)=substr(?15,6,5) AND substr(day,1,4)<substr(?16,1,4)))
       ORDER BY ${order} LIMIT ?17
-    ) AS page`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '', limit);
-    return JSON.parse(row?.data ?? '[]') as ChronologicalRow[];
+    ) AS page`, anchor ? 0 : 1, anchor?.day ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.day ?? '', anchor?.time ?? '', anchor?.id ?? '', filters.media, filters.media, filters.media, filters.favorites ? 1 : 0, filters.month, filters.month, filters.onThisDay ?? '', filters.onThisDay ?? '', filters.onThisDay ?? '', limit ?? -1);
+    return row?.data ?? '[]';
+  }
+  async chronologicalRows(ids: readonly string[]): Promise<ChronologicalRow[]> {
+    check(ids.length <= 100 && new Set(ids).size === ids.length);
+    if (!ids.length) return [];
+    return this.db.getAllAsync<ChronologicalRow>(`WITH facts AS (
+      SELECT m.id,
+        (SELECT min(day) FROM library_dates WHERE memory_id=m.id) AS day,
+        (SELECT min(value) FROM library_dates WHERE memory_id=m.id AND kind='instant') AS instant,
+        (SELECT CASE WHEN count(DISTINCT day)>1 OR count(DISTINCT CASE WHEN kind='instant' THEN value END)>1 THEN 1 ELSE 0 END FROM library_dates WHERE memory_id=m.id) AS dateConflict,
+        EXISTS(SELECT 1 FROM library_favorites WHERE memory_id=m.id) AS favorite,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='photo') AS photos,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='video') AS videos,
+        (SELECT count(*) FROM memory_objects WHERE memory_id=m.id AND role='overlay') AS overlays
+      FROM memories m WHERE m.id IN (SELECT value FROM json_each(?))
+        AND EXISTS(SELECT 1 FROM memory_objects WHERE memory_id=m.id AND role!='overlay')
+    ) SELECT *,CASE WHEN dateConflict=0 THEN coalesce(day,'') ELSE '' END AS sortDay,
+      CASE WHEN dateConflict=0 THEN coalesce(instant,'') ELSE '' END AS sortTime FROM facts`, JSON.stringify(ids));
   }
   async setFavorite(id: string, favorite: boolean): Promise<void> {
     check(typeof favorite === 'boolean');
